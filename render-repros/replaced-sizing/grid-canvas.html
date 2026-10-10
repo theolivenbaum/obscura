@@ -1,0 +1,38 @@
+<!doctype html><html><head><meta charset=utf-8><style>html, body { margin: 0; }
+body { font: 16px/20px 'Liberation Sans', Arial, sans-serif; }
+.w { margin: 0 0 4px; background: #f1f3f5; }
+img, svg, canvas, video, iframe, input { background: #a5d8ff; }</style></head><body>
+<div class=w id=canvas-auto-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-auto  style=""></canvas></div>
+<div class=w id=canvas-w-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-w  style="width:120px"></canvas></div>
+<div class=w id=canvas-h-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-h  style="height:24px"></canvas></div>
+<div class=w id=canvas-wh-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-wh  style="width:120px;height:24px"></canvas></div>
+<div class=w id=canvas-wh-contain-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-wh-contain  style="width:120px;height:24px;object-fit:contain"></canvas></div>
+<div class=w id=canvas-wh-cover-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-wh-cover  style="width:120px;height:24px;object-fit:cover"></canvas></div>
+<div class=w id=canvas-wpct-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-wpct  style="width:50%"></canvas></div>
+<div class=w id=canvas-hpct-w style="width:400px;display:grid;justify-items:start;align-items:start;height:100px"><canvas id=canvas-hpct  style="height:50%"></canvas></div>
+<div class=w id=canvas-hpct-auto-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-hpct-auto  style="height:50%"></canvas></div>
+<div class=w id=canvas-wpct-h-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-wpct-h  style="width:50%;height:24px"></canvas></div>
+<div class=w id=canvas-wh-border-box-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-wh-border-box  style="width:120px;height:24px;box-sizing:border-box;padding:4px;border:2px solid #333"></canvas></div>
+<div class=w id=canvas-w-padding-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-w-padding  style="width:120px;padding:4px;border:2px solid #333"></canvas></div>
+<div class=w id=canvas-h-border-box-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-h-border-box  style="height:24px;box-sizing:border-box;padding:3px"></canvas></div>
+<div class=w id=canvas-maxw-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-maxw  style="max-width:100px"></canvas></div>
+<div class=w id=canvas-maxh-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-maxh  style="max-height:20px"></canvas></div>
+<div class=w id=canvas-minw-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-minw  style="min-width:200px"></canvas></div>
+<div class=w id=canvas-minh-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-minh  style="min-height:50px"></canvas></div>
+<div class=w id=canvas-w-maxh-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-w-maxh  style="width:120px;max-height:20px"></canvas></div>
+<div class=w id=canvas-h-maxw-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-h-maxw  style="height:24px;max-width:80px"></canvas></div>
+<div class=w id=canvas-wh-maxh-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-wh-maxh  style="width:120px;height:24px;max-height:20px"></canvas></div>
+<div class=w id=canvas-wh-minw-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-wh-minw  style="width:120px;height:24px;min-width:200px"></canvas></div>
+<div class=w id=canvas-w-maxw-pct-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-w-maxw-pct  style="width:600px;max-width:100%"></canvas></div>
+<div class=w id=canvas-maxw-pct-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-maxw-pct  style="max-width:50%"></canvas></div>
+<div class=w id=canvas-minw-maxh-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-minw-maxh  style="min-width:200px;max-height:20px"></canvas></div>
+<div class=w id=canvas-ar-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-ar  style="aspect-ratio:2"></canvas></div>
+<div class=w id=canvas-ar-w-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-ar-w  style="aspect-ratio:2;width:120px"></canvas></div>
+<div class=w id=canvas-ar-wh-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-ar-wh  style="aspect-ratio:2;width:120px;height:24px"></canvas></div>
+<div class=w id=canvas-ar-auto-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-ar-auto  style="aspect-ratio:auto 1;width:120px"></canvas></div>
+<div class=w id=canvas-w-hauto-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-w-hauto  style="width:120px;height:auto"></canvas></div>
+<div class=w id=canvas-attrs-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-attrs width=120 height=24 style=""></canvas></div>
+<div class=w id=canvas-attr-w-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-attr-w width=120 style=""></canvas></div>
+<div class=w id=canvas-attrs-css-w-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-attrs-css-w width=120 height=24 style="width:60px"></canvas></div>
+<div class=w id=canvas-attrs-css-hauto-w style="width:400px;display:grid;justify-items:start;align-items:start"><canvas id=canvas-attrs-css-hauto width=120 height=24 style="width:60px;height:auto"></canvas></div>
+</body></html>

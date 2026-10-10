@@ -136,30 +136,150 @@ public sealed partial class Page
             throw PageException.Network(NavigationPolicy.LocalResourceRefusal(url));
         }
 
-        TimeSpan navTimeout = NavigationTimeout;
-        ulong navTimeoutMs = (ulong)Math.Max(0.0, navTimeout.TotalMilliseconds);
-
-        using var deadline = new CancellationTokenSource(navTimeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-            deadline.Token, cancellationToken);
         ResourceRequest profile = NavigationProfile(initiator);
         if (initiator is null && clientReferrer is not null)
         {
             profile = profile with { Referrer = clientReferrer.Url, ReferrerPolicy = clientReferrer.Policy };
         }
         string referrer = DocumentReferrer(profile, url);
+        await RunWithNavigationDeadlineAsync(
+            token => NavigateWithWaitPostInnerAsync(url, waitUntil, method, body, referrer, profile, token),
+            cancellationToken).ConfigureAwait(false);
+        PushHistory(UrlString());
+    }
+
+    /// <summary>
+    /// Run a navigation under the page's end-to-end deadline
+    /// (<see cref="NavigationTimeout"/>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A deadline that expires before the document commits fails the navigation, as it
+    /// always did: nothing answered, or the answer never finished arriving. One that
+    /// expires after the commit no longer does. Chromium's <c>Page.navigate</c> answers
+    /// once the navigation commits, and a document whose <c>load</c> is late is still the
+    /// page: the client's own <c>waitUntil</c> and timeout decide what to make of it.
+    /// Failing it here turned every slow, script-heavy site into a protocol error with its
+    /// DOM already built. The page is kept as it stood, <see cref="LoadAbandoned"/> is
+    /// set, and <see cref="Readiness"/> says how far the document got. The work still
+    /// pending (scripts, resource warmup, frames) is abandoned rather than resumed, so the
+    /// deadline still bounds how long the navigation holds the page.
+    /// </para>
+    /// <para>
+    /// The deadline is unconditional. Whatever the navigation awaits, the caller gets the
+    /// page back <see cref="NavigationBackstopGrace"/> after it: a wait that never observes
+    /// the token (a lost completion, an await on something nothing will finish) is left
+    /// behind with its token cancelled and the page reported as at the deadline. And an
+    /// <see cref="OperationCanceledException"/> that is not the caller's own (a script
+    /// watchdog's interrupt surfacing as ClearScript's <c>ScriptInterruptedException</c>)
+    /// is read the same way as the deadline instead of escaping: it used to reach the CDP
+    /// connection processor, which took it for its own shutdown and stopped serving the
+    /// connection, so <c>Page.navigate</c> and everything after it went unanswered.
+    /// </para>
+    /// <para>
+    /// Deviation from crates/obscura-browser/src/page.rs, which fails the navigation
+    /// whenever its deadline expires. A caller's own cancellation still propagates.
+    /// </para>
+    /// </remarks>
+    internal async Task RunWithNavigationDeadlineAsync(
+        Func<CancellationToken, Task> navigate,
+        CancellationToken cancellationToken)
+    {
+        TimeSpan navTimeout = NavigationTimeout;
+        ulong navTimeoutMs = (ulong)Math.Max(0.0, navTimeout.TotalMilliseconds);
+        string deadlineMessage =
+            $"navigation exceeded {navTimeoutMs.ToString(CultureInfo.InvariantCulture)}ms deadline";
+
+        var deadline = new CancellationTokenSource(navTimeout);
+        var linked = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token, cancellationToken);
+        LoadAbandoned = false;
+        Task navigation;
         try
         {
-            await NavigateWithWaitPostInnerAsync(url, waitUntil, method, body, referrer, profile, linked.Token)
-                .ConfigureAwait(false);
+            navigation = navigate(linked.Token);
+        }
+        catch
+        {
+            linked.Dispose();
+            deadline.Dispose();
+            throw;
+        }
+
+        try
+        {
+            await navigation.WaitAsync(BackstopAfter(navTimeout)).ConfigureAwait(false);
+        }
+        catch (TimeoutException) when (!navigation.IsCompleted)
+        {
+            // The navigation is stuck on something that ignores its token. Leave it behind
+            // (its token is cancelled, so whatever it awaits next throws) and keep the
+            // sources alive for it rather than disposing them under it.
+            _ = navigation.ContinueWith(
+                static task => _ = task.Exception,
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            await linked.CancelAsync().ConfigureAwait(false);
+            EndAtDeadline(cancellationToken, deadlineMessage);
+            return;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // The deadline, or an interrupt from inside the page that surfaced as a
+            // cancellation: either way the navigation stopped where it stood.
+            bool atDeadline = deadline.IsCancellationRequested;
+            linked.Dispose();
+            deadline.Dispose();
+            EndAtDeadline(cancellationToken, atDeadline ? deadlineMessage : "navigation was interrupted");
+            return;
         }
         catch (OperationCanceledException) when (deadline.IsCancellationRequested)
         {
+            linked.Dispose();
+            deadline.Dispose();
             Lifecycle = LifecycleState.Failed;
-            throw PageException.Network(
-                $"navigation exceeded {navTimeoutMs.ToString(CultureInfo.InvariantCulture)}ms deadline");
+            throw PageException.Network(deadlineMessage);
         }
-        PushHistory(UrlString());
+        catch
+        {
+            linked.Dispose();
+            deadline.Dispose();
+            throw;
+        }
+
+        linked.Dispose();
+        deadline.Dispose();
+    }
+
+    /// <summary>
+    /// How long past its deadline a navigation that has not stopped is waited for before
+    /// the caller gets the page back regardless (<see cref="RunWithNavigationDeadlineAsync"/>).
+    /// Long enough for a cooperative stop (a script interrupted mid-op, a layout pass
+    /// checking its token), short enough that a lost completion cannot hold a CDP
+    /// connection or the CLI.
+    /// </summary>
+    internal TimeSpan NavigationBackstopGrace { get; set; } = TimeSpan.FromSeconds(5);
+
+    private TimeSpan BackstopAfter(TimeSpan navTimeout)
+    {
+        // Task.WaitAsync takes at most uint.MaxValue - 1 ms.
+        double ms = navTimeout.TotalMilliseconds + NavigationBackstopGrace.TotalMilliseconds;
+        return ms >= uint.MaxValue - 1.0 ? Timeout.InfiniteTimeSpan : TimeSpan.FromMilliseconds(ms);
+    }
+
+    /// <summary>
+    /// A navigation stopped by its deadline (or an interrupt) before it finished: a page
+    /// that committed is kept as it stood, one that did not fails.
+    /// </summary>
+    private void EndAtDeadline(CancellationToken cancellationToken, string message)
+    {
+        if (cancellationToken.IsCancellationRequested || Readiness < DocumentReadiness.Committed)
+        {
+            Lifecycle = LifecycleState.Failed;
+            throw PageException.Network(message);
+        }
+
+        LoadAbandoned = true;
     }
 
     private async Task NavigateWithWaitPostInnerAsync(
@@ -179,14 +299,25 @@ public sealed partial class Page
         int chainLimit = NavigationChainLimit;
         for (int chain = 0; chain < chainLimit; chain++)
         {
-            await NavigateSingleAsync(
-                currentUrl,
-                waitUntil,
-                currentMethod,
-                currentBody,
-                documentReferrer,
-                profile,
-                cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await NavigateSingleAsync(
+                    currentUrl,
+                    waitUntil,
+                    currentMethod,
+                    currentBody,
+                    documentReferrer,
+                    profile,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                // A navigation that failed before its document started leaves its runtime unused.
+                DiscardPrewarmedRuntime();
+            }
+            // Whatever the navigation waited for, the document has dispatched its load: the
+            // script phase dispatches it even when the caller only waits for DOMContentLoaded.
+            ReachReadiness(DocumentReadiness.Loaded);
 
             if (TakePendingNavigation() is not { } next)
             {
@@ -240,6 +371,7 @@ public sealed partial class Page
         // The previous document's background render-resource loads end with it.
         RetireRenderResources();
         Lifecycle = LifecycleState.Loading;
+        Readiness = DocumentReadiness.None;
         Referrer = referrer;
         ReferrerPolicyHeader = null;
         Url = url;
@@ -307,6 +439,11 @@ public sealed partial class Page
             return;
         }
 
+        if (url.Scheme is "http" or "https")
+        {
+            PrewarmRuntime(url.Href);
+        }
+
         Response response;
         try
         {
@@ -361,19 +498,31 @@ public sealed partial class Page
         // Network.getResponseBody returns intact bytes. A UTF-8-lossy text store
         // corrupts them. Text-like types stay as text.
         bool mainIsBinary = !PageHelpers.IsTextLikeContentType(response.ContentType());
-        RecordNetworkEventWithBody(
-            url.Href,
-            "GET",
-            "Document",
+        string documentUrl = url.Href;
+        if (response.RedirectedFrom.Count != 0)
+        {
+            UrlRecord finalUrl = NetUrl.To(response.Url);
+            Url = finalUrl;
+            documentUrl = finalUrl.Href;
+        }
+
+        // Deviation from crates/obscura-browser/src/page.rs, which records the document
+        // under the URL it asked for with no trace of the redirects. The event carries the
+        // URL the response came from and each hop, so the CDP layer can report the chain
+        // the way Chromium does (one request id, a redirectResponse per hop) and a
+        // client's page.goto() resolves to the final response.
+        List<NetworkRedirect> redirects = new(response.RedirectChain.Count);
+        foreach (RedirectHop hop in response.RedirectChain)
+        {
+            redirects.Add(new NetworkRedirect(NetUrl.To(hop.Url).Href, hop.Status, hop.Headers));
+        }
+        RecordDocumentNetworkEvent(
+            documentUrl,
             response.Status,
             response.Headers,
             response.Body,
-            mainIsBinary);
-
-        if (response.RedirectedFrom.Count != 0)
-        {
-            Url = NetUrl.To(response.Url);
-        }
+            mainIsBinary,
+            redirects);
 
         ReferrerPolicyHeader = ReferrerPolicies.ParseHeader(response.Header("referrer-policy"));
 
@@ -383,88 +532,10 @@ public sealed partial class Page
         (string bodyText, string encodingName) =
             ContentEncoding.DecodeResponseWithName(response.Body, response.ContentType());
         Encoding = encodingName;
-        DomTree dom = HtmlParsing.ParseHtml(bodyText);
-
-        Title = dom.TryQuerySelector("title", out NodeId? titleId, out _) && titleId is { } id
-            ? dom.TextContent(id)
-            : string.Empty;
-
-        Dom = dom;
-        InitJs();
-        var authorStylesheets = await FetchStylesheetsAsync(cancellationToken).ConfigureAwait(false);
-
-        // Upstream 04418a5: fetched CSS goes into the DomTree store with its origin-clean bit,
-        // and nowhere page script can read it. The globalThis.__obscura_css global that used to
-        // hold every fetched sheet, cross-origin ones included, is gone.
-        if (authorStylesheets.Count != 0 && Js is { } cssJs)
-        {
-            // DEVIATION from crates/obscura-browser, which runs one script per sheet to insert
-            // a synthetic <style>. Chromium 141 inserts no element, so the bytes are recorded
-            // against the <link> (or, for an @import, against the importing <style>) and the
-            // renderer reads them from there. Several @import rules in one <style> contribute
-            // in source order, so they are appended to one entry, which stays origin-clean only
-            // if all of them are. See "Known deviations" in todo.md.
-            List<(int LinkIndex, string ResponseUrl)> linked = [];
-            cssJs.WithDom(dom =>
-            {
-                foreach ((AuthorStylesheetTarget target, string css, bool originClean, string responseUrl) in authorStylesheets)
-                {
-                    switch (target)
-                    {
-                        case AuthorStylesheetTarget.Linked link:
-                            dom.AppendExternalStylesheet(link.Node, css, originClean);
-                            linked.Add((link.LinkIndex, responseUrl));
-                            break;
-                        case AuthorStylesheetTarget.InlineImport inline:
-                            dom.AppendExternalStylesheet(inline.Node, css, originClean);
-                            break;
-                    }
-                }
-
-                return 0;
-            });
-
-            // An @import needs no script: it owns no CSSOM sheet and fires no event. A <link>
-            // does both, and its load handler may still change what applies.
-            foreach ((int linkIndex, string responseUrl) in linked)
-            {
-                TryExecuteHost(
-                    cssJs,
-                    "<fetch_stylesheets>",
-                    PageHelpers.LinkedStylesheetLoadScript(linkIndex, responseUrl));
-            }
-        }
-
-        // DEVIATION from upstream 04418a5, which deletes the page-visible
-        // __obscura_registerLinkedStylesheet bridge here. The registration is a host
-        // helper (HostScript), so there is no global to remove.
-
-        _documentTimelineOrigin = Stopwatch.GetTimestamp();
-        Js?.ResetAnimationTimeline();
-        if (Js is { } iframeJs)
-        {
-            // DEVIATION from crates/obscura-browser, which loads each iframe[src] through the
-            // page-visible Element.prototype._loadIframeSrc: the shim's own loader, which also
-            // gives a srcdoc frame its about:srcdoc document instead of loading src.
-            TryExecuteHost(iframeJs, "<iframe-load>", "__obscura_host.loadDocumentFrames();");
-        }
-
-        // Scripts can synchronously flush style/layout through getComputedStyle(),
-        // geometry, ResizeObserver or IntersectionObserver. Seed their image/font
-        // dependencies concurrently through the page transport first. Otherwise the
-        // first CSSOM read falls into the renderer's synchronous resource loader and
-        // serial network latency pins V8. Deliberately bounded: navigation should not
-        // wait indefinitely for decorative resources.
-        await PrepareScreenshotResourcesAsync(
-            PageHelpers.EnvUlong("POCKETCALCULATOR_RENDER_RESOURCE_WARMUP_MS", 1_000),
-            cancellationToken).ConfigureAwait(false);
-
-        // Spec: DOMContentLoaded fires AFTER parser-blocking scripts run, not before.
-        // Skipping ExecuteScripts on the DCL path silently dropped every inline
-        // <script>: form listeners never registered, frameworks never bootstrapped,
-        // click handlers were no-ops. Scripts run regardless of waitUntil and DCL
-        // means "DOM parsed AND scripts executed".
-        await ExecuteScriptsAsync(cancellationToken).ConfigureAwait(false);
+        // Parse with the scripts running as the parser reaches them, through the load event:
+        // see LoadDocumentAsync. The realm starts (InitJs) and the navigation commits once the
+        // parser reaches the first script.
+        await LoadDocumentAsync(bodyText, cancellationToken).ConfigureAwait(false);
 
         // Page scripts and their bounded post-script event-loop pass can create
         // responsive images, inline styles and @font-face rules that did not exist
@@ -585,13 +656,24 @@ public sealed partial class Page
         const int Rounds = 8;
         const ulong RoundMs = 50;
 
+        // DEVIATION from crates/obscura-browser/src/page.rs build_document_frames, which ends
+        // at the first 50 ms round in which no frame moved. A frame document still on the
+        // wire after 50 ms (a loaded host, a slow server) then never got a realm during the
+        // navigation, and nothing loaded its scripts until something else pumped the page.
+        // Chromium's load event waits for the frame. A round spent waiting on a frame
+        // document load does not count as one of the eight, and the wait is bounded so a
+        // hanging frame server cannot hold the navigation past this grace.
+        const double FrameDocumentGraceMs = 5_000;
+        var started = Stopwatch.GetTimestamp();
+        bool waitedOnLoad = false;
+
         bool hasIframe = WithDom(dom => dom.TryQuerySelector("iframe", out NodeId? found, out _) && found is not null);
         if (!hasIframe)
         {
             return;
         }
 
-        for (int round = 0; round < Rounds; round++)
+        for (int round = 0; round < Rounds && !cancellationToken.IsCancellationRequested;)
         {
             if (Js is { } js)
             {
@@ -604,10 +686,21 @@ public sealed partial class Page
                     // A page-local error does not stop frame construction.
                 }
             }
-            if (!await AdvanceFramesAsync(cancellationToken).ConfigureAwait(false))
+            if (await AdvanceFramesAsync(cancellationToken).ConfigureAwait(false))
+            {
+                round++;
+                waitedOnLoad = false;
+                continue;
+            }
+            // One more round after the last load answers: its continuation, which queues
+            // the frame, runs on the next pump.
+            bool loading = Js?.State.FrameDocumentLoadsInFlight.Value > 0;
+            if (!(loading || waitedOnLoad)
+                || Stopwatch.GetElapsedTime(started).TotalMilliseconds >= FrameDocumentGraceMs)
             {
                 break;
             }
+            waitedOnLoad = loading;
         }
     }
 
@@ -732,11 +825,13 @@ public sealed partial class Page
     /// delivered and the owner should offer another turn after servicing any
     /// higher-priority automation commands.
     /// </remarks>
-    public async Task<bool> RunAutonomousEventLoopTurnAsync(CancellationToken cancellationToken = default)
+    public async Task<bool> RunAutonomousEventLoopTurnAsync(
+        CancellationToken cancellationToken = default,
+        Func<bool>? yieldTo = null)
     {
         QueuePendingRenderResources();
         bool reachedIdle = Js is { } js
-            ? await js.RunAutonomousEventLoopTurnAsync().ConfigureAwait(false)
+            ? await js.RunAutonomousEventLoopTurnAsync(yieldTo).ConfigureAwait(false)
             : true;
         // Dynamic iframe fetches finish on the page event loop, but their realms must
         // be built by Page between turns. Keep the autonomous CDP pump on the same
@@ -906,22 +1001,9 @@ public sealed partial class Page
 
         ResourceRequest profile = NavigationProfile(pending);
         string sourceUrl = DocumentReferrer(profile, url);
-        TimeSpan navTimeout = NavigationTimeout;
-        ulong navTimeoutMs = (ulong)Math.Max(0.0, navTimeout.TotalMilliseconds);
-        using var deadline = new CancellationTokenSource(navTimeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-            deadline.Token, cancellationToken);
-        try
-        {
-            await NavigateWithWaitPostInnerAsync(url, WaitUntil.Load, method, body, sourceUrl, profile, linked.Token)
-                .ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
-        {
-            Lifecycle = LifecycleState.Failed;
-            throw PageException.Network(
-                $"navigation exceeded {navTimeoutMs.ToString(CultureInfo.InvariantCulture)}ms deadline");
-        }
+        await RunWithNavigationDeadlineAsync(
+            token => NavigateWithWaitPostInnerAsync(url, WaitUntil.Load, method, body, sourceUrl, profile, token),
+            cancellationToken).ConfigureAwait(false);
         PushHistory(UrlString());
         return PageNavigationOutcome.CrossDocument;
     }

@@ -116,7 +116,7 @@ internal static class CssSupportsOracle
     {
         "display" => lower is "none" or "flex" or "inline-flex" or "inline" or "inline-block"
             or "grid" or "inline-grid" or "block" or "flow-root" or "table" or "inline-table"
-            or "-webkit-box" or "-webkit-inline-box" or "contents",
+            or "-webkit-box" or "-webkit-inline-box" or "contents" or "list-item",
         "direction" => lower is "ltr" or "rtl",
         "position" => lower is "static" or "relative" or "absolute" or "fixed" or "sticky",
         "box-sizing" => lower is "content-box" or "border-box",
@@ -154,7 +154,7 @@ internal static class CssSupportsOracle
         "text-decoration" or "text-decoration-line" =>
             lower.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).All(token => token is "none" or "underline"),
         "font-style" => lower is "normal" or "italic" || lower.StartsWith("oblique", StringComparison.Ordinal),
-        "font-family" => value.Trim().Length != 0,
+        "font-family" => value.AsSpan().Trim().Length != 0,
         "cursor" => PocketCalculator.Render.ComputedStyle.IsCursorKeyword(lower),
         "pointer-events" => PocketCalculator.Render.ComputedStyle.IsPointerEventsKeyword(lower),
         "clear" => lower is "none" or "left" or "right" or "both" or "inline-start" or "inline-end",
@@ -189,7 +189,7 @@ internal static class CssSupportsOracle
             lower == "normal" || Dimension(value, auto: false),
         "line-height" => lower == "normal" || FiniteNumber(value) || Dimension(value, auto: false),
         "border-spacing" => Dimensions(value, auto: false, max: 2),
-        "animation" or "animation-name" => value.Trim().Length != 0,
+        "animation" or "animation-name" => value.AsSpan().Trim().Length != 0,
         "transform" => CssText.EqualsAscii(value, "none") || ComputedStyle.ParseTransformOps(value) is not null,
         "translate" => lower == "none" || Dimensions(value, auto: false, max: 3),
         "rotate" => lower == "none" || ComputedStyle.AngleDegrees(value) is not null,
@@ -626,7 +626,7 @@ internal static class CssSupportsOracle
         "scrollbar-gutter", "visibility", "opacity", "animation", "animation-name",
         "animation-duration", "animation-delay", "animation-fill-mode",
         "animation-iteration-count", "animation-direction", "animation-play-state", "z-index",
-        "clear", "vertical-align", "list-style", "list-style-type", "gap", "grid-gap",
+        "clear", "vertical-align", "list-style", "list-style-type", "list-style-position", "gap", "grid-gap",
         "row-gap", "grid-row-gap", "column-gap", "grid-column-gap", "-webkit-column-gap",
         "column-count", "-webkit-column-count", "columns", "-webkit-columns", "break-inside",
         "-webkit-column-break-inside", "border-spacing", "border-collapse", "table-layout",

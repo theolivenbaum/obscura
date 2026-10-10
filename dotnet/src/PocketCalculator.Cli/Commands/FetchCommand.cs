@@ -171,8 +171,11 @@ public static class FetchCommand
 
         try
         {
-            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSecs));
-            await page.NavigateWithWaitAsync(urlStr, waitCondition, deadline.Token).ConfigureAwait(false);
+            // The page's own deadline (ConfigureFetchNavigationTimeout) is the timeout: a
+            // second token of the same length raced it, and when it won, a page that had
+            // committed failed instead of being read as it stood (Page.LoadAbandoned).
+            // HardDeadline remains the absolute backstop.
+            await page.NavigateWithWaitAsync(urlStr, waitCondition).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -181,6 +184,14 @@ public static class FetchCommand
         catch (PageException error)
         {
             throw new CliException($"Failed to navigate to {urlStr}: {error.Message}");
+        }
+
+        if (page.LoadAbandoned)
+        {
+            // Not quiet-gated: the output is a partial page, which the caller should know
+            // even when it asked for no progress lines.
+            Console.Error.WriteLine(
+                $"Warning: {urlStr} did not finish loading within {timeoutSecs}s; reading the page as it stood ({page.Readiness})");
         }
 
         if (!quiet)

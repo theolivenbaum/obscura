@@ -179,6 +179,16 @@ internal sealed class AlgoConstants
     /// <summary>The content-box size of the node being laid out (if known).</summary>
     public Size<float?> NodeInnerSize;
 
+    /// <summary>
+    /// The width the items' percentages resolve against when it is not the container's own
+    /// (<see cref="IFlexboxContainerStyle.PercentBasisFromContainingBlock"/>); null otherwise.
+    /// </summary>
+    public float? ChildPercentBasisWidth;
+
+    /// <summary>What the items' percentages resolve against.</summary>
+    public Size<float?> ChildPercentBasis =>
+        ChildPercentBasisWidth is { } width ? new Size<float?>(width, NodeInnerSize.Height) : NodeInnerSize;
+
     /// <summary>The size of the virtual container containing the flex items.</summary>
     public Size<float> ContainerSize;
 
@@ -244,11 +254,19 @@ public static class FlexboxLayout
 
         var minSize = style.MinSize
             .MaybeResolve(parentSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                style.Size.MaybeResolve(parentSize, calc),
+                style.MaxSize.MaybeResolve(parentSize, calc),
+                isMinimum: true)
             .MaybeAdd(boxSizingAdjustment);
         var maxSize = style.MaxSize
             .MaybeResolve(parentSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                style.Size.MaybeResolve(parentSize, calc),
+                style.MinSize.MaybeResolve(parentSize, calc),
+                isMinimum: false)
             .MaybeAdd(boxSizingAdjustment);
         var clampedStyleSize = inputs.SizingMode == SizingMode.InherentSize
             ? style.Size
@@ -484,11 +502,19 @@ public static class FlexboxLayout
             IsWrapReverse = isWrapReverse,
             MinSize = style.MinSize
                 .MaybeResolve(parentSize, calc)
-                .MaybeApplyAspectRatio(aspectRatio)
+                .TransferLimitThroughAspectRatio(
+                    aspectRatio,
+                    style.Size.MaybeResolve(parentSize, calc),
+                    style.MaxSize.MaybeResolve(parentSize, calc),
+                    isMinimum: true)
                 .MaybeAdd(boxSizingAdjustment),
             MaxSize = style.MaxSize
                 .MaybeResolve(parentSize, calc)
-                .MaybeApplyAspectRatio(aspectRatio)
+                .TransferLimitThroughAspectRatio(
+                    aspectRatio,
+                    style.Size.MaybeResolve(parentSize, calc),
+                    style.MinSize.MaybeResolve(parentSize, calc),
+                    isMinimum: false)
                 .MaybeAdd(boxSizingAdjustment),
             Margin = margin,
             Border = border,
@@ -500,6 +526,12 @@ public static class FlexboxLayout
             JustifyContent = justifyContent,
             NodeOuterSize = nodeOuterSize,
             NodeInnerSize = nodeInnerSize,
+            // DEVIATION from vendor/taffy/src/compute/flexbox.rs, where items' percentages are
+            // always of the container. The DOM builder's stand-in for a line of inline-blocks
+            // beside a float is narrowed to the space the float leaves, but a percentage on an
+            // inline-block is of the block that holds the line (Chromium 141: wikipedia.org's
+            // 65% `.other-projects` beside its 35% float is 815px, not 65% of the 815px left).
+            ChildPercentBasisWidth = style.PercentBasisFromContainingBlock ? parentSize.Width : null,
             ContainerSize = GeometryExtensions.SizeZero,
             InnerContainerSize = GeometryExtensions.SizeZero,
         };
@@ -533,26 +565,28 @@ public static class FlexboxLayout
 
             float? aspectRatio = childStyle.AspectRatio;
             var rawSize = childStyle.Size;
-            var padding = childStyle.Padding.ResolveOrZero(constants.NodeInnerSize.Width, calc);
-            var border = childStyle.Border.ResolveOrZero(constants.NodeInnerSize.Width, calc);
+            var percentBasis = constants.ChildPercentBasis;
+            var padding = childStyle.Padding.ResolveOrZero(percentBasis.Width, calc);
+            var border = childStyle.Border.ResolveOrZero(percentBasis.Width, calc);
             var pbSum = padding.Add(border).SumAxes();
             var boxSizingAdjustment =
                 childStyle.BoxSizing == BoxSizing.ContentBox ? pbSum : GeometryExtensions.SizeZero;
             var aspectRatioAdjustment =
                 childStyle.AspectRatioUsesContentBox ? pbSum : boxSizingAdjustment;
 
-            var size = MaybeApplyPreferredAspectRatio(
-                rawSize.MaybeResolve(constants.NodeInnerSize, calc).MaybeAdd(boxSizingAdjustment),
-                aspectRatio,
-                aspectRatioAdjustment);
-            var minSize = MaybeApplyPreferredAspectRatio(
-                childStyle.MinSize.MaybeResolve(constants.NodeInnerSize, calc).MaybeAdd(boxSizingAdjustment),
-                aspectRatio,
-                aspectRatioAdjustment);
-            var maxSize = MaybeApplyPreferredAspectRatio(
-                childStyle.MaxSize.MaybeResolve(constants.NodeInnerSize, calc).MaybeAdd(boxSizingAdjustment),
-                aspectRatio,
-                aspectRatioAdjustment);
+            var resolvedSize = rawSize.MaybeResolve(percentBasis, calc).MaybeAdd(boxSizingAdjustment);
+            var resolvedMinSize = childStyle.MinSize.MaybeResolve(percentBasis, calc).MaybeAdd(boxSizingAdjustment);
+            var resolvedMaxSize = childStyle.MaxSize.MaybeResolve(percentBasis, calc).MaybeAdd(boxSizingAdjustment);
+            var size = MaybeApplyPreferredAspectRatio(resolvedSize, aspectRatio, aspectRatioAdjustment);
+
+            // DEVIATION from vendor/taffy: a min or max size transfers through the ratio only
+            // into an axis whose preferred size is auto, capped by that axis's own limit
+            // (GeometryExtensions.TransferLimitThroughAspectRatio). A flex item image with
+            // `width:120px; height:24px; max-height:20px` was 83x20; Chromium 141: 120x20.
+            var minSize = resolvedMinSize.TransferLimitThroughAspectRatio(
+                aspectRatio, resolvedSize, resolvedMaxSize, isMinimum: true, aspectRatioAdjustment);
+            var maxSize = resolvedMaxSize.TransferLimitThroughAspectRatio(
+                aspectRatio, resolvedSize, resolvedMinSize, isMinimum: false, aspectRatioAdjustment);
 
             items.Add(new FlexItem
             {
@@ -566,8 +600,8 @@ public static class FlexboxLayout
                 CrossSizeIsAuto = rawSize.Cross(constants.Dir).IsAuto,
 
                 Inset = childStyle.Inset.ZipSize(
-                    constants.NodeInnerSize, (p, s) => p.MaybeResolve(s, calc)),
-                Margin = childStyle.Margin.ResolveOrZero(constants.NodeInnerSize.Width, calc),
+                    percentBasis, (p, s) => p.MaybeResolve(s, calc)),
+                Margin = childStyle.Margin.ResolveOrZero(percentBasis.Width, calc),
                 MarginIsAuto = childStyle.Margin.Map(static m => m.IsAuto),
                 Padding = padding,
                 Border = border,
@@ -2057,13 +2091,21 @@ public static class FlexboxLayout
                 .MaybeAdd(boxSizingAdjustment);
             var minSize = childStyle.MinSize
                 .MaybeResolve(insetRelativeSize, calc)
-                .MaybeApplyAspectRatio(aspectRatio)
+                .TransferLimitThroughAspectRatio(
+                    aspectRatio,
+                    childStyle.Size.MaybeResolve(insetRelativeSize, calc),
+                    childStyle.MaxSize.MaybeResolve(insetRelativeSize, calc),
+                    isMinimum: true)
                 .MaybeAdd(boxSizingAdjustment)
                 .Or(paddingBorderSum.AsOptions())
                 .MaybeMax(paddingBorderSum);
             var maxSize = childStyle.MaxSize
                 .MaybeResolve(insetRelativeSize, calc)
-                .MaybeApplyAspectRatio(aspectRatio)
+                .TransferLimitThroughAspectRatio(
+                    aspectRatio,
+                    childStyle.Size.MaybeResolve(insetRelativeSize, calc),
+                    childStyle.MinSize.MaybeResolve(insetRelativeSize, calc),
+                    isMinimum: false)
                 .MaybeAdd(boxSizingAdjustment);
             var knownDimensions = styleSize.MaybeClamp(minSize, maxSize);
 
@@ -2106,25 +2148,14 @@ public static class FlexboxLayout
                 SizingMode.InherentSize,
                 GeometryExtensions.LineFalse);
 
-            var nonAutoMargin = margin.Map(static m => m ?? 0.0f);
-
-            var freeSpace = new Size<float>(
-                constants.ContainerSize.Width - finalSize.Width - nonAutoMargin.HorizontalAxisSum(),
-                constants.ContainerSize.Height - finalSize.Height - nonAutoMargin.VerticalAxisSum())
-                .F32Max(GeometryExtensions.SizeZero);
-
-            // Expand auto margins to fill available space
-            int autoMarginCountWidth = (margin.Left.HasValue ? 0 : 1) + (margin.Right.HasValue ? 0 : 1);
-            float autoMarginWidth = autoMarginCountWidth > 0 ? freeSpace.Width / autoMarginCountWidth : 0.0f;
-            int autoMarginCountHeight = (margin.Top.HasValue ? 0 : 1) + (margin.Bottom.HasValue ? 0 : 1);
-            float autoMarginHeight =
-                autoMarginCountHeight > 0 ? freeSpace.Height / autoMarginCountHeight : 0.0f;
-
-            var resolvedMargin = new Rect<float>(
-                margin.Left ?? autoMarginWidth,
-                margin.Right ?? autoMarginWidth,
-                margin.Top ?? autoMarginHeight,
-                margin.Bottom ?? autoMarginHeight);
+            // DEVIATION from vendor/taffy/src/compute/flexbox.rs, which spreads auto margins
+            // over the container's border box whatever the insets. An abspos box's auto
+            // margins resolve only against two non-auto insets (in the padding box the insets
+            // are measured from) and are 0 otherwise, which is also what a flex container's
+            // static-position alignment takes them as. See BlockLayout.ResolveAbsoluteMargins.
+            var resolvedMargin = BlockLayout.ResolveAbsoluteMargins(
+                margin, left, right, top, bottom, insetRelativeSize, finalSize,
+                constants.LayoutDirection.IsRtl());
 
             // Determine flex-relative insets
             float? startMain = constants.IsRow ? left : top;

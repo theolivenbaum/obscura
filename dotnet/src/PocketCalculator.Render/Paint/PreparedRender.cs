@@ -421,6 +421,18 @@ public sealed partial class PreparedRender
         bool startsViewportFixed = viewportFixed.Contains(id)
             && (DomTraversal.RenderedParent(tree, id) is not { } parent || !viewportFixed.Contains(parent));
         OverflowClip? active = startsViewportFixed ? null : inherited;
+
+        // `clip: rect(...)` clips the box itself too (DomTransforms.ResolveClipRects).
+        if (laid.Styles.TryGetValue(id, out LayoutStyle? clipStyle)
+            && clipStyle.Clip is not null
+            && laid.Rects.TryGetValue(id, out Rect clipBox))
+        {
+            (float X, float Y) authored = laid.Translates.TryGetValue(id, out (float X, float Y) at) ? at : (0f, 0f);
+            (float X, float Y) moved = id.Index < movement.Count ? movement[id.Index] : (0f, 0f);
+            active = OverflowClip.WithClipProperty(
+                active, clipStyle, clipBox, authored.X + moved.X, authored.Y + moved.Y);
+        }
+
         if (id.Index < output.Count)
         {
             output[id.Index] = active?.Clone();
@@ -477,7 +489,8 @@ public sealed partial class PreparedRender
     /// </summary>
     public Rect? DocumentRect(NodeId id)
     {
-        if (!Layout.Rects.TryGetValue(id, out Rect rect))
+        // The unrounded box, as Chromium reports it: paint snaps, CSSOM View does not.
+        if (Layout.PreciseRect(id) is not { } rect)
         {
             // An SVG shape has no CSS box, so CSSOM View answers from the SVG object bounding
             // boxes instead.
@@ -486,6 +499,471 @@ public sealed partial class PreparedRender
 
         return Layout.Transforms.TryGetValue(id, out Affine2 transform) ? transform.MapRect(rect) : rect;
     }
+
+    /// <summary>
+    /// CSSOM View's <c>offsetParent</c> and the four <c>offset*</c> integers, or null when the
+    /// node has no CSS box.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-render, whose shim answers <c>offsetLeft</c>/<c>offsetTop</c> with
+    /// the viewport-relative bounding rect and <c>offsetWidth</c> with its width, so they moved
+    /// with scrolling and transforms and were relative to the wrong box. This follows Blink's
+    /// <c>LayoutBoxModelObject::AdjustedPositionRelativeTo</c>: the border box relative to the
+    /// offset parent's padding edge in untransformed layout space, rounded half away from zero,
+    /// with a static <c>&lt;body&gt;</c> parent measuring from the document origin.
+    /// </remarks>
+    public OffsetMetrics? OffsetMetrics(DomTree tree, NodeId id)
+    {
+        ArgumentNullException.ThrowIfNull(tree);
+        if (Layout.PreciseRect(id) is not { } rect
+            || !Layout.Styles.TryGetValue(id, out LayoutStyle? style))
+        {
+            return null;
+        }
+
+        bool isBody = IsHtmlElement(tree, id, "body");
+        NodeId? offsetParent = null;
+        if (!isBody && !IsHtmlElement(tree, id, "html") && !style.PositionFixed)
+        {
+            bool selfStatic = style.Position is null;
+            for (NodeId? ancestor = DomTraversal.RenderedParent(tree, id);
+                ancestor is { } candidate;
+                ancestor = DomTraversal.RenderedParent(tree, candidate))
+            {
+                if (!Layout.Styles.TryGetValue(candidate, out LayoutStyle? candidateStyle)
+                    || candidateStyle.DisplayContents)
+                {
+                    continue;
+                }
+
+                if (candidateStyle.Position is not null
+                    || candidateStyle.EstablishesPositioningContainingBlock()
+                    || IsHtmlElement(tree, candidate, "body")
+                    || (selfStatic
+                        && (IsHtmlElement(tree, candidate, "table")
+                            || IsHtmlElement(tree, candidate, "td")
+                            || IsHtmlElement(tree, candidate, "th"))))
+                {
+                    offsetParent = candidate;
+                    break;
+                }
+            }
+        }
+
+        float left = rect.X;
+        float top = rect.Y;
+        if (isBody)
+        {
+            left = 0f;
+            top = 0f;
+        }
+        else if (offsetParent is { } parent
+            && Layout.PreciseRect(parent) is { } parentRect
+            && Layout.Styles.TryGetValue(parent, out LayoutStyle? parentStyle))
+        {
+            bool staticBody = IsHtmlElement(tree, parent, "body") && parentStyle.Position is null;
+            if (!staticBody)
+            {
+                left -= parentRect.X;
+                top -= parentRect.Y;
+                if (!IsHtmlElement(tree, parent, "body"))
+                {
+                    left -= parentStyle.UsedBorder.Left;
+                    top -= parentStyle.UsedBorder.Top;
+                }
+            }
+        }
+
+        // Chromium 141 rounds the size on its own, not snapped against the offset's fraction:
+        // a 50.59375px box 10.59375px into its offset parent has offsetWidth 51.
+        return new OffsetMetrics(
+            offsetParent,
+            F32.Round(left),
+            F32.Round(top),
+            F32.Round(rect.Width),
+            F32.Round(rect.Height));
+    }
+
+    /// <summary>Kill switch for an A/B on one binary: <c>POCKETCALCULATOR_NO_RETAINED_READS=1</c>.</summary>
+    internal static bool RetainedReadsDisabled { get; set; } =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_NO_RETAINED_READS") == "1";
+
+    /// <summary>
+    /// Answer whether <paramref name="id"/> generates a box, and if it does its
+    /// <c>offsetParent</c>, from this render while <paramref name="pending"/> mutations have
+    /// not been laid out yet, or return false when they may have changed either.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-render, which lays the document out before answering any read.
+    /// Both answers are functions of the computed styles of the element and its ancestors and
+    /// of the ancestor chain itself, never of geometry: so when no mutation can change the
+    /// computed style of any of them (<see cref="RetainedStylePlanner.OwnStyleDamage"/>, the
+    /// retained planner's own invalidation without the context chains it re-cascades) and the
+    /// chain is still connected, the layout the mutations would produce answers exactly as this
+    /// one does. A box is taken as certain only where it does not depend on content: an element
+    /// hidden by a <c>display: none</c> on the chain has none, and a block-level element that
+    /// had one keeps it. Lazy loaders read <c>offsetParent</c> to skip hidden elements after
+    /// each insertion (nvidia.com: ~75 image components, each read a whole relayout).
+    /// Anything the planner cannot bound, animation damage, container queries and shadow trees
+    /// (whose sheets the planner does not see) fail closed.
+    /// </remarks>
+    public bool TryRetainedOffsetParent(
+        DomTree tree,
+        IReadOnlyList<RetainedStyleMutation> pending,
+        NodeId id,
+        out bool hasBox,
+        out NodeId? offsetParent)
+    {
+        ArgumentNullException.ThrowIfNull(tree);
+        ArgumentNullException.ThrowIfNull(pending);
+        hasBox = false;
+        offsetParent = null;
+        if (RetainedReadsDisabled
+            || tree.HasShadowRoots
+            || Layout.DocumentSheet is not { } sheet
+            || sheet.HasContainerQueries()
+            || tree.GetNode(id)?.IsElement != true)
+        {
+            return false;
+        }
+
+        foreach (RetainedStyleMutation mutation in pending)
+        {
+            if (mutation is RetainedStyleMutation.Animation or RetainedStyleMutation.WaapiAnimation)
+            {
+                return false;
+            }
+        }
+
+        if (RetainedStylePlanner.OwnStyleDamage(tree, sheet, pending) is not { } damaged)
+        {
+            return false;
+        }
+
+        // Walk up to the document. Above the highest node whose style may change, every style is
+        // the one this render has: a `display: none` there hides the element whatever happens
+        // below it, and with no such node at all the whole chain is as it was.
+        bool hidden = false;
+        bool chainDamaged = false;
+        int steps = 0;
+        NodeId current = id;
+        while (true)
+        {
+            if (++steps > tree.SlotCount)
+            {
+                return false;
+            }
+
+            if (damaged.Contains(current))
+            {
+                chainDamaged = true;
+                hidden = false;
+            }
+            else if (!hidden
+                && Layout.Styles.TryGetValue(current, out LayoutStyle? chainStyle)
+                && chainStyle.Display == Display.None
+                && !Layout.Rects.ContainsKey(current)
+                && Layout.PreciseRect(current) is null)
+            {
+                // Only where this render did leave the element out: a `display: none` table row
+                // is still laid out (a deviation of its own from Chromium, which gives it no box).
+                hidden = true;
+            }
+
+            if (current == tree.Document)
+            {
+                break;
+            }
+
+            if (tree.GetNode(current)?.Parent is not { } parent)
+            {
+                // Disconnected by a removal: the next layout has nothing to say about it.
+                return false;
+            }
+
+            current = parent;
+        }
+
+        if (hidden)
+        {
+            return true;
+        }
+
+        if (chainDamaged)
+        {
+            return false;
+        }
+
+        // Table parts and their children are left out: which boxes a table generates depends on
+        // its structure (anonymous rows and cells, a row group that ends up empty), not on style.
+        if (!Layout.Styles.TryGetValue(id, out LayoutStyle? style)
+            || style.DisplayContents
+            || LayoutStyleExtensions.IsInlineLevelBox(style)
+            || IsTablePart(tree, id, style)
+            || (tree.GetNode(id)?.Parent is { } owner
+                && (!Layout.Styles.TryGetValue(owner, out LayoutStyle? ownerStyle) || IsTablePart(tree, owner, ownerStyle)))
+            || OffsetMetrics(tree, id) is not { } metrics)
+        {
+            return false;
+        }
+
+        hasBox = true;
+        offsetParent = metrics.Parent;
+        return true;
+    }
+
+    /// <summary>
+    /// The layout-independent part of <see cref="ComputedStyle(NodeId)"/> for <paramref name="id"/>,
+    /// answered from this render while <paramref name="pending"/> mutations have not been
+    /// restyled yet, or null when they may have changed it (or this render cannot tell).
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-render, whose getComputedStyle() lays the whole document out first,
+    /// as the port did. An element's computed style is a function of the rules that match it and
+    /// of its parent's computed style, so when the retained planner's own invalidation
+    /// (<see cref="RetainedStylePlanner.OwnStyleDamage"/>) reaches neither the element nor any
+    /// ancestor, the next restyle gives the element the style it has here. Properties whose value
+    /// is a used one (<see cref="LayoutDependentComputedProperties"/>) are left out, and named in
+    /// <paramref name="omitted"/>: answering them still needs the layout. Container-query rules
+    /// matching on the chain, table parts (collapsed borders and cell growth come from their
+    /// neighbours), shadow hosts and shadow trees on the chain, and pending resource loads (font
+    /// metrics resolve <c>ch</c> and <c>ex</c>) fail closed. With <paramref name="sampleAdvanced"/>
+    /// the document timeline has moved on since this render was sampled, which is answered only
+    /// for an element with no running animation on its chain (<paramref name="waapiAnimated"/>
+    /// names the Web Animations targets). Ad scripts poll the <c>display</c> and <c>position</c>
+    /// of their slots while the page mutates (weather.com: ~1,100 calls, each a full restyle and
+    /// layout).
+    /// </remarks>
+    public Dictionary<string, string>? TryRetainedComputedStyle(
+        DomTree tree,
+        IReadOnlyList<RetainedStyleMutation> pending,
+        NodeId id,
+        bool sampleAdvanced,
+        Func<NodeId, bool>? waapiAnimated,
+        ulong? pendingVersion,
+        out string[] omitted)
+    {
+        ArgumentNullException.ThrowIfNull(tree);
+        ArgumentNullException.ThrowIfNull(pending);
+        omitted = [];
+
+        if (RetainedReadsDisabled
+            || Layout.DocumentSheet is not { } sheet
+            || tree.GetNode(id)?.IsElement != true
+            || !Layout.Styles.TryGetValue(id, out LayoutStyle? style)
+            || IsTablePart(tree, id, style)
+            || (tree.GetNode(id)?.Parent is { } owner
+                && Layout.Styles.TryGetValue(owner, out LayoutStyle? ownerStyle)
+                && IsTablePart(tree, owner, ownerStyle)))
+        {
+            return null;
+        }
+
+        foreach (RetainedStyleMutation mutation in pending)
+        {
+            if (mutation is RetainedStyleMutation.Resource)
+            {
+                return null;
+            }
+        }
+
+        // The ancestor chain, which must still reach the document through light-tree parents:
+        // a node inside a shadow tree stops at its shadow root, and a removed one at its old
+        // subtree's root.
+        List<NodeId> chain = [];
+        int steps = 0;
+        for (NodeId? at = id; at is { } current; at = tree.GetNode(current)?.Parent)
+        {
+            if (++steps > tree.SlotCount || tree.ShadowRootOf(current) is not null)
+            {
+                return null;
+            }
+
+            chain.Add(current);
+        }
+
+        if (chain[^1] != tree.Document)
+        {
+            return null;
+        }
+
+        if (pending.Count != 0)
+        {
+            if (PendingOwnStyleDamage(tree, sheet, pending, pendingVersion) is not { } damaged)
+            {
+                return null;
+            }
+
+            foreach (NodeId node in chain)
+            {
+                if (damaged.Contains(node))
+                {
+                    return null;
+                }
+            }
+        }
+
+        if (sampleAdvanced)
+        {
+            foreach (NodeId node in chain)
+            {
+                if ((Layout.Styles.TryGetValue(node, out LayoutStyle? chainStyle)
+                        && PaintApi.CssAnimationIsActive(chainStyle))
+                    || waapiAnimated?.Invoke(node) == true)
+                {
+                    return null;
+                }
+            }
+        }
+
+        if (sheet.HasContainerQueries())
+        {
+            // A container-query rule's match depends on the size of a container, which is layout.
+            PocketCalculator.Dom.Selectors.Matcher matcher = tree.CreateMatcher();
+            for (int index = chain.Count - 1; index >= 0; index--)
+            {
+                NodeId node = chain[index];
+                if (tree.GetNode(node)?.IsElement != true)
+                {
+                    continue;
+                }
+
+                if (sheet.NodeMatchesContainerQueryRule(tree, matcher, node))
+                {
+                    return null;
+                }
+
+                matcher.PushAncestor(tree, node);
+            }
+        }
+
+        if (ComputedStyle(id, null, layoutIndependentOnly: true) is not { } snapshot)
+        {
+            return null;
+        }
+
+        omitted = ComputedDisplay(id, style, isPseudo: false) is "grid" or "inline-grid"
+            ? [.. LayoutDependentComputedProperties, .. LayoutDependentGridProperties]
+            : LayoutDependentComputedProperties;
+        return snapshot;
+    }
+
+    /// <summary>
+    /// <see cref="RetainedStylePlanner.OwnStyleDamage"/> of <paramref name="pending"/>, memoized
+    /// for as long as the caller's <paramref name="version"/> (which must change whenever the
+    /// document or the pending list does) and the pending count stay the same.
+    /// </summary>
+    private HashSet<NodeId>? PendingOwnStyleDamage(
+        DomTree tree,
+        Css.Stylesheet sheet,
+        IReadOnlyList<RetainedStyleMutation> pending,
+        ulong? version)
+    {
+        if (version is { } key
+            && _ownDamageMemo is { } memo
+            && ReferenceEquals(memo.Pending, pending)
+            && memo.Count == pending.Count
+            && memo.Version == key)
+        {
+            return memo.Damage;
+        }
+
+        HashSet<NodeId>? damage = TouchesStylesheets(tree, pending)
+            ? null
+            : RetainedStylePlanner.OwnStyleDamage(tree, sheet, pending);
+        _ownDamageMemo = version is { } stored ? (pending, pending.Count, stored, damage) : null;
+        return damage;
+    }
+
+    /// <summary>
+    /// Whether a pending mutation may change the document's stylesheets: a <c>&lt;style&gt;</c> or
+    /// <c>&lt;link&gt;</c> inserted, removed, edited or re-attributed, or an element carrying fetched
+    /// CSS moved.
+    /// </summary>
+    /// <remarks>
+    /// The retained planner never needs this, because the restyle it plans collects the sheets
+    /// again and a changed source list misses the stylesheet cache, which forces a full
+    /// recompute. A read answered before that restyle has no such backstop: removing a
+    /// script-inserted <c>&lt;link&gt;</c> otherwise left its rules applied to the answer.
+    /// </remarks>
+    private static bool TouchesStylesheets(DomTree tree, IReadOnlyList<RetainedStyleMutation> pending)
+    {
+        const int MaxWalk = 4096;
+        int walked = 0;
+        foreach (RetainedStyleMutation mutation in pending)
+        {
+            switch (mutation)
+            {
+                case RetainedStyleMutation.Attribute attribute when ContributesStylesheet(tree, attribute.Mutation.Node):
+                    return true;
+                case RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Text text }
+                    when ContributesStylesheet(tree, text.Parent ?? tree.GetNode(text.Node)?.Parent ?? text.Node):
+                    return true;
+                case RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Insert insert }:
+                    if (SubtreeContributesStylesheet(tree, insert.Node, ref walked, MaxWalk))
+                    {
+                        return true;
+                    }
+
+                    break;
+                case RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Remove remove }:
+                    if (SubtreeContributesStylesheet(tree, remove.Node, ref walked, MaxWalk))
+                    {
+                        return true;
+                    }
+
+                    break;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool SubtreeContributesStylesheet(DomTree tree, NodeId root, ref int walked, int maxWalk)
+    {
+        if (ContributesStylesheet(tree, root))
+        {
+            return true;
+        }
+
+        foreach (NodeId node in tree.Descendants(root))
+        {
+            if (++walked > maxWalk || ContributesStylesheet(tree, node))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ContributesStylesheet(DomTree tree, NodeId id)
+    {
+        if (tree.GetNode(id)?.AsElement() is not { } element)
+        {
+            return false;
+        }
+
+        string name = element.Name.Local;
+        return string.Equals(name, "style", StringComparison.Ordinal)
+            || string.Equals(name, "link", StringComparison.Ordinal)
+            || tree.ExternalStylesheetCss(id) is not null;
+    }
+
+    private (IReadOnlyList<RetainedStyleMutation> Pending, int Count, ulong Version, HashSet<NodeId>? Damage)? _ownDamageMemo;
+
+    private static bool IsTablePart(DomTree tree, NodeId id, LayoutStyle style) =>
+        style.IsTableBox
+        || style.IsTableCellBox
+        || style.AuthoredTableDisplay != TableInternalDisplay.None
+        || style.InternalFlexContainer
+        || tree.GetNode(id)?.AsElement()?.Name.Local is "table" or "caption" or "colgroup" or "col"
+            or "thead" or "tbody" or "tfoot" or "tr" or "td" or "th";
+
+    private static bool IsHtmlElement(DomTree tree, NodeId id, string localName) =>
+        tree.GetNode(id)?.AsElement() is { } element
+        && string.Equals(element.Name.Local, localName, StringComparison.Ordinal)
+        && string.Equals(element.Name.Ns, Namespaces.Html, StringComparison.Ordinal);
 
     /// <summary>Unscaled padding-box size used by CSSOM View's client metrics.</summary>
     public (float Width, float Height)? ClientSize(NodeId id)
@@ -525,7 +1003,14 @@ public sealed partial class PreparedRender
     /// unrecognised name returns null, which is what <c>getComputedStyle()</c> answers with an
     /// empty declaration.
     /// </param>
-    public Dictionary<string, string>? ComputedStyle(NodeId id, string? pseudoElement)
+    public Dictionary<string, string>? ComputedStyle(NodeId id, string? pseudoElement) =>
+        ComputedStyle(id, pseudoElement, layoutIndependentOnly: false);
+
+    /// <summary>
+    /// The snapshot, or with <paramref name="layoutIndependentOnly"/> only the properties whose
+    /// value does not depend on layout (see <see cref="LayoutDependentComputedProperties"/>).
+    /// </summary>
+    private Dictionary<string, string>? ComputedStyle(NodeId id, string? pseudoElement, bool layoutIndependentOnly)
     {
         if (!Layout.Styles.TryGetValue(id, out LayoutStyle? style))
         {
@@ -556,6 +1041,8 @@ public sealed partial class PreparedRender
         string display = ComputedDisplay(id, style, isPseudo);
 
         output["display"] = display;
+        output["appearance"] = style.ComputedAppearance;
+        output["-webkit-appearance"] = style.ComputedAppearance;
 
         // `border-collapse` and `border-spacing` are inherited, so every element answers them
         // and not only a table: Chromium 141 reports `2px` / `separate` on a `<table>` and on
@@ -607,6 +1094,13 @@ public sealed partial class PreparedRender
         // undeclared value.
         output["visibility"] = style.ComputedVisibilityHidden ? "hidden" : "visible";
         output["opacity"] = PaintCssValues.CssNumber(style.Opacity ?? 1f);
+
+        // DEVIATION from crates/obscura-render, which has no `clip`: Chromium 141 reports
+        // `auto` or `rect(0px, auto, 10px, 0px)`, whatever the box's position.
+        output["clip"] = style.Clip is { } clip
+            ? $"rect({ClipSide(clip.Top)}, {ClipSide(clip.Right)}, {ClipSide(clip.Bottom)}, {ClipSide(clip.Left)})"
+            : "auto";
+        static string ClipSide(float? side) => side is { } px ? PaintCssValues.CssNumber(px) + "px" : "auto";
         RgbaColor background = style.BackgroundColor ?? new RgbaColor(0, 0, 0, 0);
         output["background-color"] = style.BackgroundColorIsSrgbFunction
             ? PaintCssValues.SrgbFunctionColor(background)
@@ -650,7 +1144,11 @@ public sealed partial class PreparedRender
 
         output["line-height"] = (style.LineHeight ?? PocketCalculator.Render.LineHeight.Normal) == PocketCalculator.Render.LineHeight.Normal
             ? "normal"
-            : PaintCssValues.CssPx(Layout.TextEngine.SelectedLineHeight(style));
+            : style.LineHeight is { Kind: LineHeightKind.Ratio } ratio
+                // The resolved value is the plain product; layout's copy is truncated to
+                // LayoutUnits (FontResolution.UsedLineHeightWithMetrics), CSSOM's is not.
+                ? PaintCssValues.CssPx((style.FontSize ?? 16f) * ratio.Number)
+                : PaintCssValues.CssPx(Layout.TextEngine.SelectedLineHeight(style));
         output["letter-spacing"] = (style.LetterSpacing ?? 0f) == 0f
             ? "normal"
             : PaintCssValues.CssPx(style.LetterSpacing ?? 0f);
@@ -685,16 +1183,17 @@ public sealed partial class PreparedRender
             PocketCalculator.Render.WordBreak.KeepAll => "keep-all",
             _ => "break-word",
         };
-        output["text-align"] = style.TextAlign is { } align
-            ? align.Keyword switch
-            {
-                TaffyAlignItemsKeyword.Center => "center",
-                TaffyAlignItemsKeyword.FlexEnd or TaffyAlignItemsKeyword.End => "end",
-                _ => "start",
-            }
-            : "start";
+        // DEVIATION from crates/obscura-render/src/paint.rs, which reports the flex value the
+        // keyword was folded into: `left` and `justify` read back as "start", `right` as "end".
+        // Chromium 141 reports the computed keyword.
+        output["text-align"] = TextAlignCss(style.TextAlignKeyword ?? TextAlignKeyword.Start);
+        output["text-align-last"] = style.TextAlignLast is { } last ? TextAlignCss(last) : "auto";
 
-        if (style.IgnoresUsedBoxSizes())
+        if (layoutIndependentOnly)
+        {
+            // `width` and `height` report the used size of a box.
+        }
+        else if (style.IgnoresUsedBoxSizes())
         {
             output["width"] = PaintCssValues.DimensionCss(style.Width, "auto");
             output["height"] = PaintCssValues.DimensionCss(style.Height, "auto");
@@ -746,56 +1245,27 @@ public sealed partial class PreparedRender
         // `0px` on most boxes. On a *positioned* box it reports the used offsets instead, so a
         // `top: 50%` box in a 34px containing block is `top: 17px` / `bottom: 7px` and a
         // `position: relative` box that specified nothing is `0px` on all four sides.
-        string[] insetNames = ["top", "right", "bottom", "left"];
-        float[]? usedInsets = isPseudo ? null : UsedInsets(id, style, rect);
-        for (int side = 0; side < insetNames.Length; side++)
+        if (!layoutIndependentOnly)
         {
-            output[insetNames[side]] = usedInsets is { } used
-                ? PaintCssValues.CssPx(used[side])
-                : style.Inset[side] is { } inset
-                    ? PaintCssValues.DimensionCss(inset, "auto")
-                    : "auto";
+            AppendUsedInsetsAndMargins(output, id, style, rect, isPseudo);
         }
-
-        (string Name, float Value, bool Auto)[] margins =
-        [
-            ("margin-top", style.Margin.Top, style.MarginAuto[0]),
-            ("margin-right", style.Margin.Right, style.MarginAuto[1]),
-            ("margin-bottom", style.Margin.Bottom, style.MarginAuto[2]),
-            ("margin-left", style.Margin.Left, style.MarginAuto[3]),
-        ];
-        foreach ((string name, float value, bool auto) in margins)
-        {
-            output[name] = auto ? "auto" : PaintCssValues.CssPx(value);
-        }
-
-        output["margin"] = CollapseSides(
-            output["margin-top"],
-            output["margin-right"],
-            output["margin-bottom"],
-            output["margin-left"]);
 
         (string Name, float Value)[] lengths =
-        [
-            ("padding-top", style.Padding.Top),
-            ("padding-right", style.Padding.Right),
-            ("padding-bottom", style.Padding.Bottom),
-            ("padding-left", style.Padding.Left),
-            ("border-top-width", style.Border.Top),
-            ("border-right-width", style.Border.Right),
-            ("border-bottom-width", style.Border.Bottom),
-            ("border-left-width", style.Border.Left),
-        ];
+            layoutIndependentOnly ? BorderWidths(style) : [.. PaddingLengths(style), .. BorderWidths(style)];
         foreach ((string name, float value) in lengths)
         {
             output[name] = PaintCssValues.CssPx(value);
         }
 
-        output["padding"] = CollapseSides(
-            output["padding-top"],
-            output["padding-right"],
-            output["padding-bottom"],
-            output["padding-left"]);
+        if (!layoutIndependentOnly)
+        {
+            output["padding"] = CollapseSides(
+                output["padding-top"],
+                output["padding-right"],
+                output["padding-bottom"],
+                output["padding-left"]);
+        }
+
         output["border-width"] = CollapseSides(
             output["border-top-width"],
             output["border-right-width"],
@@ -875,6 +1345,9 @@ public sealed partial class PreparedRender
         output["outline"] = output["outline-color"] + " " + output["outline-style"] + " " + output["outline-width"];
 
         output["font-style"] = style.FontStyleItalic == true ? "italic" : "normal";
+        output["font-variant-caps"] = style.FontVariantCaps ?? "normal";
+        output["font-variant"] = style.FontVariantCaps ?? "normal";
+        output["font-stretch"] = PaintCssValues.CssNumber((style.FontStretch ?? 1f) * 100f) + "%";
 
         // The cascade models only the underline line, so `line-through` / `overline` cannot be
         // reported; everything else is initial, and Chromium then omits style and color.
@@ -965,10 +1438,14 @@ public sealed partial class PreparedRender
             TaffyGridAutoFlow.RowDense => "dense",
             _ => "column dense",
         };
-        AppendGridStyle(output, id, style, display, isPseudo);
+        AppendGridStyle(output, id, style, display, isPseudo, layoutIndependentOnly);
 
-        output["transform"] = PaintCssValues.TransformCss(style, rect, RootFontSize, ViewportSize);
-        output["transform-origin"] = PaintCssValues.TransformOriginCss(style, rect);
+        if (!layoutIndependentOnly)
+        {
+            output["transform"] = PaintCssValues.TransformCss(style, rect, RootFontSize, ViewportSize);
+            output["transform-origin"] = PaintCssValues.TransformOriginCss(style, rect);
+        }
+
         output["translate"] = style.IndividualTranslate is { } translate
             ? PaintCssValues.DimensionCss(translate.X, "0px") + " " + PaintCssValues.DimensionCss(translate.Y, "0px")
             : "none";
@@ -988,6 +1465,76 @@ public sealed partial class PreparedRender
         return output;
     }
 
+    private void AppendUsedInsetsAndMargins(
+        Dictionary<string, string> output, NodeId id, LayoutStyle style, Rect? rect, bool isPseudo)
+    {
+        string[] insetNames = ["top", "right", "bottom", "left"];
+        float?[] usedAutoMargins = new float?[4];
+        float[]? usedInsets = isPseudo ? null : UsedInsets(id, style, rect, usedAutoMargins);
+        for (int side = 0; side < insetNames.Length; side++)
+        {
+            output[insetNames[side]] = usedInsets is { } used
+                ? PaintCssValues.CssPx(used[side])
+                : style.Inset[side] is { } inset
+                    ? PaintCssValues.DimensionCss(inset, "auto")
+                    : "auto";
+        }
+
+        (string Name, float Value, bool Auto, float? Used)[] margins =
+        [
+            ("margin-top", style.Margin.Top, style.MarginAuto[0], usedAutoMargins[0]),
+            ("margin-right", style.Margin.Right, style.MarginAuto[1], usedAutoMargins[1]),
+            ("margin-bottom", style.Margin.Bottom, style.MarginAuto[2], usedAutoMargins[2]),
+            ("margin-left", style.Margin.Left, style.MarginAuto[3], usedAutoMargins[3]),
+        ];
+        foreach ((string name, float value, bool auto, float? used) in margins)
+        {
+            output[name] = used is { } usedMargin
+                ? PaintCssValues.CssPx(usedMargin)
+                : auto ? "auto" : PaintCssValues.CssPx(value);
+        }
+
+        output["margin"] = CollapseSides(
+            output["margin-top"],
+            output["margin-right"],
+            output["margin-bottom"],
+            output["margin-left"]);
+    }
+
+    private static (string Name, float Value)[] PaddingLengths(LayoutStyle style) =>
+    [
+        ("padding-top", style.Padding.Top),
+        ("padding-right", style.Padding.Right),
+        ("padding-bottom", style.Padding.Bottom),
+        ("padding-left", style.Padding.Left),
+    ];
+
+    private static (string Name, float Value)[] BorderWidths(LayoutStyle style) =>
+    [
+        ("border-top-width", style.Border.Top),
+        ("border-right-width", style.Border.Right),
+        ("border-bottom-width", style.Border.Bottom),
+        ("border-left-width", style.Border.Left),
+    ];
+
+    /// <summary>
+    /// The snapshot properties whose value can depend on layout: the used size, insets, margins
+    /// and padding (percentages and auto resolve against the containing block), the transform
+    /// and its origin (percentages of the border box), and a grid container's track lists (the
+    /// used track sizes). <see cref="TryRetainedComputedStyle"/> leaves them out.
+    /// </summary>
+    internal static readonly string[] LayoutDependentComputedProperties =
+    [
+        "width", "height", "top", "right", "bottom", "left",
+        "margin-top", "margin-right", "margin-bottom", "margin-left", "margin",
+        "padding-top", "padding-right", "padding-bottom", "padding-left", "padding",
+        "transform", "transform-origin",
+    ];
+
+    /// <summary>A grid container's layout-dependent properties, besides the ones above.</summary>
+    internal static readonly string[] LayoutDependentGridProperties =
+        ["grid-template-columns", "grid-template-rows", "grid-template", "grid"];
+
     /// <summary>
     /// The CSS Grid properties. On a grid container with a box, <c>grid-template-columns</c> and
     /// <c>-rows</c> resolve to the used track sizes (CSSOM's resolved value); elsewhere they
@@ -995,16 +1542,27 @@ public sealed partial class PreparedRender
     /// specified, the way Chromium 141 serializes them.
     /// </summary>
     private void AppendGridStyle(
-        Dictionary<string, string> output, NodeId id, LayoutStyle style, string display, bool isPseudo)
+        Dictionary<string, string> output,
+        NodeId id,
+        LayoutStyle style,
+        string display,
+        bool isPseudo,
+        bool layoutIndependentOnly)
     {
         // Computed lengths are absolute: font-relative units against this element's face.
         CalcUnits units = new(
             FontUnits.ForStyle(style), RootFontSize, ViewportSize.Width / 100f, ViewportSize.Height / 100f);
         GridTrackSizes? used = null;
-        bool usedTracks = !isPseudo
-            && display is "grid" or "inline-grid"
+        bool gridContainer = !isPseudo && display is "grid" or "inline-grid";
+        bool usedTracks = gridContainer
+            && !layoutIndependentOnly
             && Layout.GridTracks.TryGetValue(id, out used);
-        if (usedTracks)
+        bool omitTrackLists = gridContainer && layoutIndependentOnly;
+        if (omitTrackLists)
+        {
+            // The used track sizes; see LayoutDependentGridProperties.
+        }
+        else if (usedTracks)
         {
             output["grid-template-columns"] = GridCssValues.UsedTrackList(
                 used!.Columns, used.NegativeColumns, used.ExplicitColumns, style.GridTemplateColumnsText, style.GridColLineNames);
@@ -1036,6 +1594,11 @@ public sealed partial class PreparedRender
         // Chromium 141 builds `grid-template` from the computed track lists, falling back to
         // the used ones only for a list that is `none`, and serializes `grid` as all six
         // longhands, the track lists resolved.
+        if (omitTrackLists)
+        {
+            return;
+        }
+
         string templateRows = output["grid-template-rows"];
         string templateColumns = output["grid-template-columns"];
         if (usedTracks)
@@ -1129,7 +1692,7 @@ public sealed partial class PreparedRender
                 (Display.Block, true) => "inline-block",
                 (Display.Flex, false) => "flex",
                 (Display.Grid, false) => "grid",
-                (Display.Inline, true) => "inline-block",
+                (Display.Inline, true) => style.ReportsInlineDisplay ? "inline" : "inline-block",
                 (Display.Inline, false) => "inline",
 
                 // `display: flow-root` reported as `block`, which is what this switch did for
@@ -1141,6 +1704,7 @@ public sealed partial class PreparedRender
                 // so a block box still carrying the flag was declared `flow-root`, or
                 // inherited that declaration through `display: inherit`.
                 (Display.Block, false) when style.FlowRoot => "flow-root",
+                (Display.Block, false) when style.ListItemDisplay && !isPseudo => "list-item",
                 _ => "block",
             };
         }
@@ -1420,7 +1984,16 @@ public sealed partial class PreparedRender
     /// place the resolved offsets exist; a relatively positioned one is its resolved offset and
     /// the negation of it on the opposite side, which is what its box was shifted by.
     /// </remarks>
-    private float[]? UsedInsets(NodeId id, LayoutStyle style, Rect? rect)
+    /// <remarks>
+    /// For an absolutely positioned or fixed box, an axis whose two insets are both set
+    /// reports them as specified (resolved against the containing block) and the used value
+    /// of any <c>auto</c> margin in that axis, which is what Chromium 141 answers for the
+    /// centred `left:0; right:0; margin:0 auto` pattern (`0px` insets, `260px` margins). An
+    /// axis with an <c>auto</c> inset has its auto margins at 0 (CSS 2.1 10.3.7/10.6.4), so
+    /// its offsets follow from the box. <paramref name="usedAutoMargins"/> receives the used
+    /// value of each auto margin resolved here (top, right, bottom, left), null otherwise.
+    /// </remarks>
+    private float[]? UsedInsets(NodeId id, LayoutStyle style, Rect? rect, float?[] usedAutoMargins)
     {
         if (TreeValue is not { } tree)
         {
@@ -1429,7 +2002,8 @@ public sealed partial class PreparedRender
 
         bool absolute = style.Position == TaffyPosition.Absolute || style.PositionFixed;
         bool relative = !absolute && !style.PositionSticky && style.Position == TaffyPosition.Relative;
-        if ((!absolute && !relative) || ContainingBlockBox(tree, id, absolute) is not { } cb)
+        if ((!absolute && !relative)
+            || ContainingBlockBox(tree, id, absolute, style.PositionFixed) is not { } cb)
         {
             return null;
         }
@@ -1455,14 +2029,72 @@ public sealed partial class PreparedRender
         float marginRight = style.MarginAuto[1] ? 0f : style.Margin.Right;
         float top = box.Y - marginTop - cb.Y;
         float left = box.X - marginLeft - cb.X;
-
-        return
+        float[] used =
         [
             top,
             cb.Width - left - (marginLeft + box.Width + marginRight),
             cb.Height - top - (marginTop + box.Height + marginBottom),
             left,
         ];
+
+        if (SpecifiedInsetPair(style, 3, 1, cb.Width) is ({ } specLeft, { } specRight))
+        {
+            used[3] = specLeft;
+            used[1] = specRight;
+            if (style.MarginAuto[3])
+            {
+                usedAutoMargins[3] = box.X - cb.X - specLeft;
+            }
+
+            if (style.MarginAuto[1])
+            {
+                usedAutoMargins[1] = cb.X + cb.Width - specRight - box.X - box.Width;
+            }
+        }
+        else
+        {
+            usedAutoMargins[3] = style.MarginAuto[3] ? 0f : null;
+            usedAutoMargins[1] = style.MarginAuto[1] ? 0f : null;
+        }
+
+        if (SpecifiedInsetPair(style, 0, 2, cb.Height) is ({ } specTop, { } specBottom))
+        {
+            used[0] = specTop;
+            used[2] = specBottom;
+            if (style.MarginAuto[0])
+            {
+                usedAutoMargins[0] = box.Y - cb.Y - specTop;
+            }
+
+            if (style.MarginAuto[2])
+            {
+                usedAutoMargins[2] = cb.Y + cb.Height - specBottom - box.Y - box.Height;
+            }
+        }
+        else
+        {
+            usedAutoMargins[0] = style.MarginAuto[0] ? 0f : null;
+            usedAutoMargins[2] = style.MarginAuto[2] ? 0f : null;
+        }
+
+        return used;
+    }
+
+    /// <summary>
+    /// Both insets of one axis resolved against the containing block, or nulls when either is
+    /// <c>auto</c> or is a late-resolved calc() whose flattened value is only approximate.
+    /// </summary>
+    private (float? Start, float? End) SpecifiedInsetPair(LayoutStyle style, int start, int end, float basis)
+    {
+        if (style.InsetCalc is { } calc && (calc[start] is not null || calc[end] is not null))
+        {
+            return (null, null);
+        }
+
+        return ResolveInset(style, start, basis) is { } startValue
+            && ResolveInset(style, end, basis) is { } endValue
+            ? (startValue, endValue)
+            : (null, null);
     }
 
     /// <summary>One inset resolved against its axis of the containing block.</summary>
@@ -1492,7 +2124,14 @@ public sealed partial class PreparedRender
     /// an absolutely positioned box, the parent's content box otherwise, and the initial
     /// containing block when neither exists.
     /// </summary>
-    private Rect? ContainingBlockBox(DomTree tree, NodeId id, bool absolute)
+    /// <remarks>
+    /// A fixed box skips positioned ancestors: only one that establishes a containing block
+    /// for fixed descendants (a transform, filter, contain and the like) captures it, and the
+    /// initial containing block takes it otherwise. Treating it like an absolute box measured
+    /// a `position: fixed; left: 0` box inside a 128px-offset relative wrapper as
+    /// `left: -128px`.
+    /// </remarks>
+    private Rect? ContainingBlockBox(DomTree tree, NodeId id, bool absolute, bool fixedPosition = false)
     {
         NodeId? ancestor = DomTraversal.RenderedParent(tree, id);
         while (ancestor is { } candidate)
@@ -1500,10 +2139,12 @@ public sealed partial class PreparedRender
             if (Layout.Styles.TryGetValue(candidate, out LayoutStyle? ancestorStyle)
                 && Layout.Rects.TryGetValue(candidate, out Rect ancestorRect))
             {
-                bool positioned = ancestorStyle.Position is not null
-                    || ancestorStyle.PositionFixed
-                    || ancestorStyle.PositionSticky
-                    || ancestorStyle.EstablishesPositioningContainingBlock();
+                bool positioned = fixedPosition
+                    ? ancestorStyle.EstablishesPositioningContainingBlock()
+                    : ancestorStyle.Position is not null
+                        || ancestorStyle.PositionFixed
+                        || ancestorStyle.PositionSticky
+                        || ancestorStyle.EstablishesPositioningContainingBlock();
                 if (!absolute || positioned)
                 {
                     Edges padding = absolute ? Edges.Zero : ancestorStyle.Padding;
@@ -1710,6 +2351,18 @@ public sealed partial class PreparedRender
             ? new Dictionary<string, string>(properties, StringComparer.Ordinal)
             : null;
 
+    /// <summary>
+    /// The elements under viewport point (<paramref name="x"/>, <paramref name="y"/>), topmost
+    /// first and not retargeted out of shadow trees (see <see cref="HitTester"/>); only the
+    /// topmost unless <paramref name="all"/>. Empty outside the viewport.
+    /// </summary>
+    public List<NodeId> HitTest(DomTree tree, ResolvedScrollState scroll, float x, float y, bool all)
+    {
+        ArgumentNullException.ThrowIfNull(tree);
+        ArgumentNullException.ThrowIfNull(scroll);
+        return HitTester.Run(tree, Layout, scroll, ViewportSize, x, y, all);
+    }
+
     /// <summary>Border box in the current root viewport.</summary>
     public Rect? ViewportRect(NodeId id, (float X, float Y) requestedScroll)
     {
@@ -1765,7 +2418,7 @@ public sealed partial class PreparedRender
             return [.. fragments];
         }
 
-        if (Layout.Rects.TryGetValue(id, out Rect rect))
+        if (Layout.PreciseRect(id) is { } rect)
         {
             return [rect];
         }
@@ -1873,4 +2526,13 @@ public sealed partial class PreparedRender
         return true;
     }
 
+    private static string TextAlignCss(TextAlignKeyword keyword) => keyword switch
+    {
+        TextAlignKeyword.End => "end",
+        TextAlignKeyword.Left => "left",
+        TextAlignKeyword.Right => "right",
+        TextAlignKeyword.Center => "center",
+        TextAlignKeyword.Justify => "justify",
+        _ => "start",
+    };
 }

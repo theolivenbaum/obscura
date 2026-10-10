@@ -35,7 +35,10 @@ internal static class DomTransforms
             return;
         }
 
-        clipRects[id] = inherited?.Clone();
+        // A clip is shared by every box below the box that set it, not copied per box: nothing
+        // changes a stored clip (a painter that moves one clones it first, ScrollPaintState),
+        // and two copies per node were most of this walk's allocation.
+        clipRects[id] = inherited;
 
         // This node's own translate joins the accumulation for its box and its whole subtree
         // (percentages resolve against its own border box).
@@ -53,6 +56,15 @@ internal static class DomTransforms
         if (tx != 0f || ty != 0f)
         {
             translates[id] = (tx, ty);
+        }
+
+        // DEVIATION from crates/obscura-render/src/dom.rs, which has no `clip` property.
+        // `clip: rect(...)` on an absolutely positioned box clips the box itself as well as
+        // everything inside it, so it joins this node's own entry, not only its children's.
+        if (style is { Clip: not null } && rects.TryGetValue(id, out Rect clipBox))
+        {
+            inherited = OverflowClip.WithClipProperty(inherited, style, clipBox, tx, ty);
+            clipRects[id] = inherited;
         }
 
         Affine2 transform = parentTransform.Then(ownTransform);
@@ -73,12 +85,12 @@ internal static class DomTransforms
             next = inherited is null ? own : inherited.Intersect(own);
         }
 
-        foreach (NodeId cid in DomTraversal.RenderedChildren(tree, id))
+        foreach (NodeId cid in DomTraversal.EachRenderedChild(tree, id))
         {
             ResolveClipRects(
                 tree,
                 cid,
-                next?.Clone(),
+                next,
                 tx,
                 ty,
                 rects,

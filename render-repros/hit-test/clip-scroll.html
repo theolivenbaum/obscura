@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>hit-test clip-scroll</title>
+<style>
+html, body { margin: 0; }
+body { font: 16px/20px 'Liberation Sans', Arial, sans-serif; }
+p { margin: 0; }
+.box { width: 200px; height: 100px; background: #e9ecef; margin: 10px; }
+</style>
+</head>
+<body id=body>
+<div id=h class=box style="overflow:hidden"><div id=h1 style="width:400px;height:40px;background:#ffa8a8">wide child</div><div id=h2 style="height:120px;width:50px;background:#74c0fc">tall</div></div>
+<div id=s class=box style="overflow:auto;scrollbar-width:none"><div id=s1 style="height:60px;background:#b2f2bb">one</div><div id=s2 style="height:60px;background:#ffec99">two</div><div id=s3 style="height:60px;background:#d0bfff">three</div></div>
+<div id=v class=box style="overflow:visible;height:30px"><div id=v1 style="height:80px;width:100px;background:#ffc9c9">overflowing visible</div></div>
+<div id=x class=box style="overflow-x:hidden;height:40px;margin-top:60px"><div id=x1 style="width:300px;height:70px;background:#99e9f2">x only</div></div>
+<script>document.getElementById('s').scrollTop = 50;</script>
+</body>
+</html>

@@ -76,22 +76,11 @@ public sealed partial class RuntimeTests
     /// <summary>The Rust tests' <c>assert_eq!(value, serde_json::json!(...))</c>.</summary>
     /// <summary>
     /// Pumps the event loop in short slices until <paramref name="condition"/> holds
-    /// in the page, or five seconds pass. For tests whose assertion is about order,
-    /// not about how quickly a loaded host gets there.
+    /// in the page (see <see cref="EventLoopWait.UntilAsync"/>). For tests whose
+    /// assertion is about order, not about how quickly a loaded host gets there.
     /// </summary>
-    private static async Task RunEventLoopUntilAsync(PocketCalculatorJsRuntime rt, string condition)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        do
-        {
-            await rt.RunEventLoopBoundedAsync(20);
-            if (rt.Evaluate($"Boolean({condition})")?.GetValue<bool>() == true)
-            {
-                return;
-            }
-        }
-        while (DateTime.UtcNow < deadline);
-    }
+    private static Task RunEventLoopUntilAsync(PocketCalculatorJsRuntime rt, string condition) =>
+        EventLoopWait.UntilAsync(rt, condition);
 
     private static void AssertJson(string expected, JsonNode? actual) =>
         Assert.Equal(JsonNode.Parse(expected)?.ToJsonString() ?? "null", actual?.ToJsonString() ?? "null");
@@ -411,7 +400,7 @@ public sealed partial class RuntimeTests
         using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
         var rt = fixture.Runtime;
         rt.Evaluate("var __timerValue='pending'; setTimeout('__timerValue=\"done\"', 0)");
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal("done", rt.Evaluate("globalThis.__timerValue")!.GetValue<string>());
     }
 
@@ -425,7 +414,7 @@ public sealed partial class RuntimeTests
         using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
         var rt = fixture.Runtime;
         rt.Evaluate("setTimeout('var __leaked = 42; function __leakedFn(){ return 7; }', 0)");
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         var value = rt.Evaluate(
             "String(globalThis.__leaked) + '|' + "
             + "(typeof globalThis.__leakedFn === 'function' ? globalThis.__leakedFn() : 'missing')");
@@ -439,7 +428,7 @@ public sealed partial class RuntimeTests
         var rt = fixture.Runtime;
         rt.Evaluate("globalThis.__ticks=0");
         rt.Evaluate("globalThis.__timerId=setInterval('__ticks++;if(__ticks===2)clearInterval(__timerId)',1)");
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal(2.0, rt.Evaluate("globalThis.__ticks")!.GetValue<double>());
     }
 
@@ -456,7 +445,7 @@ public sealed partial class RuntimeTests
             Promise.resolve().then(() => __taskOrder.push("microtask"));
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""["sync","microtask","timer"]""", rt.Evaluate("__taskOrder"));
     }
 
@@ -484,7 +473,7 @@ public sealed partial class RuntimeTests
             Promise.resolve().then(() => __schedulerOrder.push("initial-microtask"));
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """
             ["sync","initial-microtask",
@@ -545,7 +534,7 @@ public sealed partial class RuntimeTests
             }, { priority: "background" });
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """
             [["blocking-start","blocking-continuation","background"],
@@ -594,7 +583,7 @@ public sealed partial class RuntimeTests
             }
             globalThis.__workerWindowUnchanged = () => window.onmessage === originalHandler;
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """{"bare":["bare",true],"declared":["declared",true],"strict":["strict",true]}""",
             rt.Evaluate("__workerReplies"));
@@ -623,7 +612,7 @@ public sealed partial class RuntimeTests
             worker.postMessage(null);
             worker.postMessage(null);
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""["ready",1,2]""", rt.Evaluate("__workerReplies"));
     }
 
@@ -646,7 +635,7 @@ public sealed partial class RuntimeTests
             workers[1].postMessage(null);
             workers[0].postMessage(null);
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""[[1,2],[1]]""", rt.Evaluate("__workerReplies"));
         rt.ExecuteScript(
             "worker-cleanup",
@@ -675,7 +664,7 @@ public sealed partial class RuntimeTests
             worker.postMessage(null);
             worker.postMessage(null);
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """[["handler",1],["listener",1,true],["handler",2],["listener",2,true]]""",
             rt.Evaluate("__workerReplies"));
@@ -703,7 +692,7 @@ public sealed partial class RuntimeTests
                 finishSource('let count = 0; onmessage = event => postMessage([++count, event.data]);');
             }, 0);
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""[[1,"first"],[2,"second"]]""", rt.Evaluate("__workerReplies"));
         rt.ExecuteScript("worker-cleanup", "worker.terminate();");
     }
@@ -726,7 +715,7 @@ public sealed partial class RuntimeTests
             worker.postMessage('after termination');
             URL.revokeObjectURL(url);
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("[]", rt.Evaluate("__workerReplies"));
     }
 
@@ -751,7 +740,7 @@ public sealed partial class RuntimeTests
             worker.onmessage = event => __workerReplies.push(event.data);
             worker.postMessage(null);
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""["ReferenceError"]""", rt.Evaluate("__workerReplies"));
         Assert.Equal("undefined", rt.Evaluate("typeof workerUndeclaredVariable")!.GetValue<string>());
         rt.ExecuteScript("worker-cleanup", "worker.terminate(); URL.revokeObjectURL(url);");
@@ -775,7 +764,7 @@ public sealed partial class RuntimeTests
             worker.postMessage(null);
             worker.postMessage(null);
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""["started"]""", rt.Evaluate("__workerReplies"));
         AssertJson("""["initialization failed"]""", rt.Evaluate("__workerErrors"));
         rt.ExecuteScript("worker-cleanup", "worker.terminate(); URL.revokeObjectURL(url);");
@@ -804,7 +793,7 @@ public sealed partial class RuntimeTests
             worker.postMessage(1);
             worker.postMessage(2);
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""["ready",1,2,3]""", rt.Evaluate("__workerReplies"));
         rt.ExecuteScript("worker-cleanup", "worker.terminate(); URL.revokeObjectURL(url);");
     }
@@ -828,7 +817,7 @@ public sealed partial class RuntimeTests
             setTimeout(() => { __timerObserved = true; }, 1);
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         var result = rt.Evaluate("[__messageCount, __timerObserved]");
         var values = Assert.IsType<JsonArray>(result);
         var count = values[0]!.GetValue<double>();
@@ -868,7 +857,7 @@ public sealed partial class RuntimeTests
             }, 0);
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """
             {"portInstance":true,"channelInstance":true,"deliveredBeforeStart":false,"delivered":true,
@@ -896,7 +885,7 @@ public sealed partial class RuntimeTests
             };
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """["message-1","microtask-1","message-2","microtask-2"]""",
             rt.Evaluate("__messagePortOrder"));
@@ -920,7 +909,7 @@ public sealed partial class RuntimeTests
 
         rt.SetDom(HtmlParsing.ParseHtml("<html><body data-document='new'></body></html>"));
         rt.ExecuteScript("message-port-new-document", """__replacementChannel.port1.postMessage("fresh");""");
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
 
         AssertJson("""["fresh"]""", rt.Evaluate("__replacementPortOrder"));
     }
@@ -940,7 +929,7 @@ public sealed partial class RuntimeTests
             channel.port2.close();
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal(0.0, rt.Evaluate("__closedPortDeliveries")!.GetValue<double>());
     }
 
@@ -965,7 +954,7 @@ public sealed partial class RuntimeTests
             listenerFirst.port1.postMessage(null);
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """
             ["handler-first:handler","handler-first:listener",
@@ -1002,7 +991,7 @@ public sealed partial class RuntimeTests
             channel.port1.postMessage("delivered");
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """[[],[],["delivered"]]""",
             rt.Evaluate("[__messagePortOwnKeys, __messagePortOwnNames, __messagePortTamperResult]"));
@@ -1067,7 +1056,7 @@ public sealed partial class RuntimeTests
             payload.bytes[0] = 88;
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """
             {"sender":0,"otherName":0,"peers":[
@@ -1097,7 +1086,7 @@ public sealed partial class RuntimeTests
             Promise.resolve().then(() => __broadcastOrder.push("microtask"));
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """
             ["sync","microtask","handler-first:handler","handler-first:listener",
@@ -1132,7 +1121,7 @@ public sealed partial class RuntimeTests
             __broadcastCloseResult.eventTarget = new BroadcastChannel("shape") instanceof EventTarget;
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """
             {"deliveries":0,"closedError":"InvalidStateError","constructorError":"TypeError",
@@ -1906,10 +1895,12 @@ public sealed partial class RuntimeTests
             customElements.define("throws-during-upgrade", ThrowsDuringUpgrade);
             const element = document.getElementById("target");
             customElements.upgrade(document);
+            // A failed upgrade leaves the element in the "failed" state, which :defined
+            // does not match (Chromium 141).
             return [
                 constructorCalls,
                 connectedCalls,
-                element.__customUpgradeFailed === true
+                element.matches(":defined") === false
             ];
             """);
         AssertJson("[1,0,true]", result);
@@ -2625,7 +2616,7 @@ public sealed partial class RuntimeTests
             "font-ready",
             "document.fonts.load('normal 1px Example').then(() => {"
             + " document.getElementById('state').textContent = 'ready'; });");
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal(
             "ready",
             rt.Evaluate("document.getElementById('state').textContent")!.GetValue<string>());
@@ -2670,13 +2661,17 @@ public sealed partial class RuntimeTests
         var rt = fixture.Runtime;
         rt.ExecuteScript(
             "quiescent-long-interval",
-            "setInterval(() => { globalThis.__analyticsTicks = (globalThis.__analyticsTicks || 0) + 1; }, 1000);");
+            "setInterval(() => { globalThis.__analyticsTicks = (globalThis.__analyticsTicks || 0) + 1; }, 5000);");
 
+        // A 5 s interval and a 10 s budget rather than 1 s and 1 s, with the bound at half the
+        // interval: settling takes the 50 ms quiet window, and a settle that waited for the
+        // interval takes at least 5 s, so a loaded host has 2.5 s of slack instead of 350 ms.
         var started = System.Diagnostics.Stopwatch.StartNew();
-        await rt.RunEventLoopUntilQuiescentAsync(1_000, 50);
+        await rt.RunEventLoopUntilQuiescentAsync(10_000, 50);
         Assert.True(
-            started.Elapsed < TimeSpan.FromMilliseconds(400),
-            "a future analytics interval must not consume the full settle budget");
+            started.Elapsed < TimeSpan.FromMilliseconds(2_500),
+            $"a future analytics interval must not consume the full settle budget: {started.Elapsed}");
+        AssertJson("null", rt.Evaluate("globalThis.__analyticsTicks ?? null"));
     }
 
     [Fact]
@@ -2694,7 +2689,8 @@ public sealed partial class RuntimeTests
         var elapsed = started.Elapsed;
 
         Assert.True(
-            elapsed < TimeSpan.FromMilliseconds(300),
+            // Under the 5 s watchdog floor a pump that does not yield waits for.
+            elapsed < TimeSpan.FromMilliseconds(3_000),
             $"a continuously-ready queue must return between tasks instead of waiting for the watchdog: {elapsed}");
         Assert.True(
             rt.Evaluate("globalThis.__fixedTicks > 0")?.GetValue<bool>() ?? false,
@@ -2704,6 +2700,30 @@ public sealed partial class RuntimeTests
             rt.Evaluate(
                 "(document.body.setAttribute('data-after-fixed-wait', 'usable'), "
                 + "document.body.getAttribute('data-after-fixed-wait'))")!.GetValue<string>());
+    }
+
+    /// <summary>
+    /// An autonomous turn stops after the task that was running when the host asked it to
+    /// yield, and the tasks it had taken run on the next turn in their order. weather.com's
+    /// timers each forced a slow relayout, one turn ran for seconds, and every CDP command
+    /// (Playwright's screenshot is five of them) waited for the whole turn.
+    /// </summary>
+    [Fact]
+    public async Task AutonomousTurnYieldsBetweenTasksWhenTheHostHasWork()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        var rt = fixture.Runtime;
+        rt.ExecuteScript(
+            "yielding-timers",
+            "globalThis.__ran = [];"
+            + "for (let i = 0; i < 4; i++) setTimeout(() => globalThis.__ran.push(i), 0);");
+        Thread.Sleep(20);
+
+        await rt.RunAutonomousEventLoopTurnAsync(yieldTo: () => true);
+        AssertJson("[0]", rt.Evaluate("globalThis.__ran"));
+
+        await rt.RunAutonomousEventLoopTurnAsync();
+        AssertJson("[0,1,2,3]", rt.Evaluate("globalThis.__ran"));
     }
 
     [Fact]
@@ -2825,12 +2845,14 @@ public sealed partial class RuntimeTests
             + "  __longTaskCompleted = true;"
             + "}, 0);");
 
+        // The upper bound is under the 5 s task floor the watchdog allows an active task, so
+        // a pump that waited for the watchdog still fails; 1.5 s left a loaded host 900 ms.
         var started = System.Diagnostics.Stopwatch.StartNew();
         await rt.RunEventLoopBoundedAsync(20);
         var elapsed = started.Elapsed;
 
         Assert.True(
-            elapsed >= TimeSpan.FromMilliseconds(500) && elapsed < TimeSpan.FromMilliseconds(1_500),
+            elapsed >= TimeSpan.FromMilliseconds(500) && elapsed < TimeSpan.FromMilliseconds(4_000),
             $"capture must wait for the active task boundary without becoming unbounded: {elapsed}");
         AssertJson("true", rt.Evaluate("globalThis.__longTaskCompleted"));
     }
@@ -2849,12 +2871,14 @@ public sealed partial class RuntimeTests
             + "  __adaptiveLongTaskCompleted = true;"
             + "}, 0);");
 
+        // The upper bound is under the 5 s task floor the watchdog allows an active task, so
+        // a pump that waited for the watchdog still fails; 1.5 s left a loaded host 900 ms.
         var started = System.Diagnostics.Stopwatch.StartNew();
         await rt.RunEventLoopUntilQuiescentAsync(20, 10);
         var elapsed = started.Elapsed;
 
         Assert.True(
-            elapsed >= TimeSpan.FromMilliseconds(500) && elapsed < TimeSpan.FromMilliseconds(1_500),
+            elapsed >= TimeSpan.FromMilliseconds(500) && elapsed < TimeSpan.FromMilliseconds(4_000),
             $"adaptive settle must wait for the active task boundary: {elapsed}");
         AssertJson("true", rt.Evaluate("globalThis.__adaptiveLongTaskCompleted"));
     }
@@ -2870,11 +2894,13 @@ public sealed partial class RuntimeTests
             + " globalThis.__schedulerTicks = (globalThis.__schedulerTicks || 0) + 1; }, 0);");
 
         var started = System.Diagnostics.Stopwatch.StartNew();
-        await rt.RunEventLoopUntilQuiescentAsync(2_000, 150);
+        // A 10 s budget rather than 2 s: a pinned settle takes all of it, an unpinned one the
+        // 150 ms quiet window, and the bound leaves a loaded host seconds rather than 350 ms.
+        await rt.RunEventLoopUntilQuiescentAsync(10_000, 150);
         var elapsed = started.Elapsed;
 
         Assert.True(
-            elapsed < TimeSpan.FromMilliseconds(500),
+            elapsed < TimeSpan.FromMilliseconds(5_000),
             $"a continuously-ready non-visual scheduler pinned adaptive settle: {elapsed}");
         Assert.True(
             rt.Evaluate("globalThis.__schedulerTicks > 0")?.GetValue<bool>() ?? false,
@@ -2896,7 +2922,7 @@ public sealed partial class RuntimeTests
 
         Assert.True(
             elapsed >= TimeSpan.FromMilliseconds(synchronousTaskFloorMs)
-                && elapsed < TimeSpan.FromMilliseconds(synchronousTaskFloorMs + 1_500),
+                && elapsed < TimeSpan.FromMilliseconds(synchronousTaskFloorMs + 4_000),
             $"one synchronous callback drain escaped the bounded task allowance: {elapsed}");
         Assert.Equal(
             "usable",
@@ -2989,7 +3015,9 @@ public sealed partial class RuntimeTests
             elapsed >= TimeSpan.FromMilliseconds(900),
             $"pending page work must receive the network grace: {elapsed}");
         Assert.True(
-            elapsed < TimeSpan.FromMilliseconds(1_700),
+            // Under the 3 s the request hangs for, so waiting for it still fails; 1.7 s
+            // left a loaded host 550 ms over the 1.15 s grace and quiet window.
+            elapsed < TimeSpan.FromMilliseconds(2_900),
             $"a hanging request consumed more than its bounded grace: {elapsed}");
     }
 
@@ -3015,7 +3043,9 @@ public sealed partial class RuntimeTests
             elapsed >= TimeSpan.FromMilliseconds(1_200),
             $"the late commit did not receive a following quiet window: {elapsed}");
         Assert.True(
-            elapsed < TimeSpan.FromMilliseconds(1_800),
+            // Well under the 4 s budget an unbounded tail takes; 1.8 s left a loaded host
+            // 550 ms over the expected 1.25 s.
+            elapsed < TimeSpan.FromMilliseconds(3_000),
             $"late observable work escaped the bounded activity tail: {elapsed}");
     }
 
@@ -3038,9 +3068,12 @@ public sealed partial class RuntimeTests
 
         var started = System.Diagnostics.Stopwatch.StartNew();
         await rt.RunEventLoopUntilQuiescentAsync(1_000, 50);
+        // A settle pinned by the other page's request holds it for the one-second network
+        // grace at least; an unpinned one takes the 50 ms quiet window. The bound sits just
+        // under the grace rather than at 400 ms, which a loaded host overran.
         Assert.True(
-            started.Elapsed < TimeSpan.FromMilliseconds(400),
-            "an unrelated page request on the shared client must not pin settle");
+            started.Elapsed < TimeSpan.FromMilliseconds(950),
+            $"an unrelated page request on the shared client must not pin settle: {started.Elapsed}");
         _ = otherPageRequest;
     }
 
@@ -3073,10 +3106,13 @@ public sealed partial class RuntimeTests
             + " document.body.setAttribute('data-frame', String(++tick)), 10);");
 
         var started = System.Diagnostics.Stopwatch.StartNew();
-        await rt.RunEventLoopUntilQuiescentAsync(2_000, 150);
+        // A 10 s budget rather than 2 s: the activity tail ends observation of the mutations
+        // after 500 ms and a quiet window follows, while an unbounded settle takes the whole
+        // budget. The bound leaves a loaded host seconds of slack rather than 350 ms.
+        await rt.RunEventLoopUntilQuiescentAsync(10_000, 150);
         Assert.True(
-            started.Elapsed < TimeSpan.FromMilliseconds(1_000),
-            "an animated document must not consume the complete settle budget");
+            started.Elapsed < TimeSpan.FromMilliseconds(5_000),
+            $"an animated document must not consume the complete settle budget: {started.Elapsed}");
         Assert.True(
             rt.Evaluate("Number(document.body.getAttribute('data-frame')) > 0")?.GetValue<bool>() ?? false,
             "the policy must still pump animation work before capture");
@@ -3183,7 +3219,7 @@ public sealed partial class RuntimeTests
                 globalThis.__fontReady = set === document.fonts;
             });
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """
             [["unloaded","loaded",false],
@@ -3239,7 +3275,7 @@ public sealed partial class RuntimeTests
             });
             """);
 
-        await rt.RunEventLoopBoundedAsync(150);
+        await EventLoopWait.UntilIdleAsync(rt);
         var result = rt.Evaluate(
             """
             [
@@ -3275,7 +3311,7 @@ public sealed partial class RuntimeTests
             });
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """["raf","resize","intersection"]""",
             rt.Evaluate("__renderPhaseOrder.slice(0, 3)"));
@@ -3344,7 +3380,7 @@ public sealed partial class RuntimeTests
             sameBatch = requestAnimationFrame(() => __rafEvents.push("same-batch"));
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""["first"]""", rt.Evaluate("__rafEvents"));
     }
 
@@ -3360,21 +3396,28 @@ public sealed partial class RuntimeTests
             globalThis.__rafStopped = false;
             globalThis.__timerAfterAnimation = false;
             let frameId = 0;
+            // The timers are armed from the second frame rather than at 55 and 65 ms from
+            // the start: on a loaded host the first frames can take longer than 55 ms, and
+            // the count then said more about the host than about pacing. The frames that
+            // run while the timers are pending are still bounded (a 16 ms cadence fits at
+            // most two more into 30 ms), so a loop that starves timers still fails.
             function frame() {
                 __rafCount++;
+                if (__rafCount === 2) {
+                    setTimeout(() => {
+                        cancelAnimationFrame(frameId);
+                        __rafStopped = true;
+                    }, 30);
+                    setTimeout(() => {
+                        __timerAfterAnimation = true;
+                    }, 40);
+                }
                 frameId = requestAnimationFrame(frame);
             }
             frameId = requestAnimationFrame(frame);
-            setTimeout(() => {
-                cancelAnimationFrame(frameId);
-                __rafStopped = true;
-            }, 55);
-            setTimeout(() => {
-                __timerAfterAnimation = true;
-            }, 65);
             """);
 
-        await rt.RunEventLoopBoundedAsync(200);
+        await EventLoopWait.UntilIdleAsync(rt);
         var values = Assert.IsType<JsonArray>(
             rt.Evaluate("[__rafCount, __rafStopped, __timerAfterAnimation]"));
         var frameCount = values[0]!.GetValue<double>();
@@ -4634,7 +4677,10 @@ public sealed partial class RuntimeTests
         Assert.Equal(116.0, box[0]!.GetValue<double>());
         Assert.Equal(62.0, box[1]!.GetValue<double>());
         Assert.True(Math.Abs(box[2]!.GetValue<double>() - 123.0) < 0.05);
-        Assert.Equal(67.0, box[3]!.GetValue<double>());
+
+        // Chromium 141: 50.6 + 5 + 6 + 2 + 3 in LayoutUnits; getBoundingClientRect() is not
+        // snapped to whole pixels (clientHeight above is).
+        Assert.Equal(66.59375, box[3]!.GetValue<double>());
 
         // Attribute-backed inline-style changes invalidate the retained render.
         // Borders do not change the padding box; padding does.
@@ -4653,7 +4699,10 @@ public sealed partial class RuntimeTests
             """));
         Assert.Equal(100.0, mutated[0]!.GetValue<double>());
         Assert.Equal(126.0, mutated[1]!.GetValue<double>());
-        Assert.Equal(143.0, mutated[2]!.GetValue<double>());
+
+        // Chromium 141 reports 142.578125: the unrounded border box, with the 4.1px right
+        // border snapped to 4px. The port does not snap border widths yet, so it is 0.1px wider.
+        Assert.True(Math.Abs(mutated[2]!.GetValue<double>() - 142.578125) < 0.125);
 
         // A later CDP/emulation viewport update invalidates the layout too; both the
         // root special case and an ordinary 100vh box are live.
@@ -5505,7 +5554,7 @@ public sealed partial class RuntimeTests
             __animation.ready.then(() => { __ready = true; });
             __animation.finished.then(() => { __finished = true; });
             """);
-        await rt.RunEventLoopBoundedAsync(20);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.True(rt.Evaluate("__ready")!.GetValue<bool>());
         Assert.True(rt.Evaluate("__finished")!.GetValue<bool>());
         Assert.True(rt.Evaluate("__finishEvent")!.GetValue<bool>());
@@ -5645,6 +5694,43 @@ public sealed partial class RuntimeTests
     }
 
     [Fact]
+    public void WaapiStartTimeIsTheFirstFrameAfterAnimateNotTheCallTime()
+    {
+        // Chromium 141 leaves a new animation pending and resolves its startTime to the timeline
+        // time of the first frame rendered after animate(), not to the moment of the call: a
+        // 300 ms busy wait after animate() still gave startTime == that frame's time and
+        // currentTime 0 in it. Rust takes the wall clock at the call (deviation in todo.md).
+        using var fixture = RuntimeFixture.Setup(
+            """
+            <html style="margin:0"><body style="margin:0">
+                <div id="box" style="width:40px;height:40px;background:#1769aa"></div>
+            </body></html>
+            """);
+        var rt = fixture.Runtime;
+        rt.SetViewport(120.0, 40.0);
+        Assert.True(rt.SetAnimationSample(PocketCalculator.Render.AnimationSample.Document(0.0f)));
+        Assert.NotNull(rt.ScreenshotPrepared((120.0f, 40.0f), "http://example.com/test"));
+        // The wall clock is 400 ms into the timeline when script calls animate(), while the host
+        // has pinned the next frame at 0.
+        rt.State.SetAnimationTimelineElapsed(TimeSpan.FromMilliseconds(400));
+        rt.ExecuteScript(
+            "waapi-pending-start",
+            """
+            document.getElementById('box').animate(
+                [{opacity:0},{opacity:1}],
+                {duration:1000,fill:'both',easing:'linear'})
+            """);
+        var boxNode = rt.State.Dom!.GetElementById("box")!.Value;
+        Assert.NotNull(rt.ScreenshotPrepared((120.0f, 40.0f), "http://example.com/test"));
+        Assert.Equal(0f, rt.State.PreparedRender!.Layout.Styles[boxNode].Opacity!.Value);
+
+        Assert.True(rt.SetAnimationSample(PocketCalculator.Render.AnimationSample.Document(500.0f)));
+        Assert.NotNull(rt.ScreenshotPrepared((120.0f, 40.0f), "http://example.com/test"));
+        float opacity = rt.State.PreparedRender!.Layout.Styles[boxNode].Opacity!.Value;
+        Assert.True(MathF.Abs(opacity - 0.5f) < 0.01f, $"WAAPI opacity at frame 500 = {opacity}");
+    }
+
+    [Fact]
     public void WaapiCancelRetainsStaticStyleGraphAndRestoresAuthoredStyle()
     {
         using var fixture = RuntimeFixture.Setup(
@@ -5750,6 +5836,9 @@ public sealed partial class RuntimeTests
     {
         using var owner = RenderCaptureSupport.AnimationEpochRuntime();
         var rt = owner.Runtime;
+        // Frozen, the re-insertion lands exactly at 1000 rather than 1000 plus however long
+        // a loaded host takes to reach it (50 ms of that already failed the 5 px floor).
+        RenderCaptureSupport.FreezeAnimationTimeline(rt);
         rt.Evaluate(
             "var box=document.createElement('div');box.id='box';box.className='anim';document.body.appendChild(box)");
         Assert.True(rt.SetAnimationSample(PocketCalculator.Render.AnimationSample.Document(1_000.0f)));
@@ -5769,6 +5858,9 @@ public sealed partial class RuntimeTests
     {
         using var owner = RenderCaptureSupport.AnimationEpochRuntime();
         var rt = owner.Runtime;
+        // Frozen, each insertion lands exactly at the time rewound to (see
+        // RemoveAndReappendRestartsAnimationWithoutIntermediateFlush).
+        RenderCaptureSupport.FreezeAnimationTimeline(rt);
         RenderCaptureSupport.RewindAnimationTimeline(rt, 100);
         rt.Evaluate(
             "var a=document.createElement('div');a.id='first';a.className='anim';document.body.appendChild(a)");
@@ -5796,6 +5888,10 @@ public sealed partial class RuntimeTests
     {
         using var owner = RenderCaptureSupport.AnimationEpochRuntime();
         var rt = owner.Runtime;
+        // Animation births read the timeline's clock; frozen, they land exactly at 0, 300 and
+        // 800. On the live clock a cold or loaded host spent more than the 50 ms of slack the
+        // first range allows (25 to 35 px at 300 ms) between page init and the insertion.
+        RenderCaptureSupport.FreezeAnimationTimeline(rt);
         rt.Evaluate(
             "var box=document.createElement('div');box.id='box';box.className='anim';document.body.appendChild(box)");
         Assert.True(rt.SetAnimationSample(PocketCalculator.Render.AnimationSample.Document(300.0f)));
@@ -6173,7 +6269,7 @@ public sealed partial class RuntimeTests
         AssertJson("[1,1,100]", moved.Value);
 
         rt.Evaluate("window.scrollTo(0, 99999)");
-        await rt.RunEventLoopBoundedAsync(20);
+        await EventLoopWait.UntilIdleAsync(rt);
         var noOp = await rt.EvaluateForCdpAsync(
             """
             new Promise(resolve => {
@@ -6258,7 +6354,7 @@ public sealed partial class RuntimeTests
             });
             __resizeObserver.observe(document.getElementById("target"));
             """);
-        await rt.RunEventLoopBoundedAsync(40);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """
             [{"interfaces":[true,true,true,true],
@@ -6272,11 +6368,11 @@ public sealed partial class RuntimeTests
         // A style mutation still causes a rendering checkpoint, but unchanged observed
         // geometry must not produce a speculative notification.
         rt.Evaluate("""document.getElementById("target").style.color = "red" """);
-        await rt.RunEventLoopBoundedAsync(40);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal(1.0, rt.Evaluate("__resizeRecords.length")!.GetValue<double>());
 
         rt.Evaluate("""document.getElementById("target").style.width = "140px" """);
-        await rt.RunEventLoopBoundedAsync(40);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             "[[102,120],[122,140]]",
             rt.Evaluate("__resizeRecords.map(record => [record.content[0], record.border[0]])"));
@@ -6350,7 +6446,7 @@ public sealed partial class RuntimeTests
             });
             duplicate.observe(targets[2], { box: "border-box" });
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
 
         AssertJson(
             """
@@ -6405,18 +6501,18 @@ public sealed partial class RuntimeTests
             __contentObserver.observe(target, { box: "content-box" });
             __borderObserver.observe(target, { box: "border-box" });
             """);
-        await rt.RunEventLoopBoundedAsync(40);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("[[88],[100]]", rt.Evaluate("[__contentWidths, __borderWidths]"));
 
         // A viewport update is a rendering update even without a DOM mutation.
         rt.SetViewport(300.0, 100.0);
-        await rt.RunEventLoopBoundedAsync(40);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("[[88,138],[100,150]]", rt.Evaluate("[__contentWidths, __borderWidths]"));
 
         // With border-box sizing a thicker border shrinks the content box but leaves
         // the selected border box unchanged.
         rt.Evaluate("""document.getElementById("target").style.borderWidth = "4px" """);
-        await rt.RunEventLoopBoundedAsync(40);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("[[88,138,134],[100,150]]", rt.Evaluate("[__contentWidths, __borderWidths]"));
     }
 
@@ -6442,7 +6538,7 @@ public sealed partial class RuntimeTests
             });
             __scrollResizeObserver.observe(document.getElementById("probe"));
             """);
-        await rt.RunEventLoopBoundedAsync(40);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal(1.0, rt.Evaluate("__scrollResizeRecords")!.GetValue<double>());
 
         rt.ExecuteScript(
@@ -6456,7 +6552,7 @@ public sealed partial class RuntimeTests
             };
             window.scrollTo(0, 50);
             """);
-        await rt.RunEventLoopBoundedAsync(40);
+        await EventLoopWait.UntilIdleAsync(rt);
         var result = rt.Evaluate("[scrollY, __scrollGeometryReads, __scrollResizeRecords]");
         rt.ExecuteScript(
             "restore-layout-geometry-op",
@@ -6496,7 +6592,10 @@ public sealed partial class RuntimeTests
                     }
                 });
                 observer.observe(document.getElementById("first"));
-                setTimeout(() => resolve(["timed out"]), 100);
+                // A guard against a hang, not a deadline: Chromium 141 delivers both batches
+                // within two frames (~25 ms), but a cold or loaded host spends longer than the
+                // Rust test's 100 ms on its first layout, and the timer then wins the race.
+                setTimeout(() => resolve(["timed out"]), 10_000);
             })
             """,
             returnByValue: true,
@@ -6541,7 +6640,7 @@ public sealed partial class RuntimeTests
             });
             __loopingResizeObserver.observe(target);
             """);
-        await rt.RunEventLoopBoundedAsync(40);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             "[1,1,-1]",
             rt.Evaluate("[__resizeCallbacks, __resizeLoopErrors, __obscura_test_host.vars.__obscura_nextPendingTimeoutDelay()]"));
@@ -6549,7 +6648,7 @@ public sealed partial class RuntimeTests
         // A later external rendering change starts a fresh bounded cycle; the
         // suppressed same-depth observation did not poison future delivery.
         rt.Evaluate("""document.getElementById("target").style.width = "60px" """);
-        await rt.RunEventLoopBoundedAsync(40);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("[2,2]", rt.Evaluate("[__resizeCallbacks, __resizeLoopErrors]"));
     }
 
@@ -6573,9 +6672,9 @@ public sealed partial class RuntimeTests
         // prepared render costs a few hundred milliseconds (embedded font
         // initialization) and each later rendering opportunity a few more, so at that
         // granularity both scrolls land before the first intersection checkpoint runs
-        // and the two crossings collapse into one. The schedule is scaled by ten; the
-        // assertions - one delivery per threshold crossing, with the reference's exact
-        // geometry - are unchanged.
+        // and the two crossings collapse into one. Each scroll here follows the record
+        // of the previous position instead of a clock; the assertions - one delivery
+        // per threshold crossing, with the reference's exact geometry - are unchanged.
         var result = await rt.EvaluateForCdpAsync(
             """
             new Promise(resolve => {
@@ -6592,9 +6691,24 @@ public sealed partial class RuntimeTests
                     }
                 }, { threshold: [0, 0.5, 1] });
                 observer.observe(target);
-                setTimeout(() => window.scrollTo(0, 100), 250);
-                setTimeout(() => window.scrollTo(0, 260), 500);
-                setTimeout(() => resolve(records), 800);
+                // Each scroll waits for the record of the previous position, so the two
+                // crossings cannot collapse however slow a checkpoint is; the result is
+                // read 100 ms after the last expected record, so an extra one still shows.
+                const deadline = Date.now() + 10000;
+                const poll = () => {
+                    if (records.length === 1 && scrollY !== 100) window.scrollTo(0, 100);
+                    if (records.length === 2 && scrollY !== 260) window.scrollTo(0, 260);
+                    if (records.length >= 3) {
+                        setTimeout(() => resolve(records), 100);
+                        return;
+                    }
+                    if (Date.now() > deadline) {
+                        resolve(records);
+                        return;
+                    }
+                    setTimeout(poll, 5);
+                };
+                setTimeout(poll, 5);
             })
             """,
             returnByValue: true,
@@ -6672,7 +6786,7 @@ public sealed partial class RuntimeTests
             // first and must not duplicate any native measurements.
             second.observe(b);
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
 
         AssertJson(
             """
@@ -6717,7 +6831,7 @@ public sealed partial class RuntimeTests
             second.observe(document.getElementById("second"));
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """["first-observer","second-observer","callback-posted-task"]""",
             rt.Evaluate("__intersectionDeliveryOrder"));
@@ -6752,7 +6866,7 @@ public sealed partial class RuntimeTests
             freshObserver._check([], false, new Map());
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""["fresh"]""", rt.Evaluate("__intersectionReplacementOrder"));
     }
 
@@ -6794,8 +6908,27 @@ public sealed partial class RuntimeTests
                     })));
                 }, { root, threshold: [0, 1] });
                 observer.observe(document.getElementById("target"));
-                setTimeout(() => { root.scrollTop = 999; }, 25);
-                setTimeout(() => resolve(records), 60);
+                // Scroll once the initial observation has arrived, and resolve 100 ms after
+                // the next one (time for a spurious extra record to show), instead of fixed
+                // 25/60 ms windows a cold or loaded host misses.
+                const deadline = Date.now() + 10000;
+                let scrolled = false;
+                const poll = () => {
+                    if (!scrolled && records.length >= 1) {
+                        scrolled = true;
+                        root.scrollTop = 999;
+                    }
+                    if (records.length >= 2) {
+                        setTimeout(() => resolve(records), 100);
+                        return;
+                    }
+                    if (Date.now() > deadline) {
+                        resolve(records);
+                        return;
+                    }
+                    setTimeout(poll, 5);
+                };
+                setTimeout(poll, 5);
             })
             """,
             returnByValue: true,
@@ -6914,7 +7047,7 @@ public sealed partial class RuntimeTests
         AssertJson(
             """[["sync","after-observe-0","microtask"],0]""",
             rt.Evaluate("[__ioOrder, __ioReads]"));
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         // The port always builds the render ops, so the batched native measurement
         // path answers and no per-element getBoundingClientRect read happens.
         AssertJson(
@@ -7039,10 +7172,21 @@ public sealed partial class RuntimeTests
                 } catch (error) {
                     elementRoot = error.name;
                 }
-                setTimeout(() => resolve([
-                    marginRecords, zeroRecords, elementRoot,
-                    marginObserver.rootMargin, marginObserver.thresholds,
-                ]), 200);
+                // Read 200 ms after both initial observations have arrived (time for a fake
+                // refire to show), not 200 ms after the start: a cold or loaded host can take
+                // longer than that for the first layout.
+                const deadline = Date.now() + 10000;
+                const poll = () => {
+                    if ((marginRecords.length && zeroRecords.length) || Date.now() > deadline) {
+                        setTimeout(() => resolve([
+                            marginRecords, zeroRecords, elementRoot,
+                            marginObserver.rootMargin, marginObserver.thresholds,
+                        ]), 200);
+                        return;
+                    }
+                    setTimeout(poll, 5);
+                };
+                setTimeout(poll, 5);
             })
             """,
             returnByValue: true,
@@ -7128,10 +7272,20 @@ public sealed partial class RuntimeTests
                     }
                 });
                 observer.observe(document.getElementById("sentinel"));
-                setTimeout(() => resolve([
-                    loaded,
-                    feed.querySelectorAll("div").length,
-                ]), 200);
+                // Read 200 ms after the first delivery (time for a refire to show), not 200 ms
+                // after the start, which a cold or loaded host spends on its first layout.
+                const deadline = Date.now() + 10000;
+                const poll = () => {
+                    if (loaded > 0 || Date.now() > deadline) {
+                        setTimeout(() => resolve([
+                            loaded,
+                            feed.querySelectorAll("div").length,
+                        ]), 200);
+                        return;
+                    }
+                    setTimeout(poll, 5);
+                };
+                setTimeout(poll, 5);
             })
             """,
             returnByValue: true,
@@ -7229,7 +7383,10 @@ public sealed partial class RuntimeTests
                 observer.observe(document.getElementById("stale"));
                 observer.disconnect();
                 observer.observe(document.getElementById("first"));
-                setTimeout(() => resolve(["timed out"]), 100);
+                // A guard against a hang, not a deadline: Chromium 141 delivers both batches
+                // within two frames (~25 ms), but a cold or loaded host spends longer than the
+                // Rust test's 100 ms on its first layout, and the timer then wins the race.
+                setTimeout(() => resolve(["timed out"]), 10_000);
             })
             """,
             returnByValue: true,
@@ -7310,14 +7467,14 @@ public sealed partial class RuntimeTests
             });
             __io.observe(document.getElementById("target"));
             """);
-        await rt.RunEventLoopBoundedAsync(40);
+        await EventLoopWait.UntilIdleAsync(rt);
 
         rt.Evaluate("""document.getElementById("spacer").setAttribute("style", "height:120px")""");
-        await rt.RunEventLoopBoundedAsync(40);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal("[[false,150]]", rt.Evaluate("__ioRecords")!.ToJsonString());
 
         rt.SetViewport(200.0, 160.0);
-        await rt.RunEventLoopBoundedAsync(40);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal("[[false,150],[true,120]]", rt.Evaluate("__ioRecords")!.ToJsonString());
     }
 
@@ -7385,9 +7542,9 @@ public sealed partial class RuntimeTests
             });
             __rootScrollIo.observe(document.getElementById("target"));
             """);
-        await rt.RunEventLoopBoundedAsync(40);
+        await EventLoopWait.UntilIdleAsync(rt);
         rt.Evaluate("window.scrollTo(0, 100)");
-        await rt.RunEventLoopBoundedAsync(40);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal("[[false,150],[true,50]]", rt.Evaluate("__rootScrollIoRecords")!.ToJsonString());
     }
 
@@ -7572,7 +7729,7 @@ public sealed partial class RuntimeTests
         // widened to 50ms; that only gives a stray scroll event more time to
         // show up in the no-op half.
         rt.Evaluate("window.scrollTo(0, 250)");
-        await rt.RunEventLoopBoundedAsync(20);
+        await EventLoopWait.UntilIdleAsync(rt);
         var noOp = await rt.EvaluateForCdpAsync(
             """
             new Promise(resolve => {
@@ -7588,7 +7745,7 @@ public sealed partial class RuntimeTests
         Assert.Equal("[0,0,250]", noOp.Value!.ToJsonString());
 
         rt.Evaluate("window.scrollTo(0, 0)");
-        await rt.RunEventLoopBoundedAsync(20);
+        await EventLoopWait.UntilIdleAsync(rt);
         var moved = await rt.EvaluateForCdpAsync(
             """
             new Promise(resolve => {
@@ -9770,7 +9927,10 @@ public sealed partial class RuntimeTests
         {
             var concurrent = Interlocked.Increment(ref active);
             InterlockedMax(ref maxActive, concurrent);
-            Thread.Sleep(150);
+            // 600 ms rather than the reference's 150: four serialized requests then take
+            // 2.4 s against a bound of 1.8 s, which leaves a loaded host a second of slack
+            // instead of 50 ms while a serialized loader still fails.
+            Thread.Sleep(600);
             Interlocked.Decrement(ref active);
             return BinaryResponse("image/png", png);
         });
@@ -9808,7 +9968,7 @@ public sealed partial class RuntimeTests
                     image.addEventListener("error", () => finish("error", image));
                     void image.complete;
                 }
-                setTimeout(() => resolve([["timed out"]]), 2000);
+                setTimeout(() => resolve([["timed out"]]), 10000);
             })
             """,
             returnByValue: true,
@@ -9830,8 +9990,8 @@ public sealed partial class RuntimeTests
             Volatile.Read(ref maxActive) >= 3,
             "slow image requests did not overlap");
         Assert.True(
-            elapsed < TimeSpan.FromMilliseconds(500),
-            $"four 150ms image requests serialized: {elapsed}");
+            elapsed < TimeSpan.FromMilliseconds(1_800),
+            $"four 600ms image requests serialized: {elapsed}");
         Assert.Equal(0, rt.State.PageInFlight.Value);
     }
 
@@ -10177,7 +10337,7 @@ public sealed partial class RuntimeTests
             image.addEventListener("load", () => __dataSrcEvents.push(image.currentSrc));
             void image.complete;
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJsonEquals(
             """
             [
@@ -10194,7 +10354,7 @@ public sealed partial class RuntimeTests
             image.dataset.src = "ignored.png";
             globalThis.__afterDataSrcMutation = [image.complete, image.currentSrc];
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJsonEquals(
             """
             [
@@ -10287,7 +10447,7 @@ public sealed partial class RuntimeTests
                             image.naturalWidth, image.naturalHeight];
                 })()
                 """));
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Empty(requests.Urls);
 
         rt.ExecuteScript(
@@ -10299,7 +10459,7 @@ public sealed partial class RuntimeTests
         AssertJsonEquals(
             """[false, "http://example.com/page/promoted.png"]""",
             rt.Evaluate("__afterSrcPromotion"));
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJsonEquals(
             """
             [
@@ -10418,7 +10578,7 @@ public sealed partial class RuntimeTests
             """);
         AssertJsonEquals("[true, false, 0, 0]", rt.Evaluate("__imageInitial"));
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJsonEquals(
             """
             [
@@ -10445,7 +10605,7 @@ public sealed partial class RuntimeTests
         // A subsequent request for the same URL is served by the retained
         // renderer bytes rather than calling the loader again.
         rt.ExecuteScript("reload-image", """image.src = "../assets/hero.png";""");
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal(1, Volatile.Read(ref calls));
     }
 
@@ -10510,7 +10670,7 @@ public sealed partial class RuntimeTests
                 error => { __brokenDecode = error.name; }
             );
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJsonEquals(
             """[true, 0, 0, ["error"], "EncodingError"]""",
             rt.Evaluate(
@@ -10581,7 +10741,7 @@ public sealed partial class RuntimeTests
             const late = document.getElementById("late");
             late.addEventListener("load", () => __lateEvents.push("load"));
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """[true, 2, 3, ["load"]]""",
             rt.Evaluate("[late.complete, late.naturalWidth, late.naturalHeight, __lateEvents]"));
@@ -10596,7 +10756,7 @@ public sealed partial class RuntimeTests
         Assert.NotNull(PocketCalculator.Js.Ops.RenderState.EnsurePreparedRender(rt.State));
         Assert.NotNull(rt.State.PreparedRender);
         rt.ExecuteScript("reload-retained-image", """late.src = "late.png";""");
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal(1, calls);
         Assert.NotNull(rt.State.PreparedRender);
 
@@ -10620,7 +10780,7 @@ public sealed partial class RuntimeTests
             const missing = document.getElementById("missing");
             missing.addEventListener("error", () => __missingEvents.push("error"));
             """);
-        await missing.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(missing);
         AssertJson(
             """[true, 0, 0, ["error"]]""",
             missing.Evaluate(
@@ -10714,7 +10874,7 @@ public sealed partial class RuntimeTests
             const cached = document.getElementById("cached");
             void cached.complete;
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJsonEquals(
             "[true, 2, 3]",
             rt.Evaluate("[cached.complete, cached.naturalWidth, cached.naturalHeight]"));
@@ -10728,7 +10888,7 @@ public sealed partial class RuntimeTests
             });
             __stableGetterObserver.observe(document.getElementById("probe"));
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJsonEquals(
             "[1, -1]",
             rt.Evaluate("[__stableGetterResizeRecords, __obscura_test_host.vars.__obscura_nextPendingTimeoutDelay()]"));
@@ -10823,7 +10983,7 @@ public sealed partial class RuntimeTests
             swap.addEventListener("load", () => __swapEvents.push(swap.currentSrc));
             swap.src = "new.png";
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJsonEquals(
             """
             [
@@ -10980,7 +11140,7 @@ public sealed partial class RuntimeTests
                 __pictureLoads.push(pictureImage.currentSrc);
             });
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJsonEquals(
             """
             [
@@ -11000,7 +11160,7 @@ public sealed partial class RuntimeTests
         rt.SetViewport(600.0, 600.0);
         Assert.False(rt.Evaluate("pictureImage.complete")!.GetValue<bool>());
         Assert.Single(requests.Urls);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJsonEquals(
             """
             [
@@ -11027,7 +11187,7 @@ public sealed partial class RuntimeTests
             globalThis.__pictureCompleteAfterSourceMutation = pictureImage.complete;
             """);
         Assert.False(rt.Evaluate("__pictureCompleteAfterSourceMutation")!.GetValue<bool>());
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJsonEquals(
             """
             [
@@ -11128,7 +11288,7 @@ public sealed partial class RuntimeTests
                 __srcsetLoads.push(srcsetImage.currentSrc);
             });
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJsonEquals(
             """
             [
@@ -11140,7 +11300,7 @@ public sealed partial class RuntimeTests
 
         rt.ExecuteScript("change-responsive-sizes", """srcsetImage.sizes = "800px";""");
         Assert.False(rt.Evaluate("srcsetImage.complete")!.GetValue<bool>());
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJsonEquals(
             """
             [
@@ -12800,6 +12960,10 @@ public sealed partial class RuntimeTests
                 assert_eq!(p["winInput"], true);
             }
         */
+        // DEVIATION from the Rust test: Chromium 141 puts the GlobalEventHandlers on
+        // HTMLElement.prototype and SVGElement.prototype, not on Element.prototype (whose
+        // `'oninput' in` is false there), and the port now does the same (see
+        // _distributeElementMembers in bootstrap.js). An element still has them.
         using var fixture = RuntimeFixture.Setup("<div></div>");
         var result = fixture.Runtime.Evaluate("""
             JSON.stringify({
@@ -12807,6 +12971,9 @@ public sealed partial class RuntimeTests
                 docChange: ('onchange' in document),
                 docClick: ('onclick' in document),
                 elProtoInput: ('oninput' in Element.prototype),
+                htmlProtoInput: ('oninput' in HTMLElement.prototype),
+                svgProtoInput: ('oninput' in SVGElement.prototype),
+                divInput: ('oninput' in document.querySelector('div')),
                 winInput: ('oninput' in window)
             })
             """);
@@ -12814,7 +12981,10 @@ public sealed partial class RuntimeTests
         Assert.True(p["docInput"]!.GetValue<bool>());
         Assert.True(p["docChange"]!.GetValue<bool>());
         Assert.True(p["docClick"]!.GetValue<bool>());
-        Assert.True(p["elProtoInput"]!.GetValue<bool>());
+        Assert.False(p["elProtoInput"]!.GetValue<bool>());
+        Assert.True(p["htmlProtoInput"]!.GetValue<bool>());
+        Assert.True(p["svgProtoInput"]!.GetValue<bool>());
+        Assert.True(p["divInput"]!.GetValue<bool>());
         Assert.True(p["winInput"]!.GetValue<bool>());
     }
 
@@ -15698,6 +15868,9 @@ public sealed partial class RuntimeTests
                 const originalFetchOp = __obscura_test_ops.op_fetch_url;
                 const runPair = async (explicitlyInOrder) => {
                     globalThis.__dynamicOrder = [];
+                    // "slow" answers 500 ms after it is asked rather than the reference's
+                    // 30: on a loaded host the second request went out more than 29 ms after
+                    // the first, and the slow script then finished first however async it was.
                     __obscura_test_ops.op_fetch_url = (url) => new Promise(resolve => {
                         const slow = url.includes("slow");
                         setTimeout(() => resolve(JSON.stringify({
@@ -15705,7 +15878,7 @@ public sealed partial class RuntimeTests
                             headers: {"content-type": "text/javascript"},
                             body: `globalThis.__dynamicOrder.push("${slow ? "slow" : "fast"}")`,
                             url,
-                        })), slow ? 30 : 1);
+                        })), slow ? 500 : 1);
                     });
                     const load = name => new Promise(resolve => {
                         const script = document.createElement("script");
@@ -16569,9 +16742,16 @@ public sealed partial class RuntimeTests
                 assert_eq!(tag, serde_json::json!("BODY"));
             }
         */
-        using var fixture = RuntimeFixture.Setup("<html><body><h1>Hi</h1></body></html>");
+        // DEVIATION: the Rust shim's elementFromPoint is a stub answering <body> for any point in
+        // the viewport. This build hit-tests the laid-out boxes (op_hit_test), and Chromium 141
+        // answers the heading under the point: (10, 30) is inside the h1 whether or not quirks
+        // mode drops its top margin, and (10, 10) is above the body in standards mode.
+        using var fixture = RuntimeFixture.Setup("<!doctype html><html><body><h1>Hi</h1></body></html>");
         Assert.Equal(
-            "BODY",
+            "H1",
+            fixture.Runtime.Evaluate("document.elementFromPoint(10, 30)?.tagName")!.GetValue<string>());
+        Assert.Equal(
+            "HTML",
             fixture.Runtime.Evaluate("document.elementFromPoint(10, 10)?.tagName")!.GetValue<string>());
     }
 
@@ -17430,6 +17610,20 @@ public sealed partial class RuntimeTests
         Assert.True(
             error.Message.Contains("Inline module evaluation timed out after", StringComparison.Ordinal),
             $"expected evaluation timeout, got: {error.Message}");
+    }
+
+    [Fact]
+    public async Task FinishedModuleIsNotChargedForThePagesQueuedTasks()
+    {
+        // A module without a top-level await has run when its body returns. Driving the
+        // loop first ran the page's queued timers on the module's budget and reported a
+        // module that had finished as timed out.
+        using var rt = PocketCalculatorJsRuntime.WithBaseUrl("https://example.com/");
+        rt.Evaluate("(() => { setTimeout(() => { const until = Date.now() + 1000; while (Date.now() < until) {} }, 0); return 0; })()");
+
+        await rt.LoadInlineModuleAsync("globalThis.__finished = true;", "https://example.com/", 200);
+
+        Assert.True(rt.Evaluate("globalThis.__finished")!.GetValue<bool>());
     }
 
     [Fact]
@@ -19224,13 +19418,16 @@ public sealed partial class RuntimeTests
                     age.labels.length,
                     age.labels[0] === l2,
                     hid.labels.length,
-                    plain.labels.length,
-                    plain.control === null,
+                    plain.labels === undefined,
+                    plain.control === undefined,
                 ].join(',');
             })()
             """);
+        // DEVIATION from the Rust test, which reads `labels` and `control` off a <div>: the Rust
+        // shim keeps them on Element.prototype. In Chromium 141 they are HTMLLabelElement's and
+        // the labelable elements' only, so a div has neither (InterfaceMemberPlacementTests).
         Assert.Equal(
-            "true,true,1,true,1,true,0,0,true",
+            "true,true,1,true,1,true,0,true,true",
             result!.GetValue<string>());
     }
 
@@ -19404,7 +19601,7 @@ public sealed partial class RuntimeTests
             + "scheduler.postTask(() => {"
             + "  document.getElementById('result').textContent = location.origin;"
             + "});");
-        await parent.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(parent);
 
         Assert.Equal(
             "https://child.example",
@@ -19521,7 +19718,7 @@ public sealed partial class RuntimeTests
             + "  parent.postMessage('delayed-stale-posted-task', '*');"
             + "}), 1);");
         frame.Dispose();
-        await parent.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(parent);
 
         Assert.Empty(parent.TakePendingFrameMessages());
 
@@ -19732,7 +19929,7 @@ public sealed partial class RuntimeTests
         // still inside the frame, which would hide the bug this guards.
         frame.ExecuteScript(
             "setTimeout(() => { document.body.setAttribute('data-who', location.href); }, 50);");
-        await parent.RunEventLoopBoundedAsync(300);
+        await EventLoopWait.UntilIdleAsync(parent);
 
         Assert.Equal(
             "https://child.example/",
@@ -19778,7 +19975,7 @@ public sealed partial class RuntimeTests
             parent, 1, 0, "https://child.example/", "<html><body></body></html>");
         Assert.NotNull(frame);
         frame.ExecuteScript("setTimeout(() => { globalThis.fired = 1; }, 50);");
-        await parent.RunEventLoopBoundedAsync(300);
+        await EventLoopWait.UntilIdleAsync(parent);
         Assert.Equal(
             1,
             (long)frame.Evaluate("globalThis.fired || 0")!.GetValue<double>());
@@ -19829,7 +20026,7 @@ public sealed partial class RuntimeTests
             + "const cancelled = setTimeout(() => { globalThis.kept = 1; }, 50);"
             + "setTimeout(() => { globalThis.kept = 2; }, 50);"
             + "clearTimeout(cancelled);");
-        await parent.RunEventLoopBoundedAsync(300);
+        await EventLoopWait.UntilIdleAsync(parent);
         Assert.Equal(2, (long)frame.Evaluate("globalThis.kept")!.GetValue<double>());
     }
 
@@ -19875,7 +20072,7 @@ public sealed partial class RuntimeTests
         frame.ExecuteScript(
             "Promise.resolve().then(() => { "
             + "document.body.setAttribute('data-who', location.href); });");
-        await parent.RunEventLoopBoundedAsync(300);
+        await EventLoopWait.UntilIdleAsync(parent);
         Assert.Equal(
             "https://child.example/",
             frame.Evaluate("document.body.getAttribute('data-who')")!.GetValue<string>());

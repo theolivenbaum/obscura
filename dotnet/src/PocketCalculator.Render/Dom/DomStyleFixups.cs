@@ -78,8 +78,30 @@ internal static class DomStyleFixups
     /// Normalize a control's collected text the way the sizing pass measures it: one line,
     /// runs of white space collapsed to a single space.
     /// </summary>
-    internal static string NormalizeControlLabel(string text) =>
-        string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+    /// <remarks>
+    /// An atomic inline child (an icon, an inline-block) leaves
+    /// <see cref="AtomicPlaceholder"/> in the collected text, so the white space between it
+    /// and the label survives the collapse, then the marker becomes a zero-width word joiner
+    /// (U+2060), so the measured run does not end in white space the shaper would trim.
+    /// DEVIATION from crates/obscura-render/src/dom.rs, which trims the space next to an
+    /// icon as if it sat at the end of the line: `<span>Read Wikipedia</span> <i
+    /// style="display:inline-block;width:10px"></i>` came out one space short of its
+    /// content (120px against Chromium's 123px), and the icon wrapped onto a second line.
+    /// See "Known deviations" in todo.md.
+    /// </remarks>
+    internal static string NormalizeControlLabel(string text)
+    {
+        string collapsed = string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return collapsed.Contains(AtomicPlaceholder, StringComparison.Ordinal)
+            ? collapsed.Replace(AtomicPlaceholder.ToString(), "\u2060", StringComparison.Ordinal)
+            : collapsed;
+    }
+
+    /// <summary>
+    /// Stands in for an atomic inline child in a button's collected label text. U+FFFC is not
+    /// white space, so collapsing keeps the spaces on either side of it.
+    /// </summary>
+    internal const char AtomicPlaceholder = '\uFFFC';
 
     /// <remarks>
     /// The relative arms are an unreached net, not a resolution path: this pass runs after the
@@ -135,7 +157,7 @@ internal static class DomStyleFixups
             default:
                 // A block container stacks only once something in it is block-level; a run of
                 // inline children shares one line and keeps accumulating.
-                foreach (NodeId child in DomTraversal.RenderedChildren(tree, container))
+                foreach (NodeId child in DomTraversal.EachRenderedChild(tree, container))
                 {
                     if (IsBlockLevelChild(tree, child, styles))
                     {
@@ -280,6 +302,7 @@ internal static class DomStyleFixups
             is "svg" or "img" or "video" or "canvas" or "iframe" or "embed" or "object";
         if (isAtomic)
         {
+            content.Text.Append(AtomicPlaceholder);
             if (style is not null && DefiniteInlineSize(style.Width, fontSize) is { } width)
             {
                 float horizontalEdges = style.Padding.Left
@@ -321,6 +344,7 @@ internal static class DomStyleFixups
                     ? childWidth + horizontal
                     : F32.Max(childWidth, horizontal);
                 content.AtomicWidth += childBorderBox + margins;
+                content.Text.Append(AtomicPlaceholder);
 
                 // A definite inline size is the whole contribution; its own text is laid out
                 // inside it and cannot widen the button further.
@@ -328,6 +352,12 @@ internal static class DomStyleFixups
             }
 
             childEdges = horizontal + margins;
+        }
+
+        bool atomicInline = style is { IsInlineBlock: true };
+        if (atomicInline)
+        {
+            content.Text.Append(AtomicPlaceholder);
         }
 
         content.AtomicWidth += childEdges;
@@ -350,7 +380,28 @@ internal static class DomStyleFixups
             }
         }
 
-        NativeButtonWalkChildren(tree, id, style, styles, fontSize, buttonStyle, engine, content);
+        // A definite max-width caps the child's contribution the way it caps its box: msn.com's
+        // settings button hides its "Page settings" label in a `max-width: 0` span, and counting
+        // the label made the button (and so the header) 85px wider than Chromium 141's 40px.
+        if (style is not null && DefiniteInlineSize(style.MaxWidth, fontSize) is { } maxWidth)
+        {
+            float cap = style.BoxSizing == BoxSizing.ContentBox
+                ? maxWidth
+                : F32.Max(maxWidth - (style.Padding.Left + style.Padding.Right + style.Border.Left + style.Border.Right), 0f);
+            NativeButtonIntrinsicContent inner = new();
+            NativeButtonWalkChildren(tree, id, style, styles, fontSize, buttonStyle, engine, inner);
+            content.AtomicWidth += F32.Min(LineWidth(inner, buttonStyle, engine), cap);
+            content.Text.Append(AtomicPlaceholder);
+        }
+        else
+        {
+            NativeButtonWalkChildren(tree, id, style, styles, fontSize, buttonStyle, engine, content);
+        }
+
+        if (atomicInline)
+        {
+            content.Text.Append(AtomicPlaceholder);
+        }
     }
 
     /// <summary>
@@ -360,14 +411,36 @@ internal static class DomStyleFixups
     /// </summary>
     internal static void GrowTrailingAutoCells(DomTree tree, Dictionary<NodeId, LayoutStyle> styles)
     {
-        foreach (NodeId tr in DomTraversal.RenderedDescendants(tree, tree.Document))
+        // Each row writes only its own cells, so the rows can be met in any order: find them
+        // among the styles (every rendered element has one) rather than walking the document.
+        List<NodeId> rows = [];
+        foreach (NodeId candidate in styles.Keys)
         {
-            if (!DomTraversal.IsLocal(tree, tr, "tr"))
+            if (DomTraversal.IsLocal(tree, candidate, "tr"))
             {
-                continue;
+                rows.Add(candidate);
             }
+        }
+
+        foreach (NodeId tr in rows)
+        {
 
             List<NodeId> children = tree.Children(tr);
+
+            // DEVIATION from crates/obscura-render/src/dom.rs, which writes into styles it
+            // computed this pass. The port reuses computed styles across passes, and a retained
+            // cell still carries the 1 this pass wrote last time: the walk below took it for an
+            // authored flex-grow and grew the cell before it as well. Undo the previous pass's
+            // writes first, so the outcome is the one a fresh cascade gets.
+            foreach (NodeId cid in children)
+            {
+                if (styles.TryGetValue(cid, out LayoutStyle? previous) && previous.FlexGrowFromTrailingCell)
+                {
+                    previous.FlexGrow = null;
+                    previous.FlexGrowFromTrailingCell = false;
+                }
+            }
+
             for (int index = children.Count - 1; index >= 0; index--)
             {
                 NodeId cid = children[index];
@@ -381,6 +454,7 @@ internal static class DomStyleFixups
                     && style.FlexGrow is null)
                 {
                     style.FlexGrow = 1f;
+                    style.FlexGrowFromTrailingCell = true;
                     break;
                 }
             }
@@ -393,14 +467,12 @@ internal static class DomStyleFixups
     /// </summary>
     internal static void PropagateBorderSpacing(DomTree tree, Dictionary<NodeId, LayoutStyle> styles)
     {
-        foreach (NodeId id in DomTraversal.RenderedDescendants(tree, tree.Document))
+        // Every rendered element has a style, and each table's rows are its own (the row walk
+        // stops at a nested table), so the order the tables are met in does not matter: walk
+        // the styles rather than the whole document.
+        foreach ((NodeId id, LayoutStyle tableStyle) in styles)
         {
             if (!DomTraversal.IsLocal(tree, id, "table"))
-            {
-                continue;
-            }
-
-            if (!styles.TryGetValue(id, out LayoutStyle? tableStyle))
             {
                 continue;
             }
@@ -441,6 +513,19 @@ internal static class DomStyleFixups
 
             ApplySpacingToRows(tree, cid, horizontal, vertical, styles);
         }
+    }
+
+    private static bool IsDomDescendantOrSelf(DomTree tree, NodeId node, NodeId root)
+    {
+        for (NodeId? current = node; current is { } id; current = tree.GetNode(id)?.Parent)
+        {
+            if (id == root)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     internal static void CollectEffectiveGridChildren(
@@ -507,20 +592,21 @@ internal static class DomStyleFixups
         NodeId root,
         Dictionary<NodeId, LayoutStyle> styles)
     {
-        List<NodeId> stack = [root];
-        while (stack.Count > 0)
+        // Each grid container places only its own (effective) children, so the containers can
+        // be met in any order: find them among the styles rather than walking every node of
+        // the document, and keep only those under the root in the DOM, as the walk did.
+        List<NodeId> grids = [];
+        foreach ((NodeId candidate, LayoutStyle candidateStyle) in styles)
         {
-            NodeId id = stack[^1];
-            stack.RemoveAt(stack.Count - 1);
-            foreach (NodeId cid in tree.Children(id))
+            if (candidateStyle.Display == Display.Grid && IsDomDescendantOrSelf(tree, candidate, root))
             {
-                stack.Add(cid);
+                grids.Add(candidate);
             }
+        }
 
-            if (!styles.TryGetValue(id, out LayoutStyle? style) || style.Display != Display.Grid)
-            {
-                continue;
-            }
+        foreach (NodeId id in grids)
+        {
+            LayoutStyle style = styles[id];
 
             List<List<string>>? areas = style.GridAreas is { Count: > 0 } gridAreas ? gridAreas : null;
             List<EffectiveGridChild> gridChildren = [];
@@ -906,7 +992,7 @@ internal static class DomStyleFixups
             return false;
         }
 
-        foreach (NodeId cid in DomTraversal.RenderedChildren(tree, id))
+        foreach (NodeId cid in DomTraversal.EachRenderedChild(tree, id))
         {
             if (tree.GetNode(cid) is not { } node)
             {
@@ -915,7 +1001,7 @@ internal static class DomStyleFixups
 
             if (node.TextContentOfTextNode is { } contents)
             {
-                if (contents.Trim().Length != 0)
+                if (contents.AsSpan().Trim().Length != 0)
                 {
                     return true;
                 }
@@ -971,7 +1057,7 @@ internal static class DomStyleFixups
             return;
         }
 
-        foreach (NodeId child in DomTraversal.RenderedChildren(tree, parent))
+        foreach (NodeId child in DomTraversal.EachRenderedChild(tree, parent))
         {
             styles.TryGetValue(child, out LayoutStyle? style);
             bool transparent = style is not null
@@ -979,7 +1065,7 @@ internal static class DomStyleFixups
                 && style.Display != Display.None;
             if (transparent)
             {
-                foreach (LayoutStyle? pseudo in new[] { style!.BeforePseudo, style.AfterPseudo })
+                foreach (LayoutStyle? pseudo in (ReadOnlySpan<LayoutStyle?>)[style!.BeforePseudo, style.AfterPseudo])
                 {
                     if (pseudo is not null)
                     {
@@ -1006,7 +1092,7 @@ internal static class DomStyleFixups
         {
             bool hostIsItemContainer = host.Display is Display.Flex or Display.Grid
                 && !host.InternalFlexContainer;
-            foreach (LayoutStyle? pseudo in new[] { host.BeforePseudo, host.AfterPseudo })
+            foreach (LayoutStyle? pseudo in (ReadOnlySpan<LayoutStyle?>)[host.BeforePseudo, host.AfterPseudo])
             {
                 if (pseudo is null)
                 {
@@ -1490,10 +1576,6 @@ internal static class DomStyleFixups
         || style.IsInlineBlock
         || style.Float is not null
         || style.Position == TaffyPosition.Absolute;
-
-    internal static bool ClearMatchesFloatSides(Clear clear, bool hasLeft, bool hasRight) =>
-        (!hasLeft || clear is Clear.Left or Clear.Both)
-        && (!hasRight || clear is Clear.Right or Clear.Both);
 
     internal static bool HasDeferredOrAutoMargin(LayoutStyle style)
     {

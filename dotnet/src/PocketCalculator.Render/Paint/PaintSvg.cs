@@ -653,7 +653,7 @@ internal static class PaintSvg
 
             void Append(string name, string value)
             {
-                if (value.Trim().Length == 0)
+                if (value.AsSpan().Trim().Length == 0)
                 {
                     return;
                 }
@@ -797,7 +797,7 @@ internal static class PaintSvg
 
         string? resolved = Css.CssVariables.SubstituteVarValue(value, properties, 0);
         if (resolved is null
-            || resolved.Trim().Length == 0
+            || resolved.AsSpan().Trim().Length == 0
             || SvgPresentationSubstitutionIsGuaranteedInvalid(name, resolved))
         {
             return null;

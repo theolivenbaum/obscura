@@ -14,6 +14,9 @@ public sealed record SpanAttrs
 
     public required float LineHeight { get; init; }
 
+    /// <summary>Whether <see cref="LineHeight"/> came from <c>line-height: normal</c>.</summary>
+    public bool LineHeightNormal { get; init; }
+
     public required float LetterSpacing { get; init; }
 
     public required bool LetterSpacingNonNormal { get; init; }
@@ -58,6 +61,12 @@ public sealed record SpanAttrs
     /// <summary>How far its baseline sits above the line's, when it has one.</summary>
     public float Shift { get; init; }
 
+    /// <summary>
+    /// The atomic inline this span stands for, by index into its context's atomics; -1 for text.
+    /// See <see cref="TextAttrs.Atomic"/>.
+    /// </summary>
+    public int Atomic { get; init; } = -1;
+
     public bool WrappingEnabled => WhiteSpace is not (WhiteSpace.NoWrap or WhiteSpace.Pre);
 
     public bool HasLayoutEmergencyBreaks =>
@@ -84,6 +93,22 @@ public sealed record SpanAttrs
             throw new InvalidOperationException("variation index overflows its metadata field");
         }
 
+        if (Atomic >= 0)
+        {
+            // Sized once the atomic is laid out (TextEngine.SetAtomic); until then it is empty.
+            return new TextAttrs
+            {
+                Family = Family,
+                FontId = FontId,
+                Metrics = new TextMetrics(1f, 1f, 0f, 0f),
+                Weight = Weight,
+                Color = null,
+                CssLineBreakPolicy = new CssLineBreak(WrappingEnabled, WordBreak, OverflowWrap),
+                Metadata = InlineGeometry.MetaAtomic,
+                Atomic = Atomic,
+            };
+        }
+
         ShapingFeature[] features = [];
         if (LetterSpacingNonNormal && float.IsFinite(LetterSpacing) && LetterSpacing != 0f)
         {
@@ -107,7 +132,8 @@ public sealed record SpanAttrs
                 Above,
                 Below,
                 Align,
-                Shift),
+                Shift,
+                LineHeightNormal),
             Weight = Weight,
             FontWeightAxis = Weight,
             FontOpticalSize = OpticalSizing == FontOpticalSizing.Auto ? FontSize : null,
@@ -135,6 +161,8 @@ internal sealed record SpanCtx
     public required float FontSize { get; init; }
 
     public required float LineHeight { get; init; }
+
+    public bool LineHeightNormal { get; init; }
 
     public required float LetterSpacing { get; init; }
 
@@ -188,6 +216,7 @@ internal sealed record SpanCtx
     {
         FontSize = FontSize,
         LineHeight = LineHeight,
+        LineHeightNormal = LineHeightNormal,
         LetterSpacing = LetterSpacing,
         LetterSpacingNonNormal = LetterSpacingNonNormal,
         Weight = Weight,
@@ -231,7 +260,23 @@ internal sealed class Collector
     public List<OwnerChainNode> OwnerChain = [];
     public List<InlineOwnerBox> OwnerBoxes = [];
     public List<InlineBoundaryEvent> BoundaryEvents = [];
+
+    /// <summary>Where each DOM text node's collapsed text starts, for range geometry.</summary>
+    public List<TextNodeChunk> TextNodes = [];
+
+    /// <summary>
+    /// The atomic inlines met, when the caller lays them out in the context (see
+    /// <c>TextEngine.TryBuildRun</c>); null when an atomic stops the run from folding.
+    /// </summary>
+    internal List<AtomicInline>? Atomics;
     public int TextLength;
+
+    /// <summary>
+    /// Floats met in the inline content, with the text offset they sit at, when the caller
+    /// lays them out as CSS floats anchored to their line (see <c>TextEngine.TryBuildRun</c>);
+    /// null otherwise.
+    /// </summary>
+    public List<(NodeId Float, int Offset)>? FloatAnchors;
 
     // Text appended to output[^1] and not yet written back into it. Concatenating onto the
     // last span's string for every run that shares its attributes copied the paragraph so far
@@ -317,6 +362,10 @@ public static class Inline
     public static (float X, float Y) ContentOrigin(Rect rect, LayoutStyle style) => (
         rect.X + style.UsedBorder.Left + style.Padding.Left,
         rect.Y + style.UsedBorder.Top + style.Padding.Top);
+
+    /// <summary>Whether a box's used <c>line-height</c> is the font-relative <c>normal</c>.</summary>
+    internal static bool IsNormalLineHeight(LayoutStyle style) =>
+        style.LineHeight is not { } lineHeight || lineHeight.Kind == LineHeightKind.Normal;
 
     public static float ContentWidth(Rect rect, LayoutStyle style) => F32.Max(
         rect.Width - style.UsedBorder.Left - style.UsedBorder.Right - style.Padding.Left - style.Padding.Right,
@@ -442,6 +491,10 @@ public static class Inline
     internal static Size<float> ConstrainedAutoReplacedSize(float width, float height, LayoutStyle style) =>
         ReplacedItem.FromStyle(width, height, style).Size(new Size<float?>(null, null));
 
+    /// <inheritdoc cref="ConstrainedAutoReplacedSize(float, float, LayoutStyle)"/>
+    internal static Size<float> ConstrainedAutoReplacedSize(ReplacedIntrinsic intrinsic, LayoutStyle style) =>
+        ReplacedItem.FromIntrinsic(intrinsic, style).Size(new Size<float?>(null, null));
+
     /// <summary>
     /// HTML's default object size for replaced media whose intrinsic metadata is not available
     /// yet. Canvas dimensions and decoded video metadata can replace these defaults before
@@ -522,7 +575,19 @@ public static class Inline
     /// Such a container collapses cleanly to one shaped buffer; anything else keeps the general
     /// build path.
     /// </remarks>
-    public static bool IsPureTextIfc(DomTree tree, NodeId id, IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    public static bool IsPureTextIfc(DomTree tree, NodeId id, IReadOnlyDictionary<NodeId, LayoutStyle> styles) =>
+        IsPureTextIfc(tree, id, styles, allowAtomics: false);
+
+    /// <summary>
+    /// <see cref="IsPureTextIfc(DomTree, NodeId, IReadOnlyDictionary{NodeId, LayoutStyle})"/>,
+    /// counting atomic inlines (see <see cref="IsAtomicInline"/>) as content of the context when
+    /// <paramref name="allowAtomics"/>.
+    /// </summary>
+    internal static bool IsPureTextIfc(
+        DomTree tree,
+        NodeId id,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        bool allowAtomics)
     {
         if (!styles.TryGetValue(id, out LayoutStyle? style))
         {
@@ -560,7 +625,7 @@ public static class Inline
 
         foreach (NodeId child in children)
         {
-            if (!InlineChildOk(tree, child, styles, ref hasText))
+            if (!InlineChildOk(tree, child, styles, ref hasText, allowFloats: false, allowAtomics))
             {
                 return false;
             }
@@ -568,6 +633,18 @@ public static class Inline
 
         return hasText;
     }
+
+    /// <summary>
+    /// Whether an element is an atomic inline an inline formatting context lays out as one unit
+    /// of its line: an in-flow inline-block, inline-flex, inline-grid or inline-table box, or an
+    /// inline replaced element or form control.
+    /// </summary>
+    internal static bool IsAtomicInline(string local, LayoutStyle style) =>
+        style.Position != Position.Absolute
+        && style.Float is null
+        && style.Display != Display.None
+        && !style.DisplayContents
+        && (style.IsInlineBlock || (style.Display == Display.Inline && IsReplaced(local)));
 
     /// <summary>
     /// Is <paramref name="cid"/> (and its whole subtree) inline-level, in-flow content safe to
@@ -585,7 +662,9 @@ public static class Inline
         DomTree tree,
         NodeId cid,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
-        ref bool hasText)
+        ref bool hasText,
+        bool allowFloats = false,
+        bool allowAtomics = false)
     {
         if (!StackGuard.CanDescend())
         {
@@ -600,7 +679,7 @@ public static class Inline
 
         if (node.Data is TextData text)
         {
-            if (text.Contents.Trim().Length != 0)
+            if (text.Contents.AsSpan().Trim().Length != 0)
             {
                 hasText = true;
             }
@@ -629,9 +708,23 @@ public static class Inline
             return true;
         }
 
+        // A float in a document laid out with CSS floats is anchored to the line it sits on
+        // and laid out by the block formatting context; it adds nothing to the text.
+        if (allowFloats && style.Float is not null && style.Position != Position.Absolute)
+        {
+            return true;
+        }
+
         // A replaced element or an atomic inline-block has its own box with non-text content.
+        // Laid out in the context, it is one unit of its line, and content like text.
         if (IsReplaced(element.Name.Local) || style.IsInlineBlock)
         {
+            if (allowAtomics && IsAtomicInline(element.Name.Local, style))
+            {
+                hasText = true;
+                return true;
+            }
+
             return false;
         }
 
@@ -653,7 +746,7 @@ public static class Inline
 
         foreach (NodeId grandchild in RenderedChildren(tree, cid))
         {
-            if (!InlineChildOk(tree, grandchild, styles, ref hasText))
+            if (!InlineChildOk(tree, grandchild, styles, ref hasText, allowFloats, allowAtomics))
             {
                 return false;
             }
@@ -887,6 +980,75 @@ public static class Inline
 
         collector.FlushLastSpan(output);
         output.Add((buffer.ToString(), attrs));
+    }
+
+    /// <summary>
+    /// The collected offset that DOM offset <paramref name="domOffset"/> (UTF-16) of a text
+    /// node maps to, replaying <see cref="PushText"/> from the state <paramref name="chunk"/>
+    /// recorded: collapsed white space maps to where its one space (or nothing) went, and a
+    /// transformed character to the start of its expansion.
+    /// </summary>
+    internal static int CollectedOffset(string raw, in TextNodeChunk chunk, int domOffset)
+    {
+        int position = chunk.Start;
+        bool lastWasSpace = chunk.LastWasSpace;
+        bool atWordStart = lastWasSpace;
+        bool lastAppendedSpace = false;
+        int index = 0;
+        foreach (Rune rune in raw.EnumerateRunes())
+        {
+            if (index >= domOffset)
+            {
+                break;
+            }
+
+            index += rune.Utf16SequenceLength;
+            if (IsCollapsibleWhiteSpace(rune))
+            {
+                switch (chunk.WhiteSpace)
+                {
+                    case WhiteSpace.Pre or WhiteSpace.PreWrap or WhiteSpace.BreakSpaces:
+                        position += rune.Utf16SequenceLength;
+                        lastAppendedSpace = rune.Value == ' ';
+                        break;
+                    case WhiteSpace.PreLine when rune.Value == '\n':
+                        if (lastAppendedSpace)
+                        {
+                            position--;
+                        }
+
+                        position++;
+                        lastAppendedSpace = false;
+                        break;
+                    default:
+                        if (!lastWasSpace)
+                        {
+                            position++;
+                            lastAppendedSpace = true;
+                        }
+
+                        break;
+                }
+
+                lastWasSpace = true;
+                atWordStart = true;
+            }
+            else
+            {
+                position += chunk.Transform switch
+                {
+                    TextTransform.Uppercase => ToUpper(rune).Length,
+                    TextTransform.Lowercase => ToLower(rune).Length,
+                    TextTransform.Capitalize when atWordStart => ToUpper(rune).Length,
+                    _ => rune.Utf16SequenceLength,
+                };
+                lastWasSpace = false;
+                atWordStart = false;
+                lastAppendedSpace = false;
+            }
+        }
+
+        return Math.Clamp(position, chunk.Start, Math.Max(chunk.End, chunk.Start));
     }
 
     /// <summary>

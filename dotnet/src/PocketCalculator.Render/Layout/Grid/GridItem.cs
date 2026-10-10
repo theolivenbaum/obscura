@@ -252,11 +252,19 @@ internal sealed class GridItem
         var inherentSize = Size.MaybeResolve(gridAreaSize, calc).MaybeAdd(boxSizingAdjustment);
         var minSize = MinSize
             .MaybeResolve(gridAreaSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                Size.MaybeResolve(gridAreaSize, calc),
+                MaxSize.MaybeResolve(gridAreaSize, calc),
+                isMinimum: true)
             .MaybeAdd(boxSizingAdjustment);
         var maxSize = MaxSize
             .MaybeResolve(gridAreaSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                Size.MaybeResolve(gridAreaSize, calc),
+                MinSize.MaybeResolve(gridAreaSize, calc),
+                isMinimum: false)
             .MaybeAdd(boxSizingAdjustment);
 
         var gridAreaMinusItemMarginsSize = gridAreaSize.MaybeSub(margins);
@@ -491,7 +499,11 @@ internal sealed class GridItem
 
         size ??= MinSize
             .MaybeResolve(gridAreaSize, calc)
-            .MaybeApplyAspectRatio(AspectRatio)
+            .TransferLimitThroughAspectRatio(
+                AspectRatio,
+                Size.MaybeResolve(gridAreaSize, calc),
+                MaxSize.MaybeResolve(gridAreaSize, calc),
+                isMinimum: true)
             .MaybeAdd(boxSizingAdjustment)
             .Get(axis);
 

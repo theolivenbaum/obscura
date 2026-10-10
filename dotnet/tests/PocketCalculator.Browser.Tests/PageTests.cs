@@ -1478,8 +1478,14 @@ public sealed class PageTests
         PageFixtures.AssertJson("\"rejected\"", page.Js!.Evaluate("globalThis.__classic_before_map"));
     }
 
+    /// <summary>
+    /// An async classic script runs once it has loaded, as a task: the parser has registered the
+    /// import map that follows it by then. Chromium 141 resolves the async script's import()
+    /// through it (scripts/script-order-conformance, page importMap). The port used to run every
+    /// fetched async script in document order before parsing went on, and it was rejected.
+    /// </summary>
     [Fact]
-    public async Task ReadyAsyncClassicScriptRunsBeforeALaterParserImportMap()
+    public async Task AsyncClassicScriptSeesALaterParserImportMap()
     {
         using TestHttpServer server = SpawnParserImportMapServer();
         using Page page = PageFixtures.ImportMapTestPage(
@@ -1493,9 +1499,8 @@ public sealed class PageTests
             """);
         await page.ExecuteScriptsAsync(CancellationToken.None);
         await page.SettleForDurationAsync(500);
-        PageFixtures.AssertJson("\"rejected\"", page.Js!.Evaluate("globalThis.__async_before_map"));
+        PageFixtures.AssertJson("\"later-map\"", page.Js!.Evaluate("globalThis.__async_before_map"));
         Assert.Equal("/app/async.js", server.NextPath(RequestTimeout));
-        Assert.False(server.TryNextPath(TimeSpan.FromMilliseconds(50), out _));
     }
 
     // BLOCKED on a bug in PocketCalculator.Js, not on this port: `PocketCalculatorJsRuntime` builds
@@ -1585,13 +1590,15 @@ public sealed class PageTests
                     document.body.setAttribute('onload', 'globalThis.__bodyOnloadFromAttribute = true');
                     const attributeReplacesWindow = document.body.onload !== fromWindow
                         && document.body.onload === window.onload;
-                    const reflected = window.onload;
+                    // Any <body> of an active document forwards the window's handlers, a
+                    // detached one included (HTML "determining the target of an event
+                    // handler"; measured in Chromium 141).
                     const detachedBody = document.createElement('body');
                     detachedBody.onload = function detachedBodyOnload() {};
-                    const detachedBodyStaysLocal = window.onload === reflected
-                        && detachedBody.onload !== window.onload;
+                    const detachedBodyReflects = window.onload === detachedBody.onload
+                        && window.onload.name === 'detachedBodyOnload';
                     return bodySetsWindow && windowSetsBody && attributeReplacesWindow
-                        && detachedBodyStaysLocal;
+                        && detachedBodyReflects;
                 })()
                 """));
     }
@@ -1737,6 +1744,52 @@ public sealed class PageTests
         Assert.True(completed, "the throw must not end the pump while a script is still pending");
         Assert.Equal("/slow-dynamic.js", server.NextPath(RequestTimeout));
         Assert.False(page.Js!.HasPendingLoadDelayingScripts());
+    }
+
+    /// <summary>
+    /// A watchdog that terminates a long microtask makes V8 discard every queued
+    /// microtask, and with them the next step of any script load waiting in the queue.
+    /// The load never finished and held the load event until the navigation deadline
+    /// (nvidia.com: a 30 s goto behind an 85 ms fetch). The next task restarts it, and
+    /// the script still runs exactly once.
+    /// </summary>
+    /// <remarks>
+    /// A <c>data:</c> script settles its fetch without a network round trip, so its
+    /// next steps are queued behind the spinning microtask deterministically. A network
+    /// script loses them the same way when ClearScript delivers its response inside
+    /// the long task, which a test cannot time reliably.
+    /// </remarks>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ADynamicScriptLoadSurvivesATerminatedMicrotaskCheckpoint(bool inOrder)
+    {
+        using Page page = PageFixtures.ImportMapTestPage(
+            "load-delayer-terminated",
+            "http://127.0.0.1:9",
+            "<html><head></head><body></body></html>");
+        page.Js!.SetDocumentReadyState("loading");
+        string source = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes("globalThis.__survivorRuns = (globalThis.__survivorRuns || 0) + 1;"));
+
+        Assert.Throws<JsRuntimeException>(() => page.Js!.EvaluateWithTimeout(
+            "(globalThis.__survivorLoads = 0, "
+            + "globalThis.__survivor = document.createElement('script'), "
+            + $"__survivor.src = 'data:text/javascript;base64,{source}', "
+            + "__survivor.onload = () => { globalThis.__survivorLoads++; }, "
+            + (inOrder ? "__survivor.async = false, " : "")
+            + "document.head.appendChild(__survivor), "
+            + "queueMicrotask(() => { for (;;) {} }), 1)",
+            TimeSpan.FromMilliseconds(300)));
+        Assert.True(page.Js!.HasPendingLoadDelayingScripts());
+
+        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+        bool completed = await Page.DriveLoadDelayingScriptsAsync(page.Js!, deadline);
+
+        Assert.True(completed, "the terminated checkpoint must not strand the script load");
+        PageFixtures.AssertJson(
+            "[1, 1]",
+            page.Js!.Evaluate("[globalThis.__survivorRuns, globalThis.__survivorLoads]"));
     }
 
     [Fact]

@@ -118,11 +118,19 @@ public static class GridLayout
 
         var minSize = style.MinSize
             .MaybeResolve(parentSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                style.Size.MaybeResolve(parentSize, calc),
+                style.MaxSize.MaybeResolve(parentSize, calc),
+                isMinimum: true)
             .MaybeAdd(boxSizingAdjustment);
         var maxSize = style.MaxSize
             .MaybeResolve(parentSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                style.Size.MaybeResolve(parentSize, calc),
+                style.MinSize.MaybeResolve(parentSize, calc),
+                isMinimum: false)
             .MaybeAdd(boxSizingAdjustment);
         var preferredSize = inputs.SizingMode == SizingMode.InherentSize
             ? style.Size

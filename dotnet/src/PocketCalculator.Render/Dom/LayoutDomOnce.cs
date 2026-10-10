@@ -29,7 +29,7 @@ public static partial class RenderDom
     /// </summary>
     private const float ClassicScrollbarGutter = 15f;
 
-    private sealed class Inherited
+    internal sealed class Inherited
     {
         // The two lists below are only ever replaced, never changed in place, so a clone
         // shares them. Copying both per element, on top of the field initializers' own two,
@@ -59,13 +59,15 @@ public static partial class RenderDom
         internal bool LetterSpacingNonNormal;
         internal ContainerType ContainerType = ContainerType.Normal;
         internal List<string> ContainerNames = NoContainerNames;
-        internal TaffyAlignItems? TextAlign;
+        internal TextAlignKeyword? TextAlign;
+        internal TextAlignKeyword? TextAlignLast;
         internal Dimension TextIndent = Dimension.Px(0f);
         internal bool LegacyCenter;
         internal bool VisibilityHidden;
         internal bool HasZeroOpacity;
         internal SvgPaintValues Svg = SvgPaintValues.Initial;
         internal ListStyle ListStyle = ListStyle.Disc;
+        internal bool ListStyleInside;
         internal LineHeight LineHeight = LineHeight.Normal;
         internal WhiteSpace WhiteSpace = WhiteSpace.Normal;
         internal OverflowWrap OverflowWrap = OverflowWrap.Normal;
@@ -73,6 +75,8 @@ public static partial class RenderDom
         internal TextWrapStyle TextWrapStyle = TextWrapStyle.Auto;
         internal TextTransform TextTransform = TextTransform.None;
         internal bool Italic;
+        internal string FontVariantCaps = "normal";
+        internal float FontStretch = 1f;
         internal BoxSizing BoxSizing = BoxSizing.ContentBox;
         internal bool BorderCollapse;
         internal VerticalAlign? TableVerticalAlign;
@@ -117,6 +121,72 @@ public static partial class RenderDom
         /// </remarks>
         internal bool CbHeightKnown;
 
+        /// <summary>
+        /// Whether an ancestor establishes the containing block for fixed-position
+        /// descendants (a transform, filter, contain and the like), so a fixed box here is
+        /// not anchored to the initial containing block.
+        /// </summary>
+        internal bool InsideFixedCb;
+
+        /// <summary>
+        /// Whether <paramref name="other"/> holds the same values in every field, so the
+        /// top-down pass of a subtree that receives either computes the same thing
+        /// (<see cref="TopDownMemo"/>).
+        /// </summary>
+        internal bool SameAs(Inherited other) =>
+            Display == other.Display
+            && Direction == other.Direction
+            && DisplayContents == other.DisplayContents
+            && IsInlineBlock == other.IsInlineBlock
+            && FlowRoot == other.FlowRoot
+            && IsTableBox == other.IsTableBox
+            && IsTableCellBox == other.IsTableCellBox
+            && AuthoredTableDisplay == other.AuthoredTableDisplay
+            && Nullable.Equals(BorderSpacing, other.BorderSpacing)
+            && Nullable.Equals(Color, other.Color)
+            && Nullable.Equals(FontSize, other.FontSize)
+            && FontWeight == other.FontWeight
+            && string.Equals(FontFamily, other.FontFamily, StringComparison.Ordinal)
+            && string.Equals(FontFamilySpecified, other.FontFamilySpecified, StringComparison.Ordinal)
+            && string.Equals(Cursor, other.Cursor, StringComparison.Ordinal)
+            && string.Equals(PointerEvents, other.PointerEvents, StringComparison.Ordinal)
+            && FontOpticalSizing == other.FontOpticalSizing
+            && (ReferenceEquals(FontVariationSettings, other.FontVariationSettings)
+                || FontVariationSettings.SequenceEqual(other.FontVariationSettings))
+            && LetterSpacing.Equals(other.LetterSpacing)
+            && LetterSpacingNonNormal == other.LetterSpacingNonNormal
+            && ContainerType == other.ContainerType
+            && (ReferenceEquals(ContainerNames, other.ContainerNames)
+                || ContainerNames.SequenceEqual(other.ContainerNames, StringComparer.Ordinal))
+            && Nullable.Equals(TextAlign, other.TextAlign)
+            && Nullable.Equals(TextAlignLast, other.TextAlignLast)
+            && TextIndent.Equals(other.TextIndent)
+            && LegacyCenter == other.LegacyCenter
+            && VisibilityHidden == other.VisibilityHidden
+            && HasZeroOpacity == other.HasZeroOpacity
+            && Equals(Svg, other.Svg)
+            && ListStyle == other.ListStyle
+            && ListStyleInside == other.ListStyleInside
+            && LineHeight.Equals(other.LineHeight)
+            && WhiteSpace == other.WhiteSpace
+            && OverflowWrap == other.OverflowWrap
+            && WordBreak == other.WordBreak
+            && TextWrapStyle == other.TextWrapStyle
+            && TextTransform == other.TextTransform
+            && Italic == other.Italic
+            && string.Equals(FontVariantCaps, other.FontVariantCaps, StringComparison.Ordinal)
+            && FontStretch.Equals(other.FontStretch)
+            && BoxSizing == other.BoxSizing
+            && BorderCollapse == other.BorderCollapse
+            && Nullable.Equals(TableVerticalAlign, other.TableVerticalAlign)
+            && OverflowX == other.OverflowX
+            && OverflowY == other.OverflowY
+            && CbWidth.Equals(other.CbWidth)
+            && CbHeightDefinite == other.CbHeightDefinite
+            && CbHeight.Equals(other.CbHeight)
+            && CbHeightKnown == other.CbHeightKnown
+            && InsideFixedCb == other.InsideFixedCb;
+
         internal Inherited Clone() => new()
         {
             Display = Display,
@@ -142,12 +212,14 @@ public static partial class RenderDom
             ContainerType = ContainerType,
             ContainerNames = ContainerNames,
             TextAlign = TextAlign,
+            TextAlignLast = TextAlignLast,
             TextIndent = TextIndent,
             LegacyCenter = LegacyCenter,
             VisibilityHidden = VisibilityHidden,
             HasZeroOpacity = HasZeroOpacity,
             Svg = Svg,
             ListStyle = ListStyle,
+            ListStyleInside = ListStyleInside,
             LineHeight = LineHeight,
             WhiteSpace = WhiteSpace,
             OverflowWrap = OverflowWrap,
@@ -155,6 +227,8 @@ public static partial class RenderDom
             TextWrapStyle = TextWrapStyle,
             TextTransform = TextTransform,
             Italic = Italic,
+            FontVariantCaps = FontVariantCaps,
+            FontStretch = FontStretch,
             BoxSizing = BoxSizing,
             BorderCollapse = BorderCollapse,
             TableVerticalAlign = TableVerticalAlign,
@@ -164,6 +238,7 @@ public static partial class RenderDom
             CbHeightDefinite = CbHeightDefinite,
             CbHeight = CbHeight,
             CbHeightKnown = CbHeightKnown,
+            InsideFixedCb = InsideFixedCb,
         };
     }
 
@@ -191,7 +266,9 @@ public static partial class RenderDom
         AnimationSample animationSample,
         AnimationTimelineState animationTimeline,
         RetainedLayoutReuseCandidate? reuseCandidate = null,
-        DomLayout? previousLayout = null)
+        DomLayout? previousLayout = null,
+        RetainedTaffyLayout? transplantSource = null,
+        IReadOnlyList<RetainedStyleMutation>? layoutMutations = null)
     {
         Matcher matcher = tree.CreateMatcher();
         // Per-element maps are sized up front: growing them by doubling on a 50k-element page
@@ -203,13 +280,19 @@ public static partial class RenderDom
         Dictionary<NodeId, IReadOnlyDictionary<string, string>> customProperties =
             retained?.Maps.CustomProperties ?? new(elementEstimate);
         HashSet<NodeId>? freshStyles = retained?.Fresh;
+        if (retained is not null)
+        {
+            DomPasses.RestorePaddingBeforeUsedSync(styles);
+        }
         Dictionary<string, string> rootProps = new(StringComparer.Ordinal);
         ContainerQueryEvaluator? evaluator = snapshot is not null
             ? new ContainerQueryEvaluator(tree, snapshot)
             : null;
 
+        // A doctype can only be a child of the document; listing every node of the document to
+        // find it cost a whole-document walk per pass.
         bool quirksMode = true;
-        foreach (NodeId id in tree.Descendants(tree.Document))
+        foreach (NodeId id in tree.Children(tree.Document))
         {
             if (tree.GetNode(id)?.Data is DoctypeData)
             {
@@ -230,10 +313,15 @@ public static partial class RenderDom
             AnimationSample = animationSample,
             AnimationTimeline = animationTimeline,
             FreshStyles = freshStyles,
+            VisitOnly = freshStyles is not null && RetainedTaffyLayout.Enabled
+                ? DomCascade.StylePaths(tree, freshStyles)
+                : null,
         };
         DomCascade.CascadeWalk(
             cascadeContext, tree.Document, sheet, matcher, rootProps, evaluator, null, false);
+        LayoutPhaseProfile.Mark("cascade");
         DomCascade.ResolveCssCounters(tree, styles);
+        LayoutPhaseProfile.Mark("counters");
 
         ContainerDecisionSignature? signature = null;
         ContainerQueryStats queryStats = default;
@@ -243,42 +331,73 @@ public static partial class RenderDom
         }
 
         DomStyleFixups.GrowTrailingAutoCells(tree, styles);
+        LayoutPhaseProfile.Mark("growcells");
 
         List<NodeId> descendants = tree.Descendants(tree.Document);
         bool needsEmojiFont = false;
+        bool needsCjkFont = false;
         foreach (NodeId id in descendants)
         {
-            if (tree.GetNode(id)?.TextContentOfTextNode is { } contents
-                && FontAssets.TextMayNeedEmojiFont(contents))
+            if (tree.GetNode(id)?.TextContentOfTextNode is { } contents)
             {
-                needsEmojiFont = true;
-                break;
-            }
-        }
-
-        if (!needsEmojiFont)
-        {
-            foreach (LayoutStyle style in styles.Values)
-            {
-                if ((style.BeforeContent is { } before && FontAssets.TextMayNeedEmojiFont(before))
-                    || (style.AfterContent is { } after && FontAssets.TextMayNeedEmojiFont(after)))
+                (bool emoji, bool cjk) = FontAssets.TextMayNeedOptionalFaces(contents);
+                needsEmojiFont |= emoji;
+                needsCjkFont |= cjk;
+                if (needsEmojiFont && needsCjkFont)
                 {
-                    needsEmojiFont = true;
                     break;
                 }
             }
         }
 
+        if (!needsEmojiFont || !needsCjkFont)
+        {
+            string? lastFamily = null;
+            foreach (LayoutStyle style in styles.Values)
+            {
+                if (style.BeforeContent is { } before)
+                {
+                    needsEmojiFont = needsEmojiFont || FontAssets.TextMayNeedEmojiFont(before);
+                    needsCjkFont = needsCjkFont || FontAssets.TextMayNeedCjkFont(before);
+                }
+
+                if (style.AfterContent is { } after)
+                {
+                    needsEmojiFont = needsEmojiFont || FontAssets.TextMayNeedEmojiFont(after);
+                    needsCjkFont = needsCjkFont || FontAssets.TextMayNeedCjkFont(after);
+                }
+
+                // A family list naming the CJK face selects it for Latin text too. Styles share
+                // their inherited family string, so only a new one is looked at.
+                if (!needsCjkFont
+                    && style.FontFamily is { } family
+                    && !ReferenceEquals(family, lastFamily))
+                {
+                    lastFamily = family;
+                    needsCjkFont = FontAssets.FamilyNamesCjkFace(family);
+                }
+
+                if (needsEmojiFont && needsCjkFont)
+                {
+                    break;
+                }
+            }
+        }
+
+        LayoutPhaseProfile.Mark("fontscan");
         TaffyTree taffyTree = TaffyStyleMapping.NewTaffyTree<int?>(tree.SlotCount + 16);
         Dictionary<TaffyNodeId, NodeId> idMap = new(styles.Count);
         Dictionary<TaffyNodeId, (NodeId Source, string Word)> words = [];
-        TextEngine engine = new(fonts, needsEmojiFont);
+        TextEngine engine = TextEngine.ForPass(fonts, needsEmojiFont, needsCjkFont, previousLayout?.TextEngine);
+        LayoutPhaseProfile.Mark("engine");
 
         // A layout-affecting restyle cannot keep its layout, but shaping does not depend on
         // layout: it is a pure function of the text, its attributes and the tab width. Carry the
         // previous pass's shaped paragraphs over when the font set is unchanged.
         engine.AdoptShapeCache(previousLayout?.TextEngine);
         IfcRegistry ifcItems = new();
+        TaffyNodeId? builtRoot = null;
+        int transplanted = 0;
 
         // The document node itself is not an element; lay out from the first element
         // descendant (the <html> root).
@@ -293,12 +412,15 @@ public static partial class RenderDom
         }
 
         Dictionary<NodeId, Rect> rects = new(styles.Count);
+        Dictionary<NodeId, SubpixelRect> subpixelRects = [];
         Dictionary<NodeId, List<Rect>> inlineFragments = [];
         Dictionary<NodeId, List<(Rect Rect, string Text)>> textRuns = [];
         Dictionary<int, Rect> anonRects = [];
         Rect?[] generatedRects = [];
         Dictionary<NodeId, GridTrackSizes> gridTracks = [];
 
+        TopDownMemo? currentTopDown = null;
+        int topDownVisits = 0;
         if (root is { } rootId)
         {
             int rootGutters = styles.TryGetValue(rootId, out LayoutStyle? gutterStyle)
@@ -329,17 +451,39 @@ public static partial class RenderDom
             };
 
             // Computed definiteness after walking the real containing-block chain.
-            HashSet<NodeId> definiteHeightNodes = [];
+            // The top-down memo of the layout this one follows, when that layout's top-down pass
+            // ran in the same context: same viewport and root font size, and a text engine with
+            // the same fonts (the font units it stored on retained styles come from them).
+            TopDownMemo? carriedTopDown = previousLayout?.TopDown;
+            if (previousLayout is not null)
+            {
+                previousLayout.TopDown = null;
+            }
+
+            var topDownContext = (rootFs, vw, vh, viewport.Width, viewport.Height, initialCbWidth);
+            TopDownMemo topDown = carriedTopDown is { } memo
+                && freshStyles is not null
+                && RetainedTaffyLayout.Enabled
+                && memo.Context == topDownContext
+                && engine.SharesShapeCacheWith(previousLayout!.TextEngine)
+                && memo.Received.Count <= (2 * styles.Count) + 64
+                    ? memo
+                    : new TopDownMemo();
+            topDown.Carried = ReferenceEquals(topDown, carriedTopDown);
+            topDown.Context = topDownContext;
+            HashSet<NodeId> definiteHeightNodes = topDown.DefiniteHeight;
+            currentTopDown = topDown;
             // `ch` and `ex` are measured on the face the text engine selects, so the resolver
             // reads the same font database layout will shape with. One per pass: it memoizes the
             // face decision, which every element asks for.
             FontUnitResolver fontUnits = new(engine);
-            ResolveComputedValues(
+            topDownVisits = ResolveComputedValues(
                 tree,
                 rootId,
                 styles,
                 freshStyles,
-                definiteHeightNodes,
+                cascadeContext.VisitOnly,
+                topDown,
                 rootInherited,
                 fontUnits,
                 rootFs,
@@ -348,6 +492,8 @@ public static partial class RenderDom
                 viewport,
                 initialCbWidth);
 
+        LayoutPhaseProfile.Mark("topdown");
+            LayoutPhaseProfile.Note("topdownVisits", topDownVisits);
             // Root/body overflow propagated to the viewport leaves the source element itself
             // overflow-visible for Taffy and BFC decisions.
             DomTransforms.MarkViewportOverflowSource(tree, rootId, styles);
@@ -418,6 +564,11 @@ public static partial class RenderDom
             // formatting mode.
             foreach (LayoutStyle style in styles.Values)
             {
+                if (style.LogicalFloatClear != 0)
+                {
+                    DomBuild.ResolveLogicalFloatClear(style);
+                }
+
                 if (style.Position == TaffyPosition.Absolute || style.Float is not null)
                 {
                     LayoutStyleExtensions.BlockifyOuterDisplay(style);
@@ -425,6 +576,7 @@ public static partial class RenderDom
             }
 
             DomStyleFixups.BlockifyGeneratedPseudos(styles);
+        LayoutPhaseProfile.Mark("fixups");
 
             // Capture the definite containing width for ratio-only auto/auto replaced boxes
             // before installing their metadata.
@@ -489,9 +641,16 @@ public static partial class RenderDom
                 // The throwaway TextEngine this pass built is left to the GC, exactly as the
                 // engine of every superseded layout already is; nothing in the engine disposes
                 // one, and the faces it loaded are its own.
+                DomPasses.ReapplyPaddingUsedByPreviousLayout(styles);
                 candidate.Previous.Styles = styles;
                 candidate.Previous.CustomProperties = customProperties;
+                candidate.Previous.TopDown = topDown;
                 return (candidate.Previous, signature, queryStats);
+            }
+
+            if (retained is not null)
+            {
+                DomPasses.ForgetPaddingUsedByPreviousLayout(styles);
             }
 
             // A retained style survives into the next layout, and whether its box still shows a
@@ -517,6 +676,29 @@ public static partial class RenderDom
                 }
             }
 
+            // What the previous pass built that this one may take over: decided before the
+            // build, which takes over that pass's inline items for unchanged containers.
+            bool anyFloat = DomBuild.AnyFloat(styles);
+            HashSet<NodeId>? dirtyNodes = null;
+            if (transplantSource is { Consumed: false } source
+                && freshStyles is not null
+                && RetainedTaffyLayout.Enabled
+                && engine.SharesShapeCacheWith(source.Engine))
+            {
+                dirtyNodes = RetainedTaffyLayout.DirtyClosure(
+                    tree, source, freshStyles, layoutMutations ?? [], intrinsic, styles);
+                source.Consume();
+
+                // Not across a pass that gained or lost its floats, which builds the box tree
+                // differently (RetainedTaffyLayout.Transplant carries nothing then either). An
+                // item keeps nothing of the floats it was laid out beside that a later layout
+                // reads without setting first (TextEngine.TakeAdoptedItem).
+                if (anyFloat == source.HadFloats)
+                {
+                    engine.AdoptInlineItems(source.Engine, source.Whole, dirtyNodes);
+                }
+            }
+
             BuildContext buildContext = new()
             {
                 Tree = tree,
@@ -527,10 +709,21 @@ public static partial class RenderDom
                 Ifc = ifcItems,
                 Styles = styles,
                 DeferredInlineWidths = deferredInlineWidths,
+                HasFloats = anyFloat,
             };
+            taffyTree.HasFloats = buildContext.HasFloats;
+            taffyTree.FloatBlindCache = RetainedTaffyLayout.Enabled;
 
-            if (DomBuild.Build(buildContext, rootId) is { } taffyRoot)
+            TaffyNodeId? builtTaffyRoot = DomBuild.Build(buildContext, rootId);
+            engine.EndInlineItemAdoption();
+            if (builtTaffyRoot is { } taffyRoot)
             {
+                LayoutPhaseProfile.Mark("build");
+                if (buildContext.HasFloats)
+                {
+                    DomBuild.MarkBlockFormattingContextRoots(taffyTree, idMap, styles);
+                }
+
                 // Taffy has no outer display type and only gives an auto-width Block root the
                 // initial-containing-block width. CSS blockifies Flex/Grid roots too.
                 if (styles.TryGetValue(rootId, out LayoutStyle? rootStyle)
@@ -589,6 +782,39 @@ public static partial class RenderDom
                     }
                 }
 
+                builtRoot = taffyRoot;
+                LayoutPhaseProfile.Mark("reparent");
+
+                // The box tree is complete and nothing has been laid out yet: carry the previous
+                // pass's layout results onto every box whose subtree is unchanged.
+                if (transplantSource is { } carriedSource && dirtyNodes is not null)
+                {
+                    transplanted = RetainedTaffyLayout.Transplant(
+                        carriedSource,
+                        taffyTree,
+                        taffyRoot,
+                        idMap,
+                        words,
+                        ifcItems.NativeControlContent,
+                        engine,
+                        dirtyNodes);
+
+                    // The consumed tree is never read again. Let go of its boxes now rather than
+                    // when the tree itself is collected: its slot arrays are large objects, which
+                    // a young-generation collection treats as live, so every box tree built since
+                    // the last full collection was promoted with them (nvidia.com: ~50 MB, a
+                    // dozen trees' boxes, at every young collection).
+                    if (carriedSource.Consumed)
+                    {
+                        carriedSource.Tree.Clear();
+                    }
+                }
+
+                LayoutPhaseProfile.Mark("transplant");
+                LayoutPhaseProfile.Note("carried", transplanted);
+                LayoutPhaseProfile.Note("items", engine.AdoptedItemCount);
+                LayoutPhaseProfile.Note("boxes", taffyTree.TotalNodeCount());
+
                 Layout.Size<float> Measure(
                     Layout.Size<float?> known,
                     Layout.Size<TaffyAvailableSpace> avail,
@@ -613,6 +839,26 @@ public static partial class RenderDom
                     float width = avail.Width.Kind == TaffyAvailableSpaceKind.MinContent ? 0f : content.Width;
 
                     return new Layout.Size<float>(known.Width ?? width, known.Height ?? content.Height);
+                }
+
+                taffyTree.InlineAtomics = new InlineAtomicHost(tree, taffyTree, idMap, styles, engine);
+                if (taffyTree.HasFloats)
+                {
+                    taffyTree.ExclusionMeasure = (known, avail, node, ctx, style, bands, runMode) =>
+                        ctx is { } index
+                            ? engine.MeasureTaffyAroundFloats(index, known, avail, bands, runMode)
+                            : Measure(known, avail, node, ctx, style);
+                    taffyTree.ExclusionReset = ctx =>
+                    {
+                        if (ctx is { } index)
+                        {
+                            engine.ForgetFloatBands(index);
+                        }
+                    };
+                    taffyTree.FloatAnchors = ifcItems.FloatAnchors;
+                    taffyTree.AnchorLines = (ctx, offsets) => ctx is { } index
+                        ? engine.AnchorLines(index, offsets)
+                        : new (float Top, float Height, float Width, float Used)?[offsets.Length];
                 }
 
                 float? IntrinsicWidth(TaffyTree t, TaffyNodeId node, TaffyAvailableSpace width)
@@ -647,6 +893,7 @@ public static partial class RenderDom
                     deferredCyclicInlineSizes,
                     Measure);
 
+        LayoutPhaseProfile.Mark("tables");
                 // The cyclic-percentage neutralization above collapses the very content a flex
                 // item's automatic minimum size is measured from, so that floor is re-derived
                 // from the typed percentages before the first layout reads it.
@@ -654,6 +901,14 @@ public static partial class RenderDom
                     taffyTree, idMap, styles, deferredCyclicInlineSizes, IntrinsicWidth);
 
                 taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
+        LayoutPhaseProfile.Mark("taffy1");
+                if (LayoutPhaseProfile.Enabled)
+                {
+                    (int shapeEntries, int shapeHits, int shapeMisses) = engine.ShapeCacheStats;
+                    LayoutPhaseProfile.Note("shapeEntries", shapeEntries);
+                    LayoutPhaseProfile.Note("shapeHits", shapeHits);
+                    LayoutPhaseProfile.Note("shapeMisses", shapeMisses);
+                }
                 if (deferredCyclicInlineSizes.Count == 0
                     && DomPasses.ApplyIntrinsicInlineSizes(
                         taffyTree, idMap, styles, initialCbWidth, IntrinsicWidth))
@@ -713,11 +968,6 @@ public static partial class RenderDom
                 }
 
                 if (DomPasses.ApplyMulticolBalance(taffyTree, ifcItems.Multicol))
-                {
-                    taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
-                }
-
-                if (DomPasses.ApplyFloatContinuations(tree, taffyTree, idMap, styles, ifcItems))
                 {
                     taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
                 }
@@ -818,6 +1068,7 @@ public static partial class RenderDom
 
                 DomPasses.SyncResolvedPercentagePadding(
                     taffyTree, taffyRoot, initialCbWidth, idMap, ifcItems.Generated, styles);
+        LayoutPhaseProfile.Mark("repairs");
                 Dictionary<TaffyNodeId, int> generatedNodes = [];
                 for (int index = 0; index < ifcItems.Generated.Count; index++)
                 {
@@ -836,8 +1087,12 @@ public static partial class RenderDom
                     textRuns,
                     anonRects,
                     generatedNodes,
-                    generatedRects);
+                    generatedRects,
+                    initialCbX,
+                    0f,
+                    subpixelRects);
 
+        LayoutPhaseProfile.Mark("absrects");
                 // The used track sizes getComputedStyle() reports for a grid container.
                 foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
                 {
@@ -849,12 +1104,14 @@ public static partial class RenderDom
 
                 inlineFragments = SynthesizeOrdinaryInlineFragments(rects, styles, engine);
                 DomTableSupport.SynthesizeRowRects(tree, rects);
+        LayoutPhaseProfile.Mark("frags");
             }
         }
 
         DomPasses.SyncPositionedPseudoPercentagePadding(rects, styles);
 
-        Dictionary<NodeId, OverflowClip?> clipRects = new(styles.Count);
+        // An entry per rendered node, text included: sized to the tree, not to the styles.
+        Dictionary<NodeId, OverflowClip?> clipRects = new(tree.Count + 1);
         Dictionary<NodeId, (float X, float Y)> translates = [];
         Dictionary<NodeId, Affine2> transforms = [];
         if (root is { } clipRootId)
@@ -878,15 +1135,19 @@ public static partial class RenderDom
                 viewport);
         }
 
+        LayoutPhaseProfile.Mark("clips");
         FinalizeShapedItems(
-            engine, ifcItems, rects, styles, clipRects, translates, anonRects, viewport);
+            engine, ifcItems, rects, subpixelRects, styles, clipRects, translates, anonRects, viewport);
+        LayoutPhaseProfile.Mark("finalize");
 
         // Pure-text IFC descendants do not own Taffy nodes. Once their shared buffer has its
         // final line breaks, derive their real continuations from shaping provenance.
         if (engine.HasInlineOwners())
         {
+            Dictionary<NodeId, Rect?> replacedRects = [];
             Dictionary<NodeId, List<Rect>> canonical =
-                SynthesizeShapedInlineFragments(tree, rects, styles, engine);
+                SynthesizeShapedInlineFragments(tree, rects, styles, engine, replacedRects);
+            LayoutPhaseProfile.Mark("synth");
             if (canonical.Count != 0)
             {
                 Dictionary<NodeId, (float X, float Y)> relativeOffsets = [];
@@ -901,16 +1162,18 @@ public static partial class RenderDom
                 }
 
                 engine.SetInlineOwnerOffsets(relativeOffsets);
+                LayoutPhaseProfile.Mark("ownerOffsets");
                 foreach ((NodeId owner, List<Rect> fragments) in canonical)
                 {
                     inlineFragments[owner] = fragments;
                 }
 
-                clipRects.Clear();
-                translates.Clear();
-                transforms.Clear();
-                if (root is { } reclipRootId)
+                if (root is { } reclipRootId
+                    && ClipWalkReadsReplacedRects(replacedRects, rects, styles, reclipRootId, viewport))
                 {
+                    clipRects.Clear();
+                    translates.Clear();
+                    transforms.Clear();
                     float rootFontSize = styles.TryGetValue(reclipRootId, out LayoutStyle? style)
                         ? style.FontSize ?? 16f
                         : 16f;
@@ -930,6 +1193,7 @@ public static partial class RenderDom
                         viewport);
                 }
 
+                LayoutPhaseProfile.Mark("reclip");
                 foreach ((NodeId nid, int idx) in ifcItems.Whole)
                 {
                     engine.SetClip(
@@ -967,10 +1231,12 @@ public static partial class RenderDom
 
         Dictionary<NodeId, Rect> svgRects = [];
         SvgBoxes.Measure(tree, styles, rects, svgRects);
+        LayoutPhaseProfile.Mark("inlinesynth+svg");
 
         DomLayout layout = new()
         {
             Rects = rects,
+            SubpixelRects = subpixelRects,
             SvgRects = svgRects,
             InlineFragments = inlineFragments,
             Styles = styles,
@@ -985,6 +1251,27 @@ public static partial class RenderDom
             WordIfcItems = ifcItems.WordItems,
             GeneratedBoxes = generatedBoxes,
             GridTracks = gridTracks,
+            TransplantedBoxes = transplanted,
+            TopDown = currentTopDown,
+            TopDownVisits = topDownVisits,
+            AdoptedInlineItems = engine.AdoptedItemCount,
+            DocumentSheet = sheet,
+            ShadowSheets = shadowSheets,
+            RetainedBoxes = builtRoot is { } keptRoot
+                ? new RetainedTaffyLayout
+                {
+                    Tree = taffyTree,
+                    Root = keptRoot,
+                    IdMap = idMap,
+                    Words = words,
+                    NativeControlContent = ifcItems.NativeControlContent,
+                    Engine = engine,
+                    Whole = ifcItems.Whole,
+                    HadFloats = taffyTree.HasFloats,
+                    Intrinsic = new Dictionary<NodeId, ReplacedIntrinsic>(intrinsic),
+                    Generated = RetainedTaffyLayout.SnapshotGenerated(styles),
+                }
+                : null,
         };
 
         return (layout, signature, queryStats);
@@ -1023,6 +1310,62 @@ public static partial class RenderDom
         }
 
         return 16f;
+    }
+
+    /// <summary>
+    /// Whether the clip/transform walk can come out differently now that
+    /// <c>SynthesizeShapedInlineFragments</c> replaced the rects in <paramref name="replaced"/>.
+    /// </summary>
+    /// <remarks>
+    /// <c>ResolveClipRects</c> reads a node's rect for exactly three things: its own translate
+    /// and transform (percentages and the transform origin resolve against it) and, when it
+    /// clips, its overflow clip. An inline owner that does none of these, or whose new rect
+    /// resolves them to the same bits, leaves the walk's output unchanged, so running it a
+    /// second time over a large page (it visits every node) bought nothing. Not in
+    /// crates/obscura-render, which always walks twice.
+    /// </remarks>
+    private static bool ClipWalkReadsReplacedRects(
+        Dictionary<NodeId, Rect?> replaced,
+        Dictionary<NodeId, Rect> rects,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        NodeId root,
+        (float Width, float Height) viewport)
+    {
+        float rootFontSize = styles.TryGetValue(root, out LayoutStyle? rootStyle) ? rootStyle.FontSize ?? 16f : 16f;
+        foreach ((NodeId owner, Rect? before) in replaced)
+        {
+            if (!styles.TryGetValue(owner, out LayoutStyle? style)
+                || !rects.TryGetValue(owner, out Rect after))
+            {
+                return true;
+            }
+
+            if (style.OverflowHidden)
+            {
+                return true;
+            }
+
+            Rect old = before ?? default;
+            (float X, float Y) oldTranslate = DomTransforms.ResolvedOwnTranslate(style, old, rootFontSize, viewport);
+            (float X, float Y) newTranslate = DomTransforms.ResolvedOwnTranslate(style, after, rootFontSize, viewport);
+            Affine2 oldMatrix = DomTransforms.ResolvedTransformMatrix(style, old, rootFontSize, viewport);
+            Affine2 newMatrix = DomTransforms.ResolvedTransformMatrix(style, after, rootFontSize, viewport);
+            if (!SameBits(oldTranslate.X, newTranslate.X)
+                || !SameBits(oldTranslate.Y, newTranslate.Y)
+                || !SameBits(oldMatrix.A, newMatrix.A)
+                || !SameBits(oldMatrix.B, newMatrix.B)
+                || !SameBits(oldMatrix.C, newMatrix.C)
+                || !SameBits(oldMatrix.D, newMatrix.D)
+                || !SameBits(oldMatrix.E, newMatrix.E)
+                || !SameBits(oldMatrix.F, newMatrix.F))
+            {
+                return true;
+            }
+        }
+
+        return false;
+
+        static bool SameBits(float a, float b) => BitConverter.SingleToInt32Bits(a) == BitConverter.SingleToInt32Bits(b);
     }
 
     /// <summary>
@@ -1149,12 +1492,23 @@ public static partial class RenderDom
         DomTree tree,
         Dictionary<NodeId, Rect> rects,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
-        TextEngine engine)
+        TextEngine engine,
+        Dictionary<NodeId, Rect?>? replacedRects = null)
     {
         Dictionary<NodeId, List<((int Item, int Line) Order, Rect Rect)>> fragments = [];
         Dictionary<NodeId, (float X, float Y)?> relativeMemo = [];
         Dictionary<NodeId, (float Ascent, float Descent)> fontBoxes = [];
-        foreach (InlineOwnerLineFragment shaped in engine.InlineOwnerLineFragments())
+        // A culled inline box (no box fragment of its own) is split where a float sits in it.
+        bool Culled(NodeId owner) =>
+            styles.TryGetValue(owner, out LayoutStyle? ownerStyle)
+            && ownerStyle.Position is null
+            && !ownerStyle.PositionSticky
+            && ownerStyle.BackgroundColor is not { A: > 0 }
+            && ownerStyle.BackgroundGradient is null
+            && ownerStyle.BackgroundImage is null;
+        List<InlineOwnerLineFragment> lineFragments = engine.InlineOwnerLineFragments(Culled);
+        LayoutPhaseProfile.Mark("ownerLines");
+        foreach (InlineOwnerLineFragment shaped in lineFragments)
         {
             if (!styles.TryGetValue(shaped.Owner, out LayoutStyle? style))
             {
@@ -1227,6 +1581,7 @@ public static partial class RenderDom
                 union = new Rect(left, top, F32.Max(right - left, 0f), F32.Max(bottom - top, 0f));
             }
 
+            replacedRects?.TryAdd(owner, rects.TryGetValue(owner, out Rect before) ? before : null);
             rects[owner] = union;
             canonical[owner] = ordered;
         }
@@ -1415,6 +1770,7 @@ public static partial class RenderDom
         TextEngine engine,
         IfcRegistry ifcItems,
         IReadOnlyDictionary<NodeId, Rect> rects,
+        IReadOnlyDictionary<NodeId, SubpixelRect> subpixelRects,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
         IReadOnlyDictionary<NodeId, OverflowClip?> clipRects,
         IReadOnlyDictionary<NodeId, (float X, float Y)> translates,
@@ -1431,6 +1787,17 @@ public static partial class RenderDom
 
             (float X, float Y) origin = Inline.ContentOrigin(rect, style);
             float cw = Inline.ContentWidth(rect, style);
+
+            // An inline-block is shrink-wrapped to its content at LayoutUnit precision
+            // (InlineItem.LayoutUnitWidth), and its snapped box can be a fraction narrower than
+            // that content: break its lines at the unrounded width, as Blink lays out, or its
+            // last word wraps onto a line the box has no height for.
+            if (engine.Items[idx].LayoutUnitWidth
+                && subpixelRects.TryGetValue(nid, out SubpixelRect subpixel)
+                && subpixel.Resolve(rect) is { } precise)
+            {
+                cw = F32.Max(cw, Inline.ContentWidth(precise, style));
+            }
 
             // A table cell stretched taller than its text aligns its content per
             // vertical-align; the pure-text leaf path has no inner box to align.

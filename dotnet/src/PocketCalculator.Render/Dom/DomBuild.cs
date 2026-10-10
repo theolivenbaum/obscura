@@ -23,12 +23,6 @@ internal sealed class MulticolBuild
     internal required List<TaffyNodeId> Children { get; init; }
 }
 
-internal readonly record struct FloatContinuation(
-    NodeId Owner,
-    TaffyNodeId Float,
-    TaffyNodeId Flow,
-    Float Side);
-
 /// <summary>
 /// Registry of shaped inline formatting contexts created during the taffy-tree build.
 /// </summary>
@@ -78,11 +72,11 @@ internal sealed class IfcRegistry
     /// </summary>
     internal Dictionary<TaffyNodeId, (NodeId Owner, LayoutStyle Style)> AnonymousTables { get; } = [];
 
-    /// <summary>Floats whose exclusion can continue through later descendant blocks.</summary>
-    internal List<FloatContinuation> FloatContinuations { get; } = [];
-
-    /// <summary>Ordinary blocks participating in a native float band.</summary>
-    internal HashSet<NodeId> FloatAwareBlocks { get; } = [];
+    /// <summary>
+    /// Floats anchored in an inline formatting context leaf, keyed by the leaf: each float's
+    /// taffy node (a later sibling of the leaf) and the text offset it sits at.
+    /// </summary>
+    internal Dictionary<TaffyNodeId, (TaffyNodeId Float, int Offset)[]> FloatAnchors { get; } = [];
 
     /// <summary>CSS multi-column containers built as a row of anonymous fragmentainers.</summary>
     internal List<MulticolBuild> Multicol { get; } = [];
@@ -116,6 +110,13 @@ internal sealed class BuildContext
     internal required IfcRegistry Ifc { get; init; }
 
     internal required IReadOnlyDictionary<NodeId, LayoutStyle> Styles { get; init; }
+
+    /// <summary>
+    /// Whether any rendered element is floated. Only then do block containers with floated
+    /// children take the CSS float layout (<see cref="DomBuild.BuildMixedBlock"/>); a document
+    /// without floats builds exactly as before.
+    /// </summary>
+    internal bool HasFloats { get; init; }
 
     /// <summary>
     /// The authored inline sizes that <c>DeferCyclicFlexInlineSizes</c> neutralized before this
@@ -202,7 +203,7 @@ internal static partial class DomBuild
             List<TaffyNodeId> spliced = [];
             try
             {
-                foreach (NodeId cid in DomTraversal.RenderedChildren(tree, id))
+                foreach (NodeId cid in DomTraversal.EachRenderedChild(tree, id))
                 {
                     spliced.AddRange(BuildAny(context, cid));
                 }
@@ -256,7 +257,7 @@ internal static partial class DomBuild
             List<TaffyNodeId> flattened = [];
             try
             {
-                foreach (NodeId cid in DomTraversal.RenderedChildren(tree, id))
+                foreach (NodeId cid in DomTraversal.EachRenderedChild(tree, id))
                 {
                     flattened.AddRange(BuildAny(context, cid));
                 }
@@ -536,12 +537,21 @@ internal static partial class DomBuild
     /// block container, clamped at zero because a <c>line-height</c> shorter than the font box
     /// puts the strut's bottom above the baseline, where it adds nothing.
     /// </summary>
+    /// <remarks>
+    /// The leading is split the way the text lines split it (<see cref="FontAssets.LineBoxHalves"/>):
+    /// Blink floors the ascent half to whole pixels and gives the descent the rest. An even
+    /// split put half a pixel on each side, which the taffy rounding pass hid until
+    /// <c>getBoundingClientRect()</c> reported the unrounded box: a 20px inline-block in a
+    /// <c>16px</c> serif line measured 23.5px where Chromium has 24.
+    /// </remarks>
     internal static float StrutDescent(LayoutStyle block)
     {
         FaceMetrics metrics = FontAssets.BundledFaceMetrics(FontAssets.ResolveFontFamily(block.FontFamily));
-        (float ascent, float descent) = FontAssets.FittedFontBoxMetrics(block.FontSize ?? 16f, metrics);
-        float halfLeading = (FontResolution.UsedLineHeightWithMetrics(block, metrics) - (ascent + descent)) / 2f;
-        return F32.Max(descent + halfLeading, 0f);
+        (float _, float below) = FontAssets.LineBoxHalves(
+            block.FontSize ?? 16f,
+            FontResolution.UsedLineHeightWithMetrics(block, metrics),
+            metrics);
+        return F32.Max(below, 0f);
     }
 
     /// <summary>Build the direct children of a genuine flex/grid container.</summary>
@@ -550,6 +560,53 @@ internal static partial class DomBuild
     /// contents form an inline formatting context. Splitting a text node into one taffy item
     /// per word is only valid inside our flex-wrap IFC stand-in.
     /// </remarks>
+    /// <summary>
+    /// <paramref name="items"/> stably sorted by <paramref name="key"/> (source order breaks
+    /// ties), as <c>OrderBy(key).ThenBy(index)</c>; the list itself when every key is equal,
+    /// which is every flex and grid container without an authored <c>order</c>. The LINQ sort
+    /// allocated an iterator chain and a tuple per item for every container on every pass.
+    /// </summary>
+    internal static List<T> StableOrderBy<T>(List<T> items, Func<T, int> key)
+    {
+        if (items.Count < 2)
+        {
+            return items;
+        }
+
+        int first = key(items[0]);
+        bool equal = true;
+        for (int index = 1; index < items.Count && equal; index++)
+        {
+            equal = key(items[index]) == first;
+        }
+
+        if (equal)
+        {
+            return items;
+        }
+
+        int[] keys = new int[items.Count];
+        for (int index = 0; index < items.Count; index++)
+        {
+            keys[index] = key(items[index]);
+        }
+
+        int[] order = new int[items.Count];
+        for (int index = 0; index < order.Length; index++)
+        {
+            order[index] = index;
+        }
+
+        Array.Sort(order, (a, b) => keys[a] != keys[b] ? keys[a].CompareTo(keys[b]) : a.CompareTo(b));
+        List<T> sorted = new(items.Count);
+        foreach (int index in order)
+        {
+            sorted.Add(items[index]);
+        }
+
+        return sorted;
+    }
+
     internal static List<TaffyNodeId> BuildFlexGridChildren(BuildContext context, NodeId parent)
     {
         DomTree tree = context.Tree;
@@ -559,14 +616,12 @@ internal static partial class DomBuild
         effectiveChildren.RemoveAll(child =>
             child.Kind == EffectiveGridChildKind.Dom
             && tree.GetNode(child.Node)?.IsElement != true
-            && tree.TextContent(child.Node).Trim().Length == 0);
+            && tree.TextContent(child.Node).AsSpan().Trim().Length == 0);
 
         // CSS `order` uses a stable sort so source order is the tie-break.
-        List<EffectiveGridChild> ordered = [.. effectiveChildren
-            .Select((child, index) => (child, index))
-            .OrderBy(pair => DomStyleFixups.EffectiveGridChildStyle(pair.child, context.Styles)?.Order ?? 0)
-            .ThenBy(pair => pair.index)
-            .Select(pair => pair.child)];
+        List<EffectiveGridChild> ordered = StableOrderBy(
+            effectiveChildren,
+            child => DomStyleFixups.EffectiveGridChildStyle(child, context.Styles)?.Order ?? 0);
 
         List<TaffyNodeId> children = [];
         int cursor = 0;
@@ -744,18 +799,19 @@ internal static partial class DomBuild
         LayoutStyle style)
     {
         List<TaffyNodeId> leaves = [];
+
+        // A token normally retains one trailing collapsed space. Shape it as preformatted
+        // content so the item keeps that advance. Shaping only reads the style, so the
+        // white-space is handed over on its own rather than in a copy of the style: a copy per
+        // text node was a fifth of a retained build, most of it the copy.
         foreach (string token in TokenizeWithSpaces(text))
         {
-            if (token.Trim().Length == 0)
+            if (token.AsSpan().Trim().Length == 0)
             {
                 continue;
             }
 
-            // A token normally retains one trailing collapsed space. Shape it as preformatted
-            // content so the item keeps that advance.
-            LayoutStyle tokenStyle = style.Clone();
-            tokenStyle.WhiteSpace = Render.WhiteSpace.Pre;
-            if (context.Engine.PushGeneratedText(token, tokenStyle) is not { } item)
+            if (context.Engine.PushGeneratedText(token, style, Render.WhiteSpace.Pre) is not { } item)
             {
                 // Returning no leaves makes the caller use the deterministic static-font
                 // fallback for the whole text node.
@@ -847,7 +903,7 @@ internal static partial class DomBuild
 
             // A pure-whitespace token keeps its width so adjacent inline content stays visually
             // separated, but contributes no height.
-            float height = token.Trim().Length == 0 ? 0f : F32.Max(lineHeight, 0f);
+            float height = token.AsSpan().Trim().Length == 0 ? 0f : F32.Max(lineHeight, 0f);
             TaffyStyle taffyStyle = TaffyStyle.Default;
             taffyStyle.Size = new Layout.Size<TaffyDimension>(
                 TaffyDimension.FromLength(width),
@@ -974,7 +1030,7 @@ internal static partial class DomBuild
         List<TaffyNodeId> children = [];
 
         // CSS table fixup discards whitespace-only text between table structures.
-        if (content is { Length: > 0 } && !(pseudo.IsTableBox && content.Trim().Length == 0))
+        if (content is { Length: > 0 } && !(pseudo.IsTableBox && content.AsSpan().Trim().Length == 0))
         {
             children = BuildPseudoContent(context, host, content, pseudo);
         }
@@ -1118,7 +1174,7 @@ internal static partial class DomBuild
         }
 
         bool sawBlock = false;
-        foreach (NodeId cid in DomTraversal.RenderedChildren(tree, id))
+        foreach (NodeId cid in DomTraversal.EachRenderedChild(tree, id))
         {
             if (tree.GetNode(cid) is not { } node)
             {
@@ -1127,7 +1183,7 @@ internal static partial class DomBuild
 
             if (node.TextContentOfTextNode is { } contents)
             {
-                if (contents.Trim().Length != 0)
+                if (contents.AsSpan().Trim().Length != 0)
                 {
                     return false;
                 }
@@ -1258,6 +1314,101 @@ internal static partial class DomBuild
         return style;
     }
 
+    /// <summary>
+    /// Map <c>float</c>/<c>clear: inline-start|inline-end</c> to the physical side for the
+    /// element's own direction (CSS Logical 4.1): they were stored as their left-to-right side.
+    /// </summary>
+    internal static void ResolveLogicalFloatClear(LayoutStyle style)
+    {
+        if (style.Direction != Layout.Direction.Rtl)
+        {
+            return;
+        }
+
+        if ((style.LogicalFloatClear & 1) != 0 && style.Float is { } side)
+        {
+            style.Float = side == Float.Left ? Float.Right : Float.Left;
+        }
+
+        if ((style.LogicalFloatClear & 2) != 0 && style.Clear is { } clear and not Clear.Both)
+        {
+            style.Clear = clear == Clear.Left ? Clear.Right : Clear.Left;
+        }
+
+        style.LogicalFloatClear = 0;
+    }
+
+    /// <summary>Whether any rendered element in <paramref name="styles"/> is floated.</summary>
+    internal static bool AnyFloat(IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    {
+        foreach (LayoutStyle style in styles.Values)
+        {
+            if (style.Float is not null && style.Display != Display.None)
+            {
+                return true;
+            }
+
+            if ((style.BeforePseudo is { Float: not null } before && before.Display != Display.None)
+                || (style.AfterPseudo is { Float: not null } after && after.Display != Display.None))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Mark every box that establishes an independent block formatting context, or is a
+    /// replaced box, so block layout keeps it out of its parent's float context: it contains its
+    /// own floats and is placed beside (or below) its parent's (CSS 2.1 9.4.1, 9.5).
+    /// </summary>
+    internal static void MarkBlockFormattingContextRoots(
+        Layout.TaffyTree<int?> taffyTree,
+        IReadOnlyDictionary<TaffyNodeId, NodeId> idMap,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    {
+        foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
+        {
+            if (!styles.TryGetValue(domId, out LayoutStyle? style))
+            {
+                continue;
+            }
+
+            TaffyStyle current = taffyTree.GetStyle(taffyId);
+            bool root = DomStyleFixups.EstablishesBlockFormattingContext(style)
+                || style.IsTableCellBox
+                || style.IsTableBox
+                || current.ItemIsReplaced
+                || style.HasReplacedSizing;
+            Layout.Float side = style.Float switch
+            {
+                Float.Left => Layout.Float.Left,
+                Float.Right => Layout.Float.Right,
+                _ => Layout.Float.None,
+            };
+            Layout.Clear clear = style.Clear switch
+            {
+                Clear.Left => Layout.Clear.Left,
+                Clear.Right => Layout.Clear.Right,
+                Clear.Both => Layout.Clear.Both,
+                _ => Layout.Clear.None,
+            };
+
+            // Only block layout reads `float` and `clear`: a flex or grid item ignores both.
+            if ((root && !current.EstablishesBfc)
+                || current.Float != side
+                || current.Clear != clear)
+            {
+                TaffyStyle marked = current.Clone();
+                marked.EstablishesBfc |= root;
+                marked.Float = side;
+                marked.Clear = clear;
+                taffyTree.SetStyle(taffyId, marked);
+            }
+        }
+    }
+
     internal static void SetNativeFloatClear(
         BuildContext context,
         TaffyNodeId node,
@@ -1287,56 +1438,6 @@ internal static partial class DomBuild
         }
 
         context.TaffyTree.SetStyle(node, native);
-    }
-
-    internal static List<TaffyNodeId> BuildChildrenWithNativeFloatBand(
-        BuildContext context,
-        NodeId parentId,
-        LayoutStyle parentStyle,
-        IReadOnlyList<NodeId> domChildren)
-    {
-        List<TaffyNodeId> result = [];
-        foreach ((GeneratedBoxKind kind, LayoutStyle? pseudo) in new[]
-        {
-            (GeneratedBoxKind.Before, parentStyle.BeforePseudo),
-            (GeneratedBoxKind.After, parentStyle.AfterPseudo),
-        })
-        {
-            if (kind == GeneratedBoxKind.After)
-            {
-                foreach (NodeId id in domChildren)
-                {
-                    if (!context.Styles.TryGetValue(id, out LayoutStyle? style))
-                    {
-                        continue;
-                    }
-
-                    if (style.Float is null
-                        && style.Display == Display.Block
-                        && !DomStyleFixups.EstablishesBlockFormattingContext(style))
-                    {
-                        context.Ifc.FloatAwareBlocks.Add(id);
-                    }
-
-                    foreach (TaffyNodeId node in BuildAny(context, id))
-                    {
-                        SetNativeFloatClear(context, node, style, false);
-                        result.Add(node);
-                    }
-                }
-            }
-
-            if (BuildInFlowPseudo(context, parentId, kind, pseudo) is { } built && pseudo is not null)
-            {
-                foreach (TaffyNodeId node in built.Nodes)
-                {
-                    SetNativeFloatClear(context, node, pseudo, true);
-                    result.Add(node);
-                }
-            }
-        }
-
-        return result;
     }
 
     internal static NodeId? InlineWrapperFloat(
@@ -1380,7 +1481,7 @@ internal static partial class DomBuild
 
             if (!node.IsElement)
             {
-                if (tree.TextContent(child).Trim().Length != 0)
+                if (tree.TextContent(child).AsSpan().Trim().Length != 0)
                 {
                     visible.Add(child);
                 }
@@ -1444,10 +1545,10 @@ internal static partial class DomBuild
         }
 
         bool hasDirectText = false;
-        foreach (NodeId child in DomTraversal.RenderedChildren(tree, id))
+        foreach (NodeId child in DomTraversal.EachRenderedChild(tree, id))
         {
             if (tree.GetNode(child)?.TextContentOfTextNode is { } contents
-                && contents.Trim().Length != 0)
+                && contents.AsSpan().Trim().Length != 0)
             {
                 hasDirectText = true;
                 break;

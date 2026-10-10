@@ -13,15 +13,54 @@ namespace PocketCalculator.Render;
 public static partial class RenderDom
 {
     /// <summary>
+    /// What the top-down pass of one layout left behind for the next retained pass: the
+    /// inherited context every element it visited received, and the elements whose height it
+    /// found definite.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-render, which runs the top-down pass over the whole document on
+    /// every layout. For an element whose style the pass reuses, the pass is a function of the
+    /// element's retained style, the context it receives, the font set and the viewport. A
+    /// retained pass therefore skips an element, and everything below it, when nothing below it
+    /// is fresh and it receives the very context it received the last time it was visited:
+    /// what that visit wrote onto the retained styles below is what this one would write, and
+    /// its definite heights are carried in <see cref="DefiniteHeight"/>. The memo is handed from
+    /// one layout to the next; a pass that throws leaves the next one without it, which then
+    /// visits every element again.
+    /// <para>
+    /// A fresh style reaches the top-down pass straight from the cascade, and the passes after
+    /// it (blockification, image sizes, used-value repairs) then write onto it; the next pass
+    /// reads it retained, with those writes. So what an element received below a fresh one is
+    /// not what it receives in the pass after, and the elements fresh in the previous pass are
+    /// visited again (<see cref="PreviousFresh"/>); after a full pass, every element is.
+    /// </para>
+    /// </remarks>
+    internal sealed class TopDownMemo
+    {
+        internal Dictionary<NodeId, Inherited> Received { get; } = [];
+
+        internal HashSet<NodeId> DefiniteHeight { get; } = [];
+
+        internal (float RootFs, float Vw, float Vh, float Width, float Height, float InitialCbWidth) Context { get; set; }
+
+        /// <summary>Whether this memo describes the pass before the current one; see <see cref="ResolveComputedValues"/>.</summary>
+        internal bool Carried { get; set; }
+
+        /// <summary>The styles the pass that filled this memo cascaded afresh; null after a full pass.</summary>
+        internal HashSet<NodeId>? PreviousFresh { get; set; }
+    }
+
+    /// <summary>
     /// Top-down inheritance of the properties CSS inherits by default, plus resolution of
     /// every font/viewport-relative length now that its reference sizes are known.
     /// </summary>
-    private static void ResolveComputedValues(
+    private static int ResolveComputedValues(
         DomTree tree,
         NodeId rootId,
         Dictionary<NodeId, LayoutStyle> styles,
         HashSet<NodeId>? freshStyles,
-        HashSet<NodeId> definiteHeightNodes,
+        HashSet<NodeId>? stylePaths,
+        TopDownMemo memo,
         Inherited rootInherited,
         FontUnitResolver fontUnits,
         float rootFs,
@@ -30,11 +69,32 @@ public static partial class RenderDom
         (float Width, float Height) viewport,
         float initialCbWidth)
     {
+        HashSet<NodeId> definiteHeightNodes = memo.DefiniteHeight;
+        bool skipClean = memo.Carried
+            && freshStyles is not null
+            && stylePaths is not null
+            && memo.PreviousFresh is not null;
+        if (skipClean && memo.PreviousFresh!.Count != 0)
+        {
+            HashSet<NodeId> both = [.. freshStyles!];
+            both.UnionWith(memo.PreviousFresh);
+            stylePaths = DomCascade.StylePaths(tree, both);
+        }
+
+        memo.PreviousFresh = freshStyles;
+        int visits = 0;
         List<(NodeId Id, Inherited Inherited)> queue = [(rootId, rootInherited)];
         while (queue.Count > 0)
         {
-            (NodeId id, Inherited inh) = queue[^1];
+            visits++;
+            WorkCancellation.ThrowIfCancellationRequested();
+            (NodeId id, Inherited received) = queue[^1];
             queue.RemoveAt(queue.Count - 1);
+
+            // The context as received is kept for the next pass; this one works on a copy.
+            memo.Received[id] = received;
+            Inherited inh = received.Clone();
+            definiteHeightNodes.Remove(id);
 
             // Default the child containing-block width to this element's own.
             float childCbWidth = inh.CbWidth;
@@ -94,11 +154,13 @@ public static partial class RenderDom
 
                     inh.ContainerType = retainedStyle.ContainerType;
                     inh.ContainerNames = [.. retainedStyle.ContainerNames];
-                    if (retainedStyle.TextAlign is { } align)
+                    if (retainedStyle.TextAlignKeyword is { } align)
                     {
                         inh.TextAlign = align;
                         inh.LegacyCenter = retainedStyle.LegacyCenter;
                     }
+
+                    inh.TextAlignLast = retainedStyle.TextAlignLast;
 
                     if (retainedStyle.TextIndent is { } indent)
                     {
@@ -111,6 +173,11 @@ public static partial class RenderDom
                     if (retainedStyle.ListStyle is { } listStyle)
                     {
                         inh.ListStyle = listStyle;
+                    }
+
+                    if (retainedStyle.ListStyleInside is { } listStyleInside)
+                    {
+                        inh.ListStyleInside = listStyleInside;
                     }
 
                     if (retainedStyle.LineHeight is { } lineHeight)
@@ -148,6 +215,16 @@ public static partial class RenderDom
                         inh.Italic = italic;
                     }
 
+                    if (retainedStyle.FontVariantCaps is { } retainedCaps)
+                    {
+                        inh.FontVariantCaps = retainedCaps;
+                    }
+
+                    if (retainedStyle.FontStretch is { } retainedStretch)
+                    {
+                        inh.FontStretch = retainedStretch;
+                    }
+
                     inh.BoxSizing = retainedStyle.BoxSizing;
                     if (retainedStyle.BorderCollapse is { } collapse)
                     {
@@ -160,6 +237,7 @@ public static partial class RenderDom
                         inh.TableVerticalAlign = verticalAlign;
                     }
 
+                    inh.InsideFixedCb |= retainedStyle.EstablishesPositioningContainingBlock();
                     inh.OverflowX = retainedStyle.OverflowComputedX;
                     inh.OverflowY = retainedStyle.OverflowComputedY;
                     childCbHeightDefinite = retainedStyle.Height.Kind
@@ -211,12 +289,7 @@ public static partial class RenderDom
                 inh.CbHeightDefinite = childCbHeightDefinite;
                 inh.CbHeight = childCbHeight;
                 inh.CbHeightKnown = childCbHeightKnown;
-                List<NodeId> retainedChildren = DomTraversal.StyleChildren(tree, id);
-                for (int index = retainedChildren.Count - 1; index >= 0; index--)
-                {
-                    queue.Add((retainedChildren[index], inh.Clone()));
-                }
-
+                PushChildren(id, inh);
                 continue;
             }
 
@@ -265,13 +338,42 @@ public static partial class RenderDom
             }
 
             inh.CbWidth = childCbWidth;
+            if (style is not null)
+            {
+                inh.InsideFixedCb |= style.EstablishesPositioningContainingBlock();
+            }
+
             inh.CbHeightDefinite = childCbHeightDefinite;
             inh.CbHeight = childCbHeight;
             inh.CbHeightKnown = childCbHeightKnown;
+            PushChildren(id, inh);
+        }
+
+        return visits;
+
+        // Only elements carry a style; a text node's visit did nothing. A clean element that
+        // receives what it received last time keeps what that visit computed (TopDownMemo).
+        void PushChildren(NodeId id, Inherited inh)
+        {
             List<NodeId> children = DomTraversal.StyleChildren(tree, id);
             for (int index = children.Count - 1; index >= 0; index--)
             {
-                queue.Add((children[index], inh.Clone()));
+                NodeId child = children[index];
+                if (tree.GetNode(child)?.IsElement != true)
+                {
+                    continue;
+                }
+
+                Inherited passed = inh.Clone();
+                if (skipClean
+                    && !stylePaths!.Contains(child)
+                    && memo.Received.TryGetValue(child, out Inherited? before)
+                    && before.SameAs(passed))
+                {
+                    continue;
+                }
+
+                queue.Add((child, passed));
             }
         }
     }
@@ -463,6 +565,14 @@ public static partial class RenderDom
         else
         {
             style.Direction = inh.Direction;
+        }
+
+        // DEVIATION from crates/obscura-render, whose UA sheet gives a list 40px of left
+        // padding whatever its direction: Chromium's is padding-inline-start, on the right of
+        // a dir=rtl list (its markers hang outside it there).
+        if (style.UaListPadding && style.Direction == Layout.Direction.Rtl && style.Padding.Right == 0f)
+        {
+            style.Padding = style.Padding with { Left = 0f, Right = 40f };
         }
 
         ComputedStyle.ResolveLogicalBorders(style);
@@ -657,7 +767,9 @@ public static partial class RenderDom
             style.LineHeight = LineHeight.Px(pixels);
         }
 
-        float cbW = inh.CbWidth;
+        // A viewport-anchored fixed box resolves its percentages against the initial
+        // containing block, not against its DOM parent's content box.
+        float cbW = style.PositionFixed && !inh.InsideFixedCb ? initialCbWidth : inh.CbWidth;
 
         // DEVIATION from crates/obscura-render/src/style.rs, which drops the CSS-wide keyword
         // `inherit` on the box-size properties. They are not inherited properties, so the
@@ -952,29 +1064,6 @@ public static partial class RenderDom
             }
         }
 
-        // A fixed box is positioned against the initial containing block.
-        if (style.PositionFixed)
-        {
-            if (style.Width.IsAuto
-                && style.Inset[1] is { Kind: DimensionKind.Px } right
-                && style.Inset[3] is { Kind: DimensionKind.Px } left)
-            {
-                style.Width = Dimension.Px(F32.Max(initialCbWidth - left.Value - right.Value, 0f));
-            }
-
-            if (style.Height.IsAuto
-                && style.Inset[0] is { Kind: DimensionKind.Px } top
-                && style.Inset[2] is { Kind: DimensionKind.Px } bottom)
-            {
-                style.Height = Dimension.Px(F32.Max(viewport.Height - top.Value - bottom.Value, 0f));
-            }
-
-            childCbHeightDefinite = style.Height.Kind is DimensionKind.Px or DimensionKind.Percent;
-            childCbHeight = ContentBoxBlockSize(style, inh.CbHeight);
-            childCbHeightKnown = childCbHeightDefinite
-                && (style.Height.Kind == DimensionKind.Px || inh.CbHeightKnown);
-        }
-
         ushort computedWeight = ComputedStyle.ComputedFontWeight(style.FontWeight, inh.FontWeight);
         style.FontWeight = computedWeight.ToString(CultureInfo.InvariantCulture);
         inh.FontWeight = computedWeight;
@@ -1026,24 +1115,37 @@ public static partial class RenderDom
         }
 
         bool isTable = DomTraversal.IsLocal(tree, id, "table");
-        if (isTable && inh.LegacyCenter && style.TextAlign is null)
+        if (isTable && inh.LegacyCenter && style.TextAlignKeyword is null)
         {
             // The vendor alignment used by <center> centers the table outer box but does not
             // leak into its internal formatting context.
-            style.TextAlign = TaffyAlignItems.FlexStart;
+            style.TextAlignKeyword = TextAlignKeyword.Start;
             style.LegacyCenter = false;
-            inh.TextAlign = style.TextAlign;
+            inh.TextAlign = style.TextAlignKeyword;
             inh.LegacyCenter = false;
         }
-        else if (style.TextAlign is { } textAlign)
+        else if (style.TextAlignKeyword is { } textAlign)
         {
             inh.TextAlign = textAlign;
             inh.LegacyCenter = style.LegacyCenter;
         }
         else
         {
-            style.TextAlign = inh.TextAlign;
+            style.TextAlignKeyword = inh.TextAlign;
             style.LegacyCenter = inh.LegacyCenter;
+        }
+
+        if (style.TextAlignLast is { } textAlignLast)
+        {
+            inh.TextAlignLast = textAlignLast;
+        }
+        else if (style.TextAlignLastAuto)
+        {
+            inh.TextAlignLast = null;
+        }
+        else
+        {
+            style.TextAlignLast = inh.TextAlignLast;
         }
 
         if (style.TextIndent is { } textIndent)
@@ -1068,6 +1170,15 @@ public static partial class RenderDom
         else
         {
             style.ListStyle = inh.ListStyle;
+        }
+
+        if (style.ListStyleInside is { } listStyleInside)
+        {
+            inh.ListStyleInside = listStyleInside;
+        }
+        else
+        {
+            style.ListStyleInside = inh.ListStyleInside;
         }
 
         if (style.LineHeight is { } lineHeight)
@@ -1131,6 +1242,24 @@ public static partial class RenderDom
         else
         {
             style.FontStyleItalic = inh.Italic;
+        }
+
+        if (style.FontVariantCaps is { } variantCaps)
+        {
+            inh.FontVariantCaps = variantCaps;
+        }
+        else
+        {
+            style.FontVariantCaps = inh.FontVariantCaps;
+        }
+
+        if (style.FontStretch is { } stretch)
+        {
+            inh.FontStretch = stretch;
+        }
+        else
+        {
+            style.FontStretch = inh.FontStretch;
         }
 
         if (style.BoxSizing == BoxSizing.Inherit)
@@ -1199,6 +1328,49 @@ public static partial class RenderDom
 
         style.Padding = padding;
         style.Margin = margin;
+
+        // A fixed box is positioned against the initial containing block. Make the CSS 2.1
+        // stretch equation explicit for `position:fixed` with both insets of an axis set, so
+        // the box's children see a definite containing block.
+        //
+        // DEVIATION from crates/obscura-render/src/dom.rs, which sets the width to
+        // `viewport - left - right` here, before margins are resolved, ignoring margins,
+        // padding and border (a content-box `left:0;right:0;margin:0 20px` box came out
+        // 1280px wide and overflowed instead of 1240px), and does so even inside a
+        // transformed ancestor, which is the containing block there. C# runs it after the
+        // box edges settle, subtracts them, and skips it when an ancestor establishes the
+        // fixed containing block. See "Known deviations" in todo.md.
+        if (style.PositionFixed && !inh.InsideFixedCb)
+        {
+            bool contentBox = style.BoxSizing == BoxSizing.ContentBox;
+            if (style.Width.IsAuto
+                && style.Inset[1] is { Kind: DimensionKind.Px } right
+                && style.Inset[3] is { Kind: DimensionKind.Px } left)
+            {
+                float outer = initialCbWidth - left.Value - right.Value
+                    - style.Margin.Left - style.Margin.Right;
+                float edges = contentBox
+                    ? style.Padding.Left + style.Padding.Right + style.Border.Left + style.Border.Right
+                    : 0f;
+                style.Width = Dimension.Px(F32.Max(outer - edges, 0f));
+            }
+
+            if (style.Height.IsAuto
+                && style.Inset[0] is { Kind: DimensionKind.Px } top
+                && style.Inset[2] is { Kind: DimensionKind.Px } bottom)
+            {
+                float outer = viewport.Height - top.Value - bottom.Value
+                    - style.Margin.Top - style.Margin.Bottom;
+                float edges = contentBox
+                    ? style.Padding.Top + style.Padding.Bottom + style.Border.Top + style.Border.Bottom
+                    : 0f;
+                style.Height = Dimension.Px(F32.Max(outer - edges, 0f));
+            }
+
+            childCbHeightDefinite = style.Height.Kind is DimensionKind.Px or DimensionKind.Percent;
+            childCbHeight = ContentBoxBlockSize(style, viewport.Height);
+            childCbHeightKnown = childCbHeightDefinite;
+        }
 
         SettlePseudos(style, inh, fontUnits, emPx, parentFs, rootFs, vw, vh, viewport, cbW);
 
@@ -1386,7 +1558,10 @@ public static partial class RenderDom
         TextWrapStyle? hostTextWrapStyle = style.TextWrapStyle;
         TextTransform? hostTransform = style.TextTransform;
         bool? hostItalic = style.FontStyleItalic;
-        TaffyAlignItems? hostTextAlign = style.TextAlign;
+        string? hostVariantCaps = style.FontVariantCaps;
+        float? hostStretch = style.FontStretch;
+        TextAlignKeyword? hostTextAlign = style.TextAlignKeyword;
+        TextAlignKeyword? hostTextAlignLast = style.TextAlignLast;
         Dimension? hostTextIndent = style.TextIndent;
         bool hostInvisible = style.EffectivelyInvisible;
         bool hostVisibilityHidden = style.ComputedVisibilityHidden;
@@ -1620,7 +1795,14 @@ public static partial class RenderDom
             pseudo.Color ??= hostColor;
             pseudo.TextTransform ??= hostTransform;
             pseudo.FontStyleItalic ??= hostItalic;
-            pseudo.TextAlign ??= hostTextAlign;
+            pseudo.FontVariantCaps ??= hostVariantCaps;
+            pseudo.FontStretch ??= hostStretch;
+            pseudo.TextAlignKeyword ??= hostTextAlign;
+            if (!pseudo.TextAlignLastAuto)
+            {
+                pseudo.TextAlignLast ??= hostTextAlignLast;
+            }
+
             if (pseudo.TextIndent is { } indent)
             {
                 pseudo.TextIndent = indent.Resolve(pseudoUnits, rootFs, vw, vh);

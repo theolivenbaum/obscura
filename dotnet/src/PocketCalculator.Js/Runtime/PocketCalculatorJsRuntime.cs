@@ -47,6 +47,10 @@ public sealed partial class PocketCalculatorJsRuntime
     // fixed-wait path while retaining an absolute backstop for infinite script.
     private const ulong SynchronousTaskFloorMs = 5_000;
     private const ulong WatchdogSchedulingMarginMs = 500;
+
+    /// <summary>The deadline of one frame-realm script run (see <c>FrameRealm.Run</c>).</summary>
+    internal static readonly TimeSpan FrameScriptBudget =
+        TimeSpan.FromMilliseconds(SynchronousTaskFloorMs + WatchdogSchedulingMarginMs);
     private const long HeapLimitRecoveryHeadroomBytes = 64 * 1024 * 1024;
 
     private readonly V8Runtime _v8;
@@ -69,6 +73,20 @@ public sealed partial class PocketCalculatorJsRuntime
 
     /// <summary>Whether this runtime has been disposed (its page navigated or closed).</summary>
     internal bool IsDisposed => _disposed;
+
+    /// <summary>
+    /// Where this page's op promises are resolved: posted by the thread that completes an op,
+    /// run by the event loop (<see cref="PumpTick(out string?, out bool)"/>). Shared by every
+    /// realm of the isolate.
+    /// </summary>
+    /// <remarks>
+    /// This replaced a process-wide <c>ThreadPool.SetMinThreads(64)</c>: ClearScript resolved a
+    /// promise on the thread that completed the op, which parked that pool thread on the
+    /// isolate lock for as long as page script ran, so a page waiting on the network inside
+    /// script (a module graph's imports) starved the very continuations it waited for. See
+    /// <see cref="PocketCalculator.Js.Ops.OpCompletionContext"/>.
+    /// </remarks>
+    private readonly PocketCalculator.Js.Ops.OpCompletionContext _opCompletions = new();
 
     private PocketCalculatorJsRuntime(string baseUrl, string? proxyUrl)
     {
@@ -102,9 +120,16 @@ public sealed partial class PocketCalculatorJsRuntime
         // the state's map while the loader kept reading an empty one, so every
         // page-authored import map was silently ignored. Rust shares a single
         // Rc<RefCell<ImportMap>> for exactly this reason.
-        _moduleLoader = new PocketCalculatorModuleLoader(baseUrl, proxyUrl, _ops.Page.ImportMap, ModuleNetwork);
+        _moduleLoader = new PocketCalculatorModuleLoader(baseUrl, proxyUrl, _ops.Page.ImportMap, ModuleNetwork)
+        {
+            // Port addition: blob: modules, from the sources URL.createObjectURL registered.
+            BlobScriptSource = _ops.Page.BlobScripts.Get,
+        };
         _engine = CreateRealmEngine();
         _isolateHandle = new V8IsolateHandle(_engine, _ops.Cancellation);
+        _ops.Page.IsolateLock = PocketCalculator.Js.Ops.IsolateLock.For(_engine, _opCompletions);
+        // A module graph the page thread waits for inside script stops at the script deadline.
+        _moduleLoader.BlockingLoadCancellation = () => _ops.Cancellation.Token;
         _memoryRegistration = ProcessMemoryGuard.Default.Register(_isolateHandle);
         _ops.Cancellation.Interrupter = () =>
         {
@@ -133,6 +158,9 @@ public sealed partial class PocketCalculatorJsRuntime
         // bootstrap.js, which is what makes the runtime testable on its own.
         _ops.TaskSpawner = this;
         _ops.AsyncOps = this;
+        // A dynamic module script's graph (bootstrap.js __runDynScriptTask). Each request is
+        // bounded by the transport's own timeout; nothing waits on the prefetch but the task.
+        _ops.ModuleGraphPrefetcher = url => _moduleLoader.PrefetchGraphAsync(url, dynamic: true, CancellationToken.None);
         _ops.WasmMemoryLimit = WasmMemoryLimitBytes();
         _shim = BootstrapLoader.Install(_engine, ops => BindOps(ops, mainRealm: true));
         if (BootstrapLoader.ExposeOpsForTests)
@@ -225,6 +253,9 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         var engine = _v8.CreateScriptEngine(
             V8ScriptEngineFlags.EnableTaskPromiseConversion
+            // An op's promise is resolved on the context current when the op was called, which
+            // AsyncOpBinding makes the page's op completion queue (_opCompletions).
+            | V8ScriptEngineFlags.UseSynchronizationContexts
             | V8ScriptEngineFlags.EnableDynamicModuleImports
             | V8ScriptEngineFlags.EnableValueTaskPromiseConversion);
         // A JS number is a double. ClearScript otherwise narrows a lossless
@@ -303,6 +334,18 @@ public sealed partial class PocketCalculatorJsRuntime
             constraints.MaxArrayBufferAllocation = shared.MaxArrayBufferAllocation;
         }
 
+        if (V8OldSpaceLimitMbForTests.Value is { } oldSpaceMb)
+        {
+            constraints.MaxOldSpaceSize = oldSpaceMb;
+        }
+
+        // V8 must grow rather than abort when it reaches its own heap limit before the
+        // heap cap's sampler has run (see HeapCapExpansionMultiplier).
+        if (constraints.HeapExpansionMultiplier <= 1)
+        {
+            constraints.HeapExpansionMultiplier = HeapCapExpansionMultiplier;
+        }
+
         long limit = ArrayBufferLimitBytes();
         if (limit > 0)
         {
@@ -311,6 +354,44 @@ public sealed partial class PocketCalculatorJsRuntime
 
         return constraints;
     }
+
+    /// <summary>
+    /// The factor by which V8 raises its own heap limit, instead of aborting the process,
+    /// when a heap reaches it before the heap cap has stopped the script.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The cap (<see cref="SetHeapLimit"/>) is a sample, not a hook. ClearScript checks the
+    /// heap from a <see cref="System.Threading.Timer"/> (50 ms at the shortest), whose
+    /// callback runs on the .NET thread pool and then asks the isolate's thread for the
+    /// check; the heap cannot be read from any other thread while script runs, because
+    /// ClearScript reads it under the isolate lock. V8 posts its own
+    /// background work (concurrent marking, sweeping, compilation) to that same pool, and a
+    /// heap growing fast is exactly what makes it post more, so on a busy or memory-starved
+    /// host the check can come seconds late. Until this multiplier, V8 reached its own limit
+    /// first and failed with <c>Fatal JavaScript out of memory: Reached heap limit</c>,
+    /// aborting the whole process (SIGABRT, exit 134) and every page in it: with no
+    /// <c>--max-old-space-size</c> that limit is V8's built-in 1400 MB, under the 4 GiB
+    /// default cap, so the cap never fired at all; with the CLI's 4096 MB the two were
+    /// equal and the sampler lost the race. That is what crashed the Js test host, in
+    /// <c>HeapLimitTerminatesScriptAndRuntimeRecovers</c>, when the pool was saturated.
+    /// </para>
+    /// <para>
+    /// With a multiplier ClearScript's near-heap-limit callback raises V8's limit instead,
+    /// so the heap keeps growing only until the late check runs, which terminates the
+    /// script as before and <see cref="RecoverHeapLimit"/> collects. The cost is memory for
+    /// as long as the check is late, which is the trade Rust makes too: its callback raises
+    /// the limit by a fixed headroom and terminates in the same breath (it can, being a V8
+    /// hook; ClearScript exposes none). Deviation from Rust, which needs no multiplier.
+    /// </para>
+    /// </remarks>
+    internal const double HeapCapExpansionMultiplier = 2.0;
+
+    /// <summary>
+    /// Test seam: V8's own old-space limit, in MB, for runtimes created on this async flow,
+    /// in place of <c>--max-old-space-size</c>. It also becomes their heap cap.
+    /// </summary>
+    internal static readonly AsyncLocal<int?> V8OldSpaceLimitMbForTests = new();
 
     // ------------------------------------------------------- wasm memory
 
@@ -380,7 +461,8 @@ public sealed partial class PocketCalculatorJsRuntime
     /// <see cref="DefaultHeapLimitBytes"/>, the same ceiling the CLI's default flags
     /// set. Without it a library or CDP embedder that configured nothing had no cap
     /// at all, and V8's internal OOM aborted the process. <see cref="SetHeapLimit"/>
-    /// with zero removes it.
+    /// with zero removes it. Because the ceiling is sampled, V8's own limit must not abort
+    /// the process before a sample lands: see <see cref="HeapCapExpansionMultiplier"/>.
     /// </para>
     /// </remarks>
     private void ApplyHeapLimit(V8RuntimeConstraints constraints)
@@ -564,6 +646,70 @@ public sealed partial class PocketCalculatorJsRuntime
         // A rejection reported while the isolate was terminating could not be
         // delivered, so the shim stopped trying. The isolate is usable again.
         _shim.ResumeDelivery();
+
+        // The termination emptied V8's microtask queue; the next task restarts the
+        // dynamic script loads whose continuations were in it.
+        Volatile.Write(ref _redriveDynamicScripts, 1);
+    }
+
+    private int _redriveDynamicScripts;
+
+    /// <summary><c>POCKETCALCULATOR_NO_SCRIPT_REDRIVE=1</c> turns <see cref="RedriveDynamicScripts"/> off.</summary>
+    private static readonly bool RedriveDisabled =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_NO_SCRIPT_REDRIVE") == "1";
+
+    /// <summary>
+    /// Restart the dynamic script tasks a watchdog termination may have stranded.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from <c>crates/obscura-js</c>, which has the same loss and no recovery.
+    /// Terminating a turn makes V8 discard every queued microtask, so a script load whose
+    /// promise continuation was queued behind the long task never runs again, and one that
+    /// delays the load event holds navigation until its deadline (nvidia.com: a 30 s
+    /// goto behind an 85 ms fetch). Chromium never terminates a task, so nothing is lost
+    /// there. <c>__obscura_redriveDynamicScripts</c> in bootstrap.js starts each
+    /// unfinished task again from its settled fetch; each script still runs once.
+    /// Page promise chains lost the same way are not recovered.
+    /// </remarks>
+    private void RedriveDynamicScripts()
+    {
+        if (Interlocked.Exchange(ref _redriveDynamicScripts, 0) == 0 || _disposed || RedriveDisabled)
+        {
+            return;
+        }
+
+        // Posted, not run here: the restart's continuations (a script's load handlers
+        // among them) run in the checkpoint that follows it, which must be a turn under
+        // the task watchdog. Run from here, a page whose handler is the long task that
+        // was terminated ran it again with no deadline at all (weather.com hung).
+        lock (_postedTasks)
+        {
+            _postedTasks.Enqueue(_ => RunRedrive());
+        }
+    }
+
+    private void RunRedrive()
+    {
+        const string Redrive = "__obscura_host.vars.__obscura_redriveDynamicScripts?.();";
+        if (_disposed)
+        {
+            return;
+        }
+
+        // ClearScript's own exceptions reach PumpTick, which handles an interrupt here
+        // as it does for any posted task.
+        HostScript.Invoke(_engine, _shim.HostHelpers, "<redrive-dynamic-scripts>", HostScript.WrapStatements(Redrive));
+        foreach (var realm in _realms.ToArray())
+        {
+            try
+            {
+                realm.ExecuteHostScript(Redrive);
+            }
+            catch (Exception error) when (error is JsRuntimeException or ObjectDisposedException or InvalidOperationException)
+            {
+                // A frame realm torn down or failing here only skips its own restart.
+            }
+        }
     }
 
     // ------------------------------------------------------- script execution
@@ -575,6 +721,7 @@ public sealed partial class PocketCalculatorJsRuntime
     /// </summary>
     private void BeginJavaScriptTask()
     {
+        RedriveDynamicScripts();
         BeginAnimationTask();
         // Script observes the resources that landed since the last task, and misses the
         // last task created start loading (upstream 97ff86d). Two field reads when idle.
@@ -793,11 +940,9 @@ public sealed partial class PocketCalculatorJsRuntime
             "<set-viewport>",
             $"__obscura_host.vars.__obscura_viewport_w={Number(width)};"
             + $"__obscura_host.vars.__obscura_viewport_h={Number(height)};"
+            // visualViewport's width and height follow innerWidth/innerHeight (read-only
+            // VisualViewport attributes in bootstrap.js, as in Chromium).
             + $"globalThis.innerWidth={Number(width)};globalThis.innerHeight={Number(height)};"
-            + "if(globalThis.visualViewport){"
-            + $"globalThis.visualViewport.width={Number(width)};"
-            + $"globalThis.visualViewport.height={Number(height)};"
-            + "}"
             + "if(typeof __obscura_host.vars.__obscura_recompute_intersections==='function'){"
             + "__obscura_host.vars.__obscura_recompute_intersections();"
             + "}"
@@ -866,10 +1011,11 @@ public sealed partial class PocketCalculatorJsRuntime
     /// <summary>
     /// Runs document lifecycle steps in order, through the shim's own event class and
     /// dispatch: <c>interactive</c> and <c>complete</c> set <c>readyState</c>;
-    /// <c>DOMContentLoaded</c> fires it at the document and the window;
+    /// <c>DOMContentLoaded</c> fires it at the document, bubbling to the window;
     /// <c>readystatechange</c> fires that at the document; <c>load</c> sets
-    /// <c>readyState</c> to <c>complete</c>, calls <c>window.onload</c> and fires
-    /// <c>load</c> at the window.
+    /// <c>readyState</c> to <c>complete</c> and fires <c>load</c> at the window with the
+    /// document as its target (<c>window.onload</c> runs among the window's listeners).
+    /// All are trusted.
     /// </summary>
     /// <remarks>
     /// DEVIATION from the Rust engine, whose host snippets call the page's current
@@ -962,7 +1108,19 @@ public sealed partial class PocketCalculatorJsRuntime
     /// <summary>The op's promise settled and its reactions are running.</summary>
     void PocketCalculator.Js.Ops.IAsyncOpTracker.OpSettled() => Interlocked.Decrement(ref _pendingAsyncOps);
 
-    private bool HasPendingAsyncOps => Volatile.Read(ref _pendingAsyncOps) > 0;
+    /// <inheritdoc/>
+    PocketCalculator.Js.Ops.OpCompletionContext? PocketCalculator.Js.Ops.IAsyncOpTracker.Completions => _opCompletions;
+
+    /// <summary>The page's op completion queue (see <see cref="_opCompletions"/>).</summary>
+    internal PocketCalculator.Js.Ops.OpCompletionContext OpCompletions => _opCompletions;
+
+    /// <summary>
+    /// A task that completes once an op completion (or other page-thread work) has been posted
+    /// for the event loop, so a host loop that parks can wake for it instead of polling.
+    /// </summary>
+    public Task WhenOpCompletionPosted() => _opCompletions.WhenPosted();
+
+    private bool HasPendingAsyncOps => Volatile.Read(ref _pendingAsyncOps) > 0 || _opCompletions.Pending > 0;
 
     // ------------------------------------------------------------------ dispose
 
@@ -981,6 +1139,9 @@ public sealed partial class PocketCalculatorJsRuntime
             return;
         }
         _disposed = true;
+        // Completions still queued belong to this document: dropped, never run against a
+        // disposed engine. A host continuation queued there (InvokeAsync) is cancelled.
+        _opCompletions.Dispose();
         _memoryRegistration.Dispose();
         DetachDomGc();
         // Background render-resource loads belong to this document; a closed page must

@@ -14,7 +14,23 @@ public enum ShadowRootMode
 /// separate host edge keeps parentNode-style walks scoped to one tree while still allowing
 /// composed-tree operations to cross explicitly.
 /// </summary>
-public readonly record struct ShadowRoot(NodeId Id, NodeId Host, ShadowRootMode Mode);
+public readonly record struct ShadowRoot(NodeId Id, NodeId Host, ShadowRootMode Mode)
+{
+    /// <summary>
+    /// <c>slotAssignment: "manual"</c>: slottables reach a slot only through
+    /// <c>HTMLSlotElement.assign()</c>, never by name. Port addition (Rust has named assignment only).
+    /// </summary>
+    public bool ManualSlotAssignment { get; init; }
+
+    /// <summary>The root's <c>delegatesFocus</c>, as attachShadow or the declarative template set it.</summary>
+    public bool DelegatesFocus { get; init; }
+
+    /// <summary>The root's <c>clonable</c>.</summary>
+    public bool Clonable { get; init; }
+
+    /// <summary>The root's <c>serializable</c>.</summary>
+    public bool Serializable { get; init; }
+}
 
 public enum AttachShadowError
 {

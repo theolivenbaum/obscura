@@ -186,7 +186,7 @@ internal static partial class DomBuild
                 // An auto-width inline-block shrink-fits to its max-content width when that
                 // fits the available line.
                 bool inlineBlockHasBlockChild = false;
-                foreach (NodeId child in DomTraversal.RenderedChildren(tree, id))
+                foreach (NodeId child in DomTraversal.EachRenderedChild(tree, id))
                 {
                     if (context.Styles.TryGetValue(child, out LayoutStyle? childStyle)
                         && DomStyleFixups.IsInFlowBlockLevel(childStyle))
@@ -236,6 +236,7 @@ internal static partial class DomBuild
 
         // A loaded poster supplies <video>'s replaced-content dimensions before decoded video
         // metadata exists.
+        ReplacedIntrinsic? metadata = null;
         if (!(string.Equals(local, "video", StringComparison.Ordinal)
                 && style.ReplacedIntrinsic is not null))
         {
@@ -244,34 +245,45 @@ internal static partial class DomBuild
                 style.FontSize ?? 16f,
                 node.GetAttribute("controls") is not null,
                 !string.Equals(local, "embed", StringComparison.Ordinal)
-                    || (node.GetAttribute("src") is { } src && src.Trim().Length != 0));
+                    || (node.GetAttribute("src") is { } src && src.AsSpan().Trim().Length != 0));
             if (defaultIntrinsic is { } intrinsicSize)
             {
-                int replacedContext = context.Engine.RegisterReplaced(
-                    intrinsicSize.Width, intrinsicSize.Height, style);
-                TaffyNodeId replacedLeaf =
-                    context.TaffyTree.NewLeafWithContext(taffyStyle, replacedContext);
-                context.IdMap[replacedLeaf] = id;
-                return replacedLeaf;
+                // DEVIATION from crates/obscura-render/src/dom.rs, which registers these as
+                // a measured leaf with a 300x150 natural size and ratio and leaves an auto width
+                // to stretch. Only a canvas has a natural ratio; an iframe, embed, object, a
+                // video without metadata, audio and the meter/progress bars have a natural
+                // size and none (Chromium 141: `width: 120px` on a video is 120x150). And a
+                // block-level replaced box with an auto width takes its natural width rather
+                // than the containing block's (CSS 2.1 10.3.4): it takes the image path below,
+                // which does both. See "Known deviations" in todo.md.
+                metadata = new ReplacedIntrinsic(
+                    intrinsicSize.Width,
+                    intrinsicSize.Height,
+                    string.Equals(local, "canvas", StringComparison.Ordinal)
+                        ? intrinsicSize.Width / intrinsicSize.Height
+                        : null);
             }
         }
 
         // A replaced image is a measured leaf, even when CSS gives it a percentage width.
-        if (local is "img" or "video")
+        if (metadata is null && (local is "img" or "video" || PaintImages.IsImageButton(node)))
         {
-            ReplacedIntrinsic? metadata = style.ReplacedIntrinsic
+            metadata = style.ReplacedIntrinsic
                 ?? (style.IntrinsicSize is { } natural
                     ? ReplacedIntrinsic.FromDimensions(natural.Width, natural.Height)
                     : null);
+        }
+
+        {
             if (metadata is { } intrinsic)
             {
                 (float width, float height) = intrinsic.NaturalSize() ?? (300f, 150f);
-                float intrinsicRatio = intrinsic.Ratio ?? 2f;
-                float preferredRatio = style.AspectRatio is { } authored
+                float? authoredRatio = style.AspectRatio is { } authored
                     && float.IsFinite(authored)
                     && authored > 0f
                         ? authored
-                        : intrinsicRatio;
+                        : null;
+                float? transferRatio = authoredRatio ?? intrinsic.Ratio;
 
                 // Encode the equivalent min(preferred-width, percentage-max) function by
                 // swapping the two operands.
@@ -281,8 +293,8 @@ internal static partial class DomBuild
                     {
                         DimensionKind.Px => style.Width.Value,
                         DimensionKind.Auto => style.Height.Kind == DimensionKind.Px
-                            ? style.Height.Value * preferredRatio
-                            : Inline.ConstrainedAutoReplacedSize(width, height, style).Width,
+                            ? (transferRatio is { } ratio ? style.Height.Value * ratio : width)
+                            : Inline.ConstrainedAutoReplacedSize(intrinsic, style).Width,
                         _ => null,
                     };
                     if (preferredWidth is { } preferred)
@@ -331,7 +343,7 @@ internal static partial class DomBuild
                     && !DomStyleFixups.IsInFlowGridItem(tree, id, style, context.Styles))
                 {
                     Layout.Size<float> constrained =
-                        Inline.ConstrainedAutoReplacedSize(width, height, style);
+                        Inline.ConstrainedAutoReplacedSize(intrinsic, style);
                     Layout.Size<TaffyDimension> size = taffyStyle.Size;
                     size.Width = TaffyDimension.FromLength(constrained.Width);
                     if (hasDefiniteConstraint)
@@ -371,9 +383,9 @@ internal static partial class DomBuild
             string.Equals(element.Name.Ns, Namespaces.Html, StringComparison.Ordinal)
             && string.Equals(local, "details", StringComparison.Ordinal)
             && node.GetAttribute("open") is null;
-        if (!isClosedHtmlDetails && !context.Ifc.FloatAwareBlocks.Contains(id))
+        if (!isClosedHtmlDetails)
         {
-            if (context.Engine.TryBuild(tree, id, context.Styles) is { } item)
+            if (context.Engine.TryBuild(tree, id, context.Styles, allowAtomics: true) is { } item)
             {
                 if (style.Display == Display.Block && style.Width.IsAuto)
                 {
@@ -382,7 +394,9 @@ internal static partial class DomBuild
                     taffyStyle.Display = TaffyDisplay.Block;
                 }
 
+                ListMarkers.ApplyInsideMarker(context.Engine, tree, id, style, item);
                 TaffyNodeId leaf = context.TaffyTree.NewLeafWithContext(taffyStyle, item);
+                AttachAtomics(context, leaf, item);
                 context.IdMap[leaf] = id;
                 context.Ifc.Whole[id] = item;
                 return leaf;
@@ -429,15 +443,13 @@ internal static partial class DomBuild
             FlattenContentsChildren(tree, domChildren, context.Styles, flat);
             domChildren = flat;
             domChildren.RemoveAll(cid =>
-                tree.GetNode(cid)?.IsElement != true && tree.TextContent(cid).Trim().Length == 0);
+                tree.GetNode(cid)?.IsElement != true && tree.TextContent(cid).AsSpan().Trim().Length == 0);
 
             // Flex and grid placement consume the order-modified document order; a stable sort
             // preserves source order for equal values, exactly the CSS tie-break.
-            domChildren = [.. domChildren
-                .Select((cid, index) => (cid, index))
-                .OrderBy(pair => context.Styles.TryGetValue(pair.cid, out LayoutStyle? s) ? s.Order : 0)
-                .ThenBy(pair => pair.index)
-                .Select(pair => pair.cid)];
+            domChildren = StableOrderBy(
+                domChildren,
+                cid => context.Styles.TryGetValue(cid, out LayoutStyle? s) ? s.Order : 0);
         }
         else if (style.Display == Display.Block)
         {
@@ -445,7 +457,7 @@ internal static partial class DomBuild
             if (!hasInlineIshContent)
             {
                 domChildren.RemoveAll(cid =>
-                    tree.GetNode(cid)?.IsElement != true && tree.TextContent(cid).Trim().Length == 0);
+                    tree.GetNode(cid)?.IsElement != true && tree.TextContent(cid).AsSpan().Trim().Length == 0);
             }
 
             // A float nested directly in a transparent inline wrapper belongs to the ancestor
@@ -467,7 +479,13 @@ internal static partial class DomBuild
             bool hasMainAutoMargin = false;
             foreach (NodeId cid in domChildren)
             {
-                if (!context.Styles.TryGetValue(cid, out LayoutStyle? childStyle))
+                // DEVIATION from crates/obscura-render/src/dom.rs, which counts out-of-flow
+                // children too. An absolutely positioned child is not a flex item and its auto
+                // margins absorb nothing, so it must not switch the container's justify-content
+                // off: a `position:absolute; margin:auto` child of a `justify-content:center`
+                // container sat at the start edge instead of centred (Chromium 141).
+                if (!context.Styles.TryGetValue(cid, out LayoutStyle? childStyle)
+                    || childStyle.Position == TaffyPosition.Absolute)
                 {
                     continue;
                 }
@@ -489,7 +507,12 @@ internal static partial class DomBuild
 
         // `float` has no effect on a flex or grid item.
         bool hasFloatChild = false;
-        if (style.Display == Display.Block)
+        bool isInternalTableCell = style.IsTableCellBox && style.InternalFlexContainer;
+        bool floatFlowContainer = context.HasFloats
+            && (style.Display == Display.Block
+                || isInternalTableCell
+                || (style.Display == Display.Inline && style.IsInlineBlock));
+        if (style.Display == Display.Block || floatFlowContainer)
         {
             foreach (NodeId cid in domChildren)
             {
@@ -502,8 +525,14 @@ internal static partial class DomBuild
             }
         }
 
-        bool nativeFloatBand = hasFloatChild
-            && DomTableSupport.CanUseNativeFloatBand(tree, style, domChildren, context.Styles);
+        // A block container with floated children lays them out as CSS floats: see
+        // BuildMixedBlock. A multi-column container keeps its own build below; its floats are
+        // still taffy floats (MarkBlockFormattingContextRoots), placed in the first column.
+        if (floatFlowContainer && hasFloatChild && style.ColumnCount is not (> 1))
+        {
+            return BuildMixedBlock(context, id, style, taffyStyle, domChildren, floatFlow: true);
+        }
+
         bool hasInFlowBlockChild = false;
         foreach (NodeId cid in domChildren)
         {
@@ -514,8 +543,6 @@ internal static partial class DomBuild
                 break;
             }
         }
-
-        bool isInternalTableCell = style.IsTableCellBox && style.InternalFlexContainer;
 
         // `text-align` affects inline content, never the used width or placement of an in-flow
         // block child. Keep the legacy `<center>` behavior.
@@ -547,12 +574,11 @@ internal static partial class DomBuild
             && hasInlineIshContent
             && !hasFloatChild)
         {
-            return BuildMixedBlock(context, id, style, taffyStyle, domChildren);
+            return BuildMixedBlock(context, id, style, taffyStyle, domChildren, floatFlow: context.HasFloats);
         }
 
         if (stacksChildrenVertically
             && hasInlineIshContent
-            && !nativeFloatBand
             && !(hasFloatChild && hasInFlowBlockChild))
         {
             taffyStyle.Display = TaffyDisplay.Flex;
@@ -584,22 +610,8 @@ internal static partial class DomBuild
             taffyStyle.AlignItems = TaffyAlignItems.FlexStart;
         }
 
-        if (nativeFloatBand)
-        {
-            // Native float placement requires a real block formatting context on the parent.
-            taffyStyle.Display = TaffyDisplay.Block;
-        }
-
         List<TaffyNodeId> childIds;
-        if (nativeFloatBand)
-        {
-            childIds = BuildChildrenWithNativeFloatBand(context, id, style, domChildren);
-        }
-        else if (hasFloatChild)
-        {
-            childIds = BuildChildrenWithFloatZone(context, id, domChildren);
-        }
-        else if (style.Display is Display.Flex or Display.Grid && !style.InternalFlexContainer)
+        if (style.Display is Display.Flex or Display.Grid && !style.InternalFlexContainer)
         {
             childIds = BuildFlexGridChildren(context, id);
         }
@@ -612,11 +624,18 @@ internal static partial class DomBuild
             }
         }
 
-        if (!nativeFloatBand)
         {
             if (BuildInFlowPseudo(context, id, GeneratedBoxKind.Before, style.BeforePseudo)
                 is { } before)
             {
+                if (context.HasFloats && before.BlockLevel && style.BeforePseudo is { } beforeStyle)
+                {
+                    foreach (TaffyNodeId pseudoNode in before.Nodes)
+                    {
+                        SetNativeFloatClear(context, pseudoNode, beforeStyle, true);
+                    }
+                }
+
                 List<TaffyNodeId> merged = [.. before.Nodes];
                 merged.AddRange(childIds);
                 childIds = merged;
@@ -625,6 +644,14 @@ internal static partial class DomBuild
             if (BuildInFlowPseudo(context, id, GeneratedBoxKind.After, style.AfterPseudo)
                 is { } after)
             {
+                if (context.HasFloats && after.BlockLevel && style.AfterPseudo is { } afterStyle)
+                {
+                    foreach (TaffyNodeId pseudoNode in after.Nodes)
+                    {
+                        SetNativeFloatClear(context, pseudoNode, afterStyle, true);
+                    }
+                }
+
                 childIds.AddRange(after.Nodes);
             }
         }

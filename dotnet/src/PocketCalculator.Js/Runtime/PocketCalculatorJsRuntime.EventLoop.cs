@@ -17,11 +17,16 @@ namespace PocketCalculator.Js.Runtime;
 /// script the host runs.
 /// </para>
 /// <para>
-/// The one deno_core behavior that does not survive: a <c>Poll::Pending</c>
-/// parked on a real waker. The port cannot register a waker inside V8, so a
-/// loop with only future work parks on a timed wait sized to the next timer.
-/// A page with no timers and no in-flight ops is idle immediately, which is the
-/// same answer, reached by polling rather than by being woken.
+/// Async ops settle here too, as in deno_core: ClearScript resolves an op's promise on
+/// the context that was current when the op was called, which is the page's
+/// <see cref="PocketCalculator.Js.Ops.OpCompletionContext"/>, and each turn runs the
+/// completions queued when it started before its posted tasks and timers.
+/// </para>
+/// <para>
+/// What survives of deno_core's waker: an op completion wakes a parked loop
+/// (<see cref="PocketCalculator.Js.Ops.OpCompletionContext.WhenPosted"/>); anything else
+/// with only future work parks on a timed wait sized to the next timer. A page with
+/// no timers and no in-flight ops is idle immediately, which is the same answer.
 /// </para>
 /// </remarks>
 public sealed partial class PocketCalculatorJsRuntime
@@ -70,6 +75,14 @@ public sealed partial class PocketCalculatorJsRuntime
     private LoopTick PumpTick(out string? taskError) => PumpTick(out taskError, out _);
 
     /// <summary>
+    /// Set for the length of an autonomous turn: whether the host has work waiting (a CDP
+    /// command) that the rest of the turn's tasks should not hold up.
+    /// </summary>
+    private Func<bool>? _yieldTo;
+
+    private bool YieldRequested() => _yieldTo is { } yieldTo && yieldTo();
+
+    /// <summary>
     /// Runs one batch of ready work. <paramref name="ranTimers"/> reports
     /// whether a timer batch was delivered, which is what the single-turn
     /// entry points use to decide whether the turn still owes the caller one.
@@ -90,73 +103,160 @@ public sealed partial class PocketCalculatorJsRuntime
         // become events.
         _shim.FlushRejections();
 
-        // Posted tasks first: the shim treats op_posted_task as the task source
+        // Op completions first, as deno_core resolves the ops that are ready before it runs
+        // its macrotasks and timers: each one settles its promise, and the checkpoint after it
+        // runs the reactions. Only what was queued when the turn started; a completion that
+        // lands meanwhile belongs to the next turn. A watchdog interrupt ends the turn with
+        // the rest still queued (RunOne takes one at a time). DEVIATION from runtime.rs only
+        // in where the queue lives: see OpCompletionContext.
+        // Not while a termination is pending: ClearScript resolves the promise from inside a
+        // Task continuation, which swallows the interrupt and leaves the promise unsettled for
+        // good. The completions wait for the turn after CancelTermination instead.
+        var completions = _ops.Cancellation.Token.IsCancellationRequested ? 0 : _opCompletions.Pending;
+        var settledOps = 0;
+        while (settledOps < completions && _opCompletions.RunOne())
+        {
+            settledOps++;
+            PerformMicrotaskCheckpoint();
+            if (settledOps < completions && YieldRequested())
+            {
+                return LoopTick.Progressed;
+            }
+        }
+
+        // Posted tasks next: the shim treats op_posted_task as the task source
         // that must run before the next timer batch, which is what keeps a
         // rendering checkpoint ahead of the callbacks it schedules.
+        //
+        // A watchdog interrupt ends the turn at the task it stopped. The tasks after it
+        // were already taken off their queues, so they are handed back (RequeuePostedTasks,
+        // TimerQueue.Restore) to run on the next turn: dropping them lost their work for
+        // good, and a dynamic script whose execution was one of them never ran and never
+        // let the document's load event fire. The stopped task itself is not re-run.
         var posted = DrainPostedTasks();
-        foreach (var deliver in posted)
+        for (var index = 0; index < posted.Length; index++)
         {
             try
             {
-                deliver(0);
-            }
-            catch (ScriptInterruptedException)
-            {
-                throw;
-            }
-            catch (ScriptEngineException error)
-            {
-                taskError ??= $"Event loop error: {error.Message}";
-            }
-            PerformMicrotaskCheckpoint();
-        }
-
-        var due = Timers.TakeDue();
-        if (due.Count > 0)
-        {
-            ranTimers = true;
-            foreach (var callback in due)
-            {
                 try
                 {
-                    (callback as ScriptObject)?.InvokeAsFunction();
-                }
-                catch (ScriptInterruptedException)
-                {
-                    throw;
+                    posted[index](0);
                 }
                 catch (ScriptEngineException error)
                 {
-                    // A timer callback that throws is a page-local task error:
-                    // report it and keep scheduling (#699).
                     taskError ??= $"Event loop error: {error.Message}";
                 }
                 PerformMicrotaskCheckpoint();
             }
+            catch (ScriptInterruptedException)
+            {
+                RequeuePostedTasks(posted, index + 1);
+                throw;
+            }
+
+            if (index + 1 < posted.Length && YieldRequested())
+            {
+                RequeuePostedTasks(posted, index + 1);
+                return LoopTick.Progressed;
+            }
+        }
+
+        var due = Timers.TakeDueTimers();
+        if (due.Count > 0)
+        {
+            ranTimers = true;
+            for (var index = 0; index < due.Count; index++)
+            {
+                try
+                {
+                    try
+                    {
+                        (due[index].Callback as ScriptObject)?.InvokeAsFunction();
+                    }
+                    catch (ScriptEngineException error)
+                    {
+                        // A timer callback that throws is a page-local task error:
+                        // report it and keep scheduling (#699).
+                        taskError ??= $"Event loop error: {error.Message}";
+                    }
+                    PerformMicrotaskCheckpoint();
+                }
+                catch (ScriptInterruptedException)
+                {
+                    Timers.Restore(due, index + 1);
+                    throw;
+                }
+
+                if (index + 1 < due.Count && YieldRequested())
+                {
+                    Timers.Restore(due, index + 1);
+                    break;
+                }
+            }
             return LoopTick.Progressed;
         }
 
-        if (posted.Length > 0)
+        if (posted.Length > 0 || settledOps > 0)
         {
             return LoopTick.Progressed;
         }
 
-        return Timers.Count > 0 || _postedTasks.Count > 0 || HasPendingAsyncOps || HasPendingNetworkRequests()
+        return Timers.Count > 0 || PostedTaskCount > 0 || HasPendingAsyncOps || HasPendingNetworkRequests()
             ? LoopTick.Waiting
             : LoopTick.Idle;
     }
 
+    // Locked for the reason TimerQueue is: op_post_task can be called from a promise
+    // continuation that ClearScript runs on the thread that completed an async op.
+    private int PostedTaskCount
+    {
+        get
+        {
+            lock (_postedTasks)
+            {
+                return _postedTasks.Count;
+            }
+        }
+    }
+
     private Action<double>[] DrainPostedTasks()
     {
-        if (_postedTasks.Count == 0)
+        lock (_postedTasks)
         {
-            return [];
+            if (_postedTasks.Count == 0)
+            {
+                return [];
+            }
+            // Snapshot before running: a task that posts another belongs to the next
+            // turn, or a self-reposting scheduler starves everything after it.
+            var drained = _postedTasks.ToArray();
+            _postedTasks.Clear();
+            return drained;
         }
-        // Snapshot before running: a task that posts another belongs to the next
-        // turn, or a self-reposting scheduler starves everything after it.
-        var drained = _postedTasks.ToArray();
-        _postedTasks.Clear();
-        return drained;
+    }
+
+    /// <summary>Put the tasks a turn took but did not run back at the head of the queue.</summary>
+    private void RequeuePostedTasks(Action<double>[] taken, int start)
+    {
+        if (start >= taken.Length)
+        {
+            return;
+        }
+
+        lock (_postedTasks)
+        {
+            var later = _postedTasks.ToArray();
+            _postedTasks.Clear();
+            for (var index = start; index < taken.Length; index++)
+            {
+                _postedTasks.Enqueue(taken[index]);
+            }
+
+            foreach (var task in later)
+            {
+                _postedTasks.Enqueue(task);
+            }
+        }
     }
 
     private async Task<LoopTick> ParkAsync(TimeSpan cap)
@@ -170,7 +270,18 @@ public sealed partial class PocketCalculatorJsRuntime
         var delay = TimeSpan.FromMilliseconds(Math.Min(wanted, cap.TotalMilliseconds));
         if (delay > TimeSpan.Zero)
         {
-            await Task.Delay(delay).ConfigureAwait(false);
+            // An op completion wakes the park: deno_core's waker, which the poll-only loop
+            // used to stand in for with a timed wait (up to 50 ms late).
+            var posted = _opCompletions.WhenPosted();
+            if (!posted.IsCompleted)
+            {
+                using var cancel = new CancellationTokenSource();
+                var timer = Task.Delay(delay, cancel.Token);
+                if (await Task.WhenAny(posted, timer).ConfigureAwait(false) != timer)
+                {
+                    cancel.Cancel();
+                }
+            }
         }
         return LoopTick.Waiting;
     }
@@ -250,7 +361,33 @@ public sealed partial class PocketCalculatorJsRuntime
     /// Drive one browser task under the shared task-budget watchdog. The
     /// long-lived server counterpart to bounded settling.
     /// </summary>
-    public async Task<bool> RunAutonomousEventLoopTurnAsync()
+    /// <param name="yieldTo">
+    /// Polled between the turn's tasks: when it answers true the turn stops after the task
+    /// that just ran and hands the rest back to their queues for the next turn.
+    /// </param>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-js (runtime.rs), whose turn runs every posted task and
+    /// every due timer before it returns, and only then lets the connection processor look
+    /// at its socket. Chromium services a DevTools message between any two tasks. On a page
+    /// whose timers each force a 200-700ms relayout (weather.com) one turn ran for seconds,
+    /// every CDP command queued behind it, and Playwright's five-command screenshot took
+    /// 22-30s, past the survey's 35s budget once. The CDP pump passes
+    /// <c>CdpContext.ConnectionHasWork</c>.
+    /// </remarks>
+    public async Task<bool> RunAutonomousEventLoopTurnAsync(Func<bool>? yieldTo = null)
+    {
+        _yieldTo = yieldTo;
+        try
+        {
+            return await RunAutonomousEventLoopTurnCoreAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _yieldTo = null;
+        }
+    }
+
+    private async Task<bool> RunAutonomousEventLoopTurnCoreAsync()
     {
         const ulong AutonomousTaskWatchdogMs = SynchronousTaskFloorMs + WatchdogSchedulingMarginMs;
 
@@ -302,7 +439,7 @@ public sealed partial class PocketCalculatorJsRuntime
         {
             throw new JsRuntimeException(error);
         }
-        if (tick != LoopTick.Idle && !ranTimers)
+        if (tick != LoopTick.Idle && !ranTimers && !YieldRequested())
         {
             await ParkAsync(TimeSpan.FromMilliseconds(50)).ConfigureAwait(false);
             // Rust's poll_fn re-polls after the wake and only then reports the
@@ -357,10 +494,17 @@ public sealed partial class PocketCalculatorJsRuntime
         var token = ArmWatchdog(
             TimeSpan.FromMilliseconds(budgetMs + SynchronousTaskFloorMs + WatchdogSchedulingMarginMs));
         string? fatal = null;
+        // DEVIATION from the reference's tokio::time::timeout(budget, run_event_loop()), in
+        // shape only: tokio polls the loop before the timeout, so work that came due while
+        // the loop was parked still runs on the wake that finds the deadline passed. Checking
+        // the deadline first skipped it whenever a park overshot (a loaded host), and a 40 ms
+        // wait over a 0 ms timer could return having run nothing. One pump follows every park.
+        var parked = false;
         try
         {
-            while (clock.Elapsed.TotalMilliseconds < budgetMs)
+            while (parked || clock.Elapsed.TotalMilliseconds < budgetMs)
             {
+                parked = false;
                 LoopTick tick;
                 string? error;
                 try
@@ -394,6 +538,7 @@ public sealed partial class PocketCalculatorJsRuntime
                 if (tick == LoopTick.Waiting)
                 {
                     await ParkAsync(TimeSpan.FromMilliseconds(Math.Min(remaining, 50))).ConfigureAwait(false);
+                    parked = true;
                 }
                 else
                 {

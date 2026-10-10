@@ -103,7 +103,7 @@ public sealed class GlobalObjectFingerprint
             """,
             "https://example.com/",
             5_000);
-        await runtime.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(runtime);
         Assert.Equal("seenBefore", runtime.Evaluate("globalThis.seenBefore === '' ? 'seenBefore' : globalThis.seenBefore")!.GetValue<string>());
         Assert.Equal("seenAfter", runtime.Evaluate("globalThis.seenAfter === '' ? 'seenAfter' : String(globalThis.seenAfter)")!.GetValue<string>());
     }

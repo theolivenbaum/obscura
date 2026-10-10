@@ -350,6 +350,11 @@ public sealed partial class PocketCalculatorJsRuntime
             return 0;
         }
 
+        return state.IsolateLock.Run(() => ServiceRenderResourcesLocked(state));
+    }
+
+    private int ServiceRenderResourcesLocked(PocketCalculatorState state)
+    {
         int loaded = ApplyRenderResourceResults();
         if (!HasTransport(state))
         {

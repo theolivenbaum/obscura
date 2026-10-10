@@ -22,8 +22,11 @@ public sealed partial class TextEngine : IDisposable
     /// <summary>Marks a measure context as a replaced box rather than an inline item.</summary>
     private const int ReplacedContextBit = unchecked((int)0x8000_0000);
 
-    private readonly FontDatabase _database = new();
-    private readonly Dictionary<string, LoadedFamily> _loadedFamilies = new(StringComparer.Ordinal);
+    private readonly FontDatabase _database;
+    private readonly Dictionary<string, LoadedFamily> _loadedFamilies;
+
+    /// <summary>Whether <see cref="_database"/> is another engine's; see <see cref="ForPass"/>.</summary>
+    private readonly bool _sharesDatabase;
     private readonly List<InlineItem> _items = [];
     private readonly List<ReplacedItem> _replaced = [];
     private readonly TextShaper _shaper;
@@ -31,6 +34,8 @@ public sealed partial class TextEngine : IDisposable
     private readonly FontDirectorySet _directoryFonts;
     private readonly GlyphRasterizer _rasterizer;
     private readonly VariableGlyphCache _variableCache;
+    private readonly bool _loadsEmoji;
+    private readonly bool _loadsCjk;
 
     public TextEngine()
         : this([], loadEmoji: false)
@@ -42,13 +47,89 @@ public sealed partial class TextEngine : IDisposable
     {
     }
 
-    public TextEngine(IReadOnlyList<WebFont> fonts, bool loadEmoji)
-        : this(fonts, loadEmoji, FontDirectories.Current)
+    public TextEngine(IReadOnlyList<WebFont> fonts, bool loadEmoji, bool loadCjk = false)
+        : this(fonts, loadEmoji, FontDirectories.Current, loadCjk)
     {
     }
 
-    internal TextEngine(IReadOnlyList<WebFont> fonts, bool loadEmoji, FontDirectorySet directoryFonts)
+    /// <summary>
+    /// An engine for one layout pass that takes over <paramref name="previous"/>'s font database
+    /// and loaded families when both are built from the same fonts.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-render, which builds the font database on every pass. Loading the
+    /// bundled faces and the page's web fonts parses every face's tables again (nvidia.com: a
+    /// tenth of a forced read). The database and the families resolved from it are a function
+    /// of the face list - the bundled faces, the font directories, the emoji and CJK faces and
+    /// the web fonts, in order - and nothing adds to either after the constructor; the same test
+    /// that lets a pass take over the previous pass's shaped paragraphs
+    /// (<see cref="AdoptShapeCache"/>) decides it. Each engine keeps its own shaper and glyph
+    /// caches, so what a pass leaves behind is bounded as before.
+    /// </remarks>
+    internal static TextEngine ForPass(
+        IReadOnlyList<WebFont> fonts,
+        bool loadEmoji,
+        bool loadCjk,
+        TextEngine? previous)
     {
+        FontDirectorySet directoryFonts = FontDirectories.Current;
+        return previous is not null
+            && !ShapeCache.Disabled
+            && ReferenceEquals(previous._directoryFonts, directoryFonts)
+            && previous._loadsEmoji == loadEmoji
+            && previous._loadsCjk == loadCjk
+            && SameFonts(previous._fonts, fonts)
+                ? new TextEngine(previous, fonts)
+                : new TextEngine(fonts, loadEmoji, directoryFonts, loadCjk);
+
+        static bool SameFonts(WebFont[] mine, IReadOnlyList<WebFont> theirs)
+        {
+            if (mine.Length != theirs.Count)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < mine.Length; index++)
+            {
+                WebFont a = mine[index];
+                WebFont b = theirs[index];
+                if (!ReferenceEquals(a, b)
+                    && !(ReferenceEquals(a.Data, b.Data)
+                        && string.Equals(a.Family, b.Family, StringComparison.Ordinal)
+                        && a.Weight == b.Weight
+                        && a.Italic == b.Italic))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+
+    private TextEngine(TextEngine fontsOf, IReadOnlyList<WebFont> fonts)
+    {
+        _database = fontsOf._database;
+        _loadedFamilies = fontsOf._loadedFamilies;
+        _sharesDatabase = true;
+        _directoryFonts = fontsOf._directoryFonts;
+        _loadsEmoji = fontsOf._loadsEmoji;
+        _loadsCjk = fontsOf._loadsCjk;
+        _shaper = new TextShaper(_database);
+        _rasterizer = new GlyphRasterizer(_database);
+        _variableCache = new VariableGlyphCache(_database);
+        _fonts = [.. fonts];
+    }
+
+    internal TextEngine(
+        IReadOnlyList<WebFont> fonts,
+        bool loadEmoji,
+        FontDirectorySet directoryFonts,
+        bool loadCjk = false)
+    {
+        _database = new FontDatabase();
+        _loadedFamilies = new(StringComparer.Ordinal);
+
         // Build a database from embedded and page-provided faces. The host's font set is never
         // consulted implicitly: it would make layout differ machine to machine and add a
         // multi-millisecond startup scan. The one exception is a font directory the operator
@@ -75,9 +156,24 @@ public sealed partial class TextEngine : IDisposable
 
         _directoryFonts = directoryFonts;
 
+        // The two large faces are read in place and shared across passes (FontAssets.Embedded),
+        // and each joins only a pass whose text needs it.
+        _loadsEmoji = loadEmoji;
         if (loadEmoji)
         {
-            foreach (FontId id in _database.LoadFontSource(FontAssets.Load(FontAssets.EmojiFaceFile)))
+            foreach (FontId id in _database.LoadEmbeddedSource(FontAssets.Embedded(FontAssets.EmojiFaceFile)))
+            {
+                declarations.Add((id, null, null, null));
+            }
+        }
+
+        // DEVIATION from crates/obscura-render/src/inline.rs, which embeds no CJK face and draws
+        // every Han, kana and Hangul character as a missing glyph. See "Known deviations" in
+        // todo.md.
+        _loadsCjk = loadCjk;
+        if (loadCjk)
+        {
+            foreach (FontId id in _database.LoadEmbeddedSource(FontAssets.Embedded(FontAssets.CjkFaceFile)))
             {
                 declarations.Add((id, null, null, null));
             }
@@ -141,12 +237,147 @@ public sealed partial class TextEngine : IDisposable
             return;
         }
 
+        // The optional embedded faces decide which FontId each later face gets, and shaped
+        // glyphs carry FontIds, so a pass that loaded a different set cannot reuse them.
         _shaper.Cache = previous?._shaper.Cache is { } inherited
             && ReferenceEquals(previous._directoryFonts, _directoryFonts)
+            && previous._loadsEmoji == _loadsEmoji
+            && previous._loadsCjk == _loadsCjk
             && inherited.MatchesFontSet(_fonts)
             ? inherited
             : new ShapeCache(_fonts);
     }
+
+    /// <summary>
+    /// Whether this engine shapes through the very cache <paramref name="previous"/> did, which
+    /// <see cref="AdoptShapeCache"/> grants only for the same font set. Measure contexts of the
+    /// two engines can then be compared by their inputs.
+    /// </summary>
+    internal bool SharesShapeCacheWith(TextEngine? previous) =>
+        previous is not null && _shaper.Cache is { } cache && ReferenceEquals(cache, previous._shaper.Cache);
+
+    /// <summary>
+    /// Whether measure context <paramref name="first"/> of this engine and context
+    /// <paramref name="second"/> of <paramref name="other"/> are the same kind and, for a
+    /// replaced box, size identically. Text contexts compare only the layout parameters held
+    /// beside the shaped text; their content is the caller's to prove unchanged.
+    /// </summary>
+    internal bool MeasureContextMatches(int first, TextEngine other, int second)
+    {
+        bool replaced = (first & ReplacedContextBit) != 0;
+        if (replaced != ((second & ReplacedContextBit) != 0))
+        {
+            return false;
+        }
+
+        if (replaced)
+        {
+            int a = first & ~ReplacedContextBit;
+            int b = second & ~ReplacedContextBit;
+            return a < _replaced.Count && b < other._replaced.Count
+                && _replaced[a].SameSizing(other._replaced[b]);
+        }
+
+        if (first < 0 || first >= _items.Count || second < 0 || second >= other._items.Count)
+        {
+            return false;
+        }
+
+        InlineItem x = _items[first];
+        InlineItem y = other._items[second];
+        return x.LayoutWrap == y.LayoutWrap
+            && x.MinContentWrap == y.MinContentWrap
+            && x.TextIndent == y.TextIndent
+            && x.MarkerIndent.Equals(y.MarkerIndent)
+            && x.BalanceWrap == y.BalanceWrap
+            && x.Align == y.Align
+            && x.ForcedMinHeight.Equals(y.ForcedMinHeight)
+            && x.LineClamp == y.LineClamp
+            && x.EllipsisOverflow == y.EllipsisOverflow
+            && string.Equals(x.OwnerText, y.OwnerText, StringComparison.Ordinal)
+            && x.OwnerBoxes.Count == y.OwnerBoxes.Count
+            && x.BoundaryEvents.Count == y.BoundaryEvents.Count
+            && (x.Atomics?.Count ?? 0) == (y.Atomics?.Count ?? 0);
+    }
+
+    private TextEngine? _adoptFrom;
+    private IReadOnlyDictionary<NodeId, int>? _adoptWhole;
+    private HashSet<NodeId>? _adoptDirty;
+    private HashSet<int>? _adoptTaken;
+
+    /// <summary>
+    /// Offers this pass the whole-container inline items <paramref name="previous"/> built, for
+    /// <see cref="TryBuild"/> to take over instead of collecting and shaping them again.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-render, which builds every item on every pass. An item is a pure
+    /// function of its container's DOM subtree, the computed styles in it and the font set, so
+    /// one built for an element outside <paramref name="dirty"/> (the closure of everything the
+    /// retained pass changed, see <c>RetainedTaffyLayout.DirtyClosure</c>) is the item this pass
+    /// would build, provided the font set is the same - which sharing the shape cache proves.
+    /// What an item accumulates during a pass (its laid-out buffer, origin, clip, marker and
+    /// relative owner ranges) is reset to the state a new item starts in. The previous engine
+    /// must not be used again; its render has been superseded.
+    /// </remarks>
+    internal void AdoptInlineItems(TextEngine previous, IReadOnlyDictionary<NodeId, int> previousWhole, HashSet<NodeId> dirty)
+    {
+        if (!SharesShapeCacheWith(previous))
+        {
+            return;
+        }
+
+        _adoptFrom = previous;
+        _adoptWhole = previousWhole;
+        _adoptDirty = dirty;
+        _adoptTaken = [];
+    }
+
+    /// <summary>How many items this engine took over from the previous pass.</summary>
+    internal int AdoptedItemCount { get; private set; }
+
+    /// <summary>
+    /// Ends the offer <see cref="AdoptInlineItems"/> made, once the box tree is built. Holding
+    /// on to the previous engine would chain every pass's engine to the one before it.
+    /// </summary>
+    internal void EndInlineItemAdoption()
+    {
+        AdoptedItemCount = _adoptTaken?.Count ?? 0;
+        _adoptFrom = null;
+        _adoptWhole = null;
+        _adoptDirty = null;
+        _adoptTaken = null;
+    }
+
+    private int? TakeAdoptedItem(NodeId id)
+    {
+        if (_adoptWhole is not { } whole
+            || !whole.TryGetValue(id, out int previousIndex)
+            || _adoptDirty!.Contains(id)
+            || previousIndex < 0
+            || previousIndex >= _adoptFrom!._items.Count
+            || !_adoptTaken!.Add(previousIndex))
+        {
+            return null;
+        }
+
+        InlineItem item = _adoptFrom._items[previousIndex];
+        item.FirstLineOffset = 0f;
+        item.Origin = (0f, 0f);
+        item.Clip = null;
+        item.Marker = null;
+        item.RelativeOwnerRanges = [];
+
+        // The exclusions of the last final layout beside floats: a carried final layout of
+        // this item's box exists only for a layout that read no float (TaffyTree's float-blind
+        // cache), and any other layout records its own before Finalize reads them.
+        item.FloatBands = null;
+        int index = _items.Count;
+        _items.Add(item);
+        return index;
+    }
+
+    /// <summary>The shaped-paragraph cache this engine shapes through, for tests.</summary>
+    internal ShapeCache? CurrentShapeCache => _shaper.Cache;
 
     /// <summary>Shaped-paragraph cache statistics, for tests and profiling.</summary>
     internal (int Entries, int Hits, int Misses) ShapeCacheStats =>
@@ -289,9 +520,22 @@ public sealed partial class TextEngine : IDisposable
     /// <c>null</c> means the container is not a pure-text IFC and should build through the
     /// normal (block / flex / word-split) path.
     /// </remarks>
-    public int? TryBuild(DomTree tree, NodeId id, IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    public int? TryBuild(DomTree tree, NodeId id, IReadOnlyDictionary<NodeId, LayoutStyle> styles) =>
+        TryBuild(tree, id, styles, allowAtomics: false);
+
+    /// <summary>
+    /// <see cref="TryBuild(DomTree, NodeId, IReadOnlyDictionary{NodeId, LayoutStyle})"/>, laying
+    /// atomic inlines out in the context when <paramref name="allowAtomics"/>: the caller then
+    /// builds their boxes as children of the context's node (see <see cref="AtomicNodes"/>).
+    /// </summary>
+    internal int? TryBuild(DomTree tree, NodeId id, IReadOnlyDictionary<NodeId, LayoutStyle> styles, bool allowAtomics)
     {
-        if (!Inline.IsPureTextIfc(tree, id, styles))
+        if (TakeAdoptedItem(id) is { } adopted)
+        {
+            return adopted;
+        }
+
+        if (!Inline.IsPureTextIfc(tree, id, styles, allowAtomics))
         {
             return null;
         }
@@ -302,6 +546,11 @@ public sealed partial class TextEngine : IDisposable
         }
 
         var collector = new Collector();
+        if (allowAtomics)
+        {
+            collector.Atomics = [];
+        }
+
         ResolvedFont font = FontResolution.ResolveLoadedFont(
             style.FontFamily,
             ComputedStyle.UsedFontWeight(style),
@@ -327,13 +576,15 @@ public sealed partial class TextEngine : IDisposable
         DomTree tree,
         NodeId parent,
         IReadOnlyList<NodeId> run,
-        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        bool allowFloats = false,
+        bool allowAtomics = false)
     {
         run = LiftFlattenedWrappers(tree, parent, run, styles);
         bool hasText = false;
         foreach (NodeId cid in run)
         {
-            if (!Inline.InlineChildOk(tree, cid, styles, ref hasText))
+            if (!Inline.InlineChildOk(tree, cid, styles, ref hasText, allowFloats, allowAtomics))
             {
                 return null;
             }
@@ -350,6 +601,16 @@ public sealed partial class TextEngine : IDisposable
         }
 
         var collector = new Collector();
+        if (allowFloats)
+        {
+            collector.FloatAnchors = [];
+        }
+
+        if (allowAtomics)
+        {
+            collector.Atomics = [];
+        }
+
         ResolvedFont font = FontResolution.ResolveLoadedFont(
             style.FontFamily,
             ComputedStyle.UsedFontWeight(style),
@@ -364,6 +625,30 @@ public sealed partial class TextEngine : IDisposable
         }
 
         return PushShapedItem(style, context, spans, collector);
+    }
+
+    /// <summary>
+    /// Whether <see cref="TryBuildRun"/> with floats allowed would fold <paramref name="run"/>,
+    /// without building anything.
+    /// </summary>
+    internal static bool CanFoldRun(
+        DomTree tree,
+        NodeId parent,
+        IReadOnlyList<NodeId> run,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        bool allowAtomics = false)
+    {
+        run = LiftFlattenedWrappers(tree, parent, run, styles);
+        bool hasText = false;
+        foreach (NodeId cid in run)
+        {
+            if (!Inline.InlineChildOk(tree, cid, styles, ref hasText, allowFloats: true, allowAtomics))
+            {
+                return false;
+            }
+        }
+
+        return hasText && styles.ContainsKey(parent);
     }
 
     /// <summary>
@@ -455,7 +740,14 @@ public sealed partial class TextEngine : IDisposable
     /// but their text still uses the same authored webfonts, variable weight selection,
     /// transformations, and glyph rasterizer as an ordinary inline formatting context.
     /// </remarks>
-    public int? PushGeneratedText(string text, LayoutStyle style)
+    /// <param name="text">The text to shape.</param>
+    /// <param name="style">The style it is shaped in; only read.</param>
+    /// <param name="whiteSpace">
+    /// The <c>white-space</c> to shape it with instead of <paramref name="style"/>'s, so a caller
+    /// that needs another value (a word leaf is shaped as <c>pre</c>) does not have to copy the
+    /// whole style for it.
+    /// </param>
+    public int? PushGeneratedText(string text, LayoutStyle style, WhiteSpace? whiteSpace = null)
     {
         var collector = new Collector();
         ResolvedFont font = FontResolution.ResolveLoadedFont(
@@ -463,12 +755,12 @@ public sealed partial class TextEngine : IDisposable
             ComputedStyle.UsedFontWeight(style),
             style.FontStyleItalic ?? false,
             _loadedFamilies);
-        SpanCtx context = BaseSpanCtx(style, font, collector);
+        SpanCtx context = BaseSpanCtx(style, font, collector, whiteSpace);
         SpanAttrs attrs = context.ToSpanAttrs();
         List<(string Text, SpanAttrs Attrs)> spans = [];
 
         Inline.PushText(text, context.Transform, context.WhiteSpace, attrs, spans, collector);
-        return PushShapedItem(style, context, spans, collector);
+        return PushShapedItem(style, context, spans, collector, whiteSpace);
     }
 
     /// <summary>
@@ -479,7 +771,8 @@ public sealed partial class TextEngine : IDisposable
         LayoutStyle baseStyle,
         SpanCtx strut,
         List<(string Text, SpanAttrs Attrs)> spans,
-        Collector collector)
+        Collector collector,
+        WhiteSpace? whiteSpaceOverride = null)
     {
         collector.FlushLastSpan(spans);
         float lineHeight = strut.LineHeight;
@@ -488,7 +781,7 @@ public sealed partial class TextEngine : IDisposable
         List<InlineOwnerBox> ownerBoxes = collector.OwnerBoxes;
         List<InlineBoundaryEvent> boundaryEvents = collector.BoundaryEvents;
 
-        WhiteSpace whiteSpace = baseStyle.WhiteSpace ?? WhiteSpace.Normal;
+        WhiteSpace whiteSpace = whiteSpaceOverride ?? baseStyle.WhiteSpace ?? WhiteSpace.Normal;
         Wrap layoutWrap = Wrap.Word;
         Wrap minContentWrap = Wrap.Word;
         foreach ((string _, SpanAttrs attrs) in spans)
@@ -518,7 +811,7 @@ public sealed partial class TextEngine : IDisposable
             foreach ((string text, SpanAttrs _) in spans)
             {
                 bool empty = text.Length == 0
-                    || (collapsible && text.Trim().Length == 0 && !text.Contains('\n', StringComparison.Ordinal));
+                    || (collapsible && text.AsSpan().Trim().Length == 0 && !text.Contains('\n', StringComparison.Ordinal));
                 if (!empty)
                 {
                     allEmpty = false;
@@ -572,8 +865,19 @@ public sealed partial class TextEngine : IDisposable
             };
         }
 
+        List<(NodeId Float, int Offset)>? floatAnchors = null;
+        if (collector.FloatAnchors is { Count: > 0 } anchors)
+        {
+            floatAnchors = new List<(NodeId Float, int Offset)>(anchors.Count);
+            foreach ((NodeId floatNode, int offset) in anchors)
+            {
+                floatAnchors.Add((floatNode, Math.Min(offset, textLength)));
+            }
+        }
+
+        List<AtomicInline>? atomicInlines = collector.Atomics is { Count: > 0 } collected ? collected : null;
         string? ownerText = null;
-        if (ownerBoxes.Count > 0)
+        if (ownerBoxes.Count > 0 || floatAnchors is not null || atomicInlines is not null)
         {
             var builder = new StringBuilder(textLength);
             foreach ((string text, SpanAttrs _) in spans)
@@ -704,20 +1008,31 @@ public sealed partial class TextEngine : IDisposable
             markerBuffer.ShapeUntilScroll(_shaper);
         }
 
-        Align? align = baseStyle.TextAlign is { } textAlign
-            ? textAlign.GetKeyword() switch
+        // DEVIATION from crates/obscura-render/src/inline.rs, which aligns only `center` and
+        // `right`/`end` (to the right), ignores `justify`, `text-align-last` and `direction`,
+        // and lets each paragraph's first strong character pick its direction. The paragraph
+        // direction is the block's (Chromium 141 starts a dir=rtl paragraph at the right),
+        // start/end resolve against it, the last line takes text-align-last, and the white
+        // space a line ends with stays out of its alignment (TextLayout).
+        bool rtl = baseStyle.Direction == Layout.Direction.Rtl;
+        Align align = PhysicalAlign(baseStyle.TextAlignKeyword ?? TextAlignKeyword.Start, rtl);
+        Align lastAlign = baseStyle.TextAlignLast is { } lastKeyword
+            ? PhysicalAlign(lastKeyword, rtl)
+            : align == Align.Justified ? PhysicalAlign(TextAlignKeyword.Start, rtl) : align;
+        var alignOptions = new LineAlignOptions(
+            lastAlign,
+            whiteSpace switch
             {
-                AlignItemsKeyword.Center => Align.Center,
-                AlignItemsKeyword.FlexEnd => Align.End,
-                _ => null,
-            }
-            : null;
-        if (align is { } alignment)
+                WhiteSpace.Normal or WhiteSpace.NoWrap or WhiteSpace.PreLine => TrailingSpace.Removed,
+                WhiteSpace.PreWrap => TrailingSpace.HangsAtSoftWrap,
+                _ => TrailingSpace.Counts,
+            },
+            SoftWrapEnd: false);
+        foreach (BufferLine line in buffer.Lines)
         {
-            foreach (BufferLine line in buffer.Lines)
-            {
-                line.SetAlign(alignment);
-            }
+            line.SetAlign(align);
+            line.AlignOptions = alignOptions;
+            line.BaseRtl = rtl;
         }
 
         int index = _items.Count;
@@ -732,9 +1047,11 @@ public sealed partial class TextEngine : IDisposable
             MinContentWrap = minContentWrap,
             SourceBuffer = sourceBuffer,
             TextIndent = textIndent,
+            LayoutUnitWidth = baseStyle.IsInlineBlock,
             FirstLineOffset = 0f,
             BalanceWrap = baseStyle.TextWrapStyle == TextWrapStyle.Balance,
             Align = align,
+            Rtl = rtl,
             ForcedMinHeight = forcedMinHeight,
             Origin = (0f, 0f),
             Clip = null,
@@ -747,9 +1064,12 @@ public sealed partial class TextEngine : IDisposable
             OwnerText = ownerText,
             OwnerChunks = ownerChunks,
             OwnerChain = collector.OwnerChain,
+            TextNodes = collector.TextNodes,
+            Atomics = atomicInlines,
             OwnerBoxes = ownerBoxes,
             BoundaryEvents = boundaryEvents,
             RelativeOwnerRanges = [],
+            FloatAnchors = floatAnchors,
         });
         return index;
     }
@@ -820,10 +1140,50 @@ public sealed partial class TextEngine : IDisposable
     private (float Width, float Height) MeasureTextWithWrap(int index, float? width, Wrap wrap)
     {
         InlineItem item = _items[index];
+
+        // DEVIATION from crates/obscura-render/src/inline.rs, which lays the paragraph out again
+        // for every measurement. The size is a function of the item, the width and the wrap
+        // (ShapeWithTextIndent), and taffy asks one item for its min-content, max-content and
+        // final sizes over and over as flex, grid and table sizing go round: each answer the
+        // item has given is kept, so a question asked again lays nothing out. The buffer stays
+        // as the last layout left it, which only float anchors and atomic inlines read after a
+        // measurement (their items are measured afresh every time), and Finalize lays the item
+        // out at its final width itself. A layout carried over to the next pass keeps them.
+        long bits = width is { } asked ? BitConverter.SingleToInt32Bits(asked) : -1L;
+        bool memoizable = MeasureMemoEnabled && item.Atomics is null && item.FloatAnchors is null;
+        if (memoizable && item.MeasuredSizes is { } known)
+        {
+            foreach ((long knownBits, Wrap knownWrap, float knownWidth, float knownHeight) in known)
+            {
+                if (knownBits == bits && knownWrap == wrap)
+                {
+                    return (knownWidth, knownHeight);
+                }
+            }
+        }
+
         ShapeWithTextIndent(item, width, wrap);
         (float shapedWidth, float height, bool clamped) = InlineGeometry.BufferSize(item);
-        return (shapedWidth, clamped ? height : F32.Max(height, item.ForcedMinHeight));
+        (float Width, float Height) size = (shapedWidth, clamped ? height : F32.Max(height, item.ForcedMinHeight));
+        if (memoizable)
+        {
+            (long, Wrap, float, float)[] previous = item.MeasuredSizes ?? [];
+            int kept = Math.Min(previous.Length, MeasureMemoSlots - 1);
+            var next = new (long, Wrap, float, float)[kept + 1];
+            next[0] = (bits, wrap, size.Width, size.Height);
+            Array.Copy(previous, 0, next, 1, kept);
+            item.MeasuredSizes = next;
+        }
+
+        return size;
     }
+
+    /// <summary>How many sizes an item keeps (<see cref="InlineItem.MeasuredSizes"/>).</summary>
+    private const int MeasureMemoSlots = 6;
+
+    /// <summary>Kill switch for an A/B on one binary: <c>POCKETCALCULATOR_NO_MEASURE_MEMO=1</c>.</summary>
+    internal static bool MeasureMemoEnabled { get; set; } =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_NO_MEASURE_MEMO") != "1";
 
     /// <summary>
     /// Exact max-content size for one fallback word item.
@@ -962,16 +1322,170 @@ public sealed partial class TextEngine : IDisposable
         return new Size<float>(measuredWidth, measuredHeight);
     }
 
+    /// <summary>Forget the float exclusions recorded by the last final layout of an IFC.</summary>
+    internal void ForgetFloatBands(int index)
+    {
+        if ((index & ReplacedContextBit) == 0 && index < _items.Count)
+        {
+            _items[index].FloatBands = null;
+        }
+    }
+
+    /// <summary>The floats anchored in inline context <paramref name="index"/>, or null.</summary>
+    internal List<(NodeId Float, int Offset)>? FloatAnchorsOf(int index) =>
+        (index & ReplacedContextBit) == 0 && index < _items.Count ? _items[index].FloatAnchors : null;
+
+    /// <summary>
+    /// For each of <paramref name="offsets"/> (ascending text offsets), the line box of the
+    /// last layout of context <paramref name="index"/> that holds it, relative to the content
+    /// box: its top, its height, its width (the space floats leave it), and how much of that
+    /// the content before the offset already uses. A float anchored there is placed on that
+    /// line when it fits in the rest (CSS 2.1 9.5.1 rule 8: as high as possible), below it
+    /// otherwise.
+    /// </summary>
+    public (float Top, float Height, float Width, float Used)?[] AnchorLines(int index, int[] offsets)
+    {
+        var result = new (float Top, float Height, float Width, float Used)?[offsets.Length];
+        if ((index & ReplacedContextBit) != 0 || index >= _items.Count || offsets.Length == 0)
+        {
+            return result;
+        }
+
+        InlineItem item = _items[index];
+        if (item.OwnerText is not { } source)
+        {
+            return result;
+        }
+
+        List<int> starts = InlineGeometry.SourceLineStarts(item.Buffer, source);
+        int next = 0;
+        LayoutRun? previous = null;
+        int previousStart = 0;
+        foreach (LayoutRun run in item.Buffer.LayoutRuns())
+        {
+            int lineStart = run.LineIndex < starts.Count ? starts[run.LineIndex] : 0;
+            int end = int.MinValue;
+            foreach (LayoutGlyph glyph in run.Glyphs)
+            {
+                end = Math.Max(end, glyph.End);
+            }
+
+            // An offset before this run's start belongs to the line before (a line ends at
+            // its last glyph; the collapsed space after it starts nothing).
+            while (next < offsets.Length && previous is not null && offsets[next] < lineStart)
+            {
+                result[next] = AnchorOn(previous, offsets[next] - previousStart);
+                next++;
+            }
+
+            // A float after the space a line wraps at is met before the line breaks, so it is on
+            // that line (Chromium 141), not at the start of the next.
+            int endWithSpace = end;
+            while (endWithSpace >= 0 && endWithSpace < run.Text.Length && run.Text[endWithSpace] == ' ')
+            {
+                endWithSpace++;
+            }
+
+            while (next < offsets.Length
+                && offsets[next] >= lineStart
+                && (run.Glyphs.Count == 0
+                    || offsets[next] - lineStart < end
+                    || (endWithSpace > 0
+                        && endWithSpace <= run.Text.Length
+                        && run.Text[endWithSpace - 1] == ' '
+                        && offsets[next] - lineStart <= endWithSpace)))
+            {
+                result[next] = AnchorOn(run, offsets[next] - lineStart);
+                next++;
+            }
+
+            previous = run;
+            previousStart = lineStart;
+            if (next == offsets.Length)
+            {
+                break;
+            }
+        }
+
+        for (; next < offsets.Length && previous is not null; next++)
+        {
+            result[next] = AnchorOn(previous, offsets[next] - previousStart);
+        }
+
+        return result;
+
+        (float Top, float Height, float Width, float Used) AnchorOn(LayoutRun line, int local)
+        {
+            // DEVIATION from vendor/taffy's float context, which has no anchored floats: white
+            // space the line would remove if it ended at the float does not count against it.
+            // Chromium 141 keeps a 20px float on a 150px line holding "Before long words "
+            // (128.97 without the space, 133.42 with it).
+            if (item.Buffer.Lines[line.LineIndex].AlignOptions.Trailing == TrailingSpace.Removed)
+            {
+                while (local > 0 && local <= line.Text.Length && line.Text[local - 1] == ' ')
+                {
+                    local--;
+                }
+            }
+
+            float lineStartX = line.Glyphs.Count > 0 ? F32.Min(line.Glyphs[0].X, line.X) : line.X;
+            float used = F32.Max(InlineGeometry.RunCursorX(line, Math.Max(local, 0)) - lineStartX, 0f);
+            return (line.LineTop, line.LineHeight, line.LineWidth, used);
+        }
+    }
+
+    /// <summary>
+    /// <see cref="MeasureTaffy"/> for a leaf in a block formatting context with floats:
+    /// <paramref name="bands"/> are the floats beside its content box. A final layout records
+    /// them, so <see cref="Finalize"/> breaks the lines the way the box was sized.
+    /// </summary>
+    public Size<float> MeasureTaffyAroundFloats(
+        int index,
+        Size<float?> known,
+        Size<AvailableSpace> available,
+        FloatBands? bands,
+        RunMode runMode)
+    {
+        if ((index & ReplacedContextBit) != 0)
+        {
+            return MeasureTaffy(index, known, available);
+        }
+
+        InlineItem item = _items[index];
+        float? width = known.Width ?? (available.Width.Kind == AvailableSpaceKind.Definite
+            ? available.Width.Unwrap()
+            : null);
+        if (!bands!.Intrudes || width is not { } definite)
+        {
+            if (runMode == RunMode.PerformLayout)
+            {
+                item.FloatBands = null;
+            }
+
+            return MeasureTaffy(index, known, available);
+        }
+
+        if (runMode == RunMode.PerformLayout)
+        {
+            item.FloatBands = bands;
+        }
+
+        ShapeWithTextIndent(item, definite, item.LayoutWrap, bands);
+        (float shapedWidth, float height, bool clamped) = InlineGeometry.BufferSize(item);
+        return new Size<float>(shapedWidth, clamped ? height : F32.Max(height, item.ForcedMinHeight));
+    }
+
     /// <summary>
     /// After layout, pin each context to its final content-box origin and clip, reshaping once
     /// at the resolved width so paint draws the same line breaks the box was sized for.
     /// </summary>
     public void Finalize(int index, (float X, float Y) contentOrigin, float contentWidth, Rect? clip)
     {
+        RestoreFinalAtomics(index);
         InlineItem item = _items[index];
         contentWidth = F32.Max(contentWidth, 0f);
-        ShapeWithTextIndent(item, contentWidth, item.LayoutWrap);
-        float balancedWidth = item.BalanceWrap
+        ShapeWithTextIndent(item, contentWidth, item.LayoutWrap, item.FloatBands);
+        float balancedWidth = item.BalanceWrap && item.FloatBands is null
             ? BalanceWrapWidth(item.Buffer, contentWidth) ?? contentWidth
             : contentWidth;
         float alignmentInset = F32.Max(contentWidth - balancedWidth, 0f) * item.Align switch
@@ -1164,11 +1678,26 @@ public sealed partial class TextEngine : IDisposable
     /// Provenance is a sidecar rather than glyph metadata, so changing DOM owners never creates
     /// a font-shaping boundary or disables ligatures.
     /// </remarks>
-    public List<InlineOwnerLineFragment> InlineOwnerLineFragments()
+    public List<InlineOwnerLineFragment> InlineOwnerLineFragments() => InlineOwnerLineFragments(null);
+
+    /// <summary>
+    /// <see cref="InlineOwnerLineFragments()"/>, with the fragments of every owner
+    /// <paramref name="culled"/> accepts split where a float is anchored inside it.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs, which has no anchored floats. Blink
+    /// reports the client rects of a culled inline box (one with no box fragment of its own: no
+    /// inline border, padding or margin, no background, not positioned) from its pieces of
+    /// text, and a float anchored inside it separates them: Chromium 141 gives
+    /// <c>&lt;em&gt;emph &lt;float/&gt;after&lt;/em&gt;</c> two rects on one line, meeting where
+    /// the float sits in the text, and a decorated one a single rect.
+    /// </remarks>
+    internal List<InlineOwnerLineFragment> InlineOwnerLineFragments(Func<NodeId, bool>? culled)
     {
         List<InlineOwnerLineFragment> output = [];
         Dictionary<(NodeId Owner, int Line), int> existingByOwner = [];
         Dictionary<int, float> cursorByOffset = [];
+        List<(float Left, float Right)> extents = [];
         for (int itemIndex = 0; itemIndex < _items.Count; itemIndex++)
         {
             InlineItem item = _items[itemIndex];
@@ -1200,16 +1729,31 @@ public sealed partial class TextEngine : IDisposable
                     || runs[runIndex + 1].LineIndex != run.LineIndex;
                 float firstLineOffset = lineIndex == 0 ? item.FirstLineOffset : 0f;
                 float alignmentShift = InlineGeometry.LineEdgeAlignmentShift(item, lineStart, lineEnd);
-                float lineRight = run.LineW + InlineGeometry.LineEdgeAdvance(item, lineStart, lineEnd);
+                // The line's content starts where its first glyph is: an aligned line does not
+                // start at the line box's left edge, and a continuing fragment runs to the
+                // content's end, not to the line box's width past it (Chromium 141: a
+                // right-aligned line of 280.13 in 300px is 280.13 wide, where this gave 264.68).
+                float lineRight = (run.Glyphs.Count > 0 && !run.Rtl ? run.Glyphs[0].X : run.X)
+                    + run.LineW + InlineGeometry.LineEdgeAdvance(item, lineStart, lineEnd);
 
                 // DEVIATION from crates/obscura-render/src/inline.rs, whose continuing fragment
                 // runs to the line's full advance. The white space a soft wrap leaves at the
                 // end of a line hangs, and Chromium 141 ends the fragment before it: the
                 // first line of a span wrapped after "three " is 36.47 wide ("three"), where
-                // this gave 40.91.
-                if (item.OwnerBoxes.Count > 0)
+                // this gave 40.91. White space that is removed (normal, nowrap, pre-line) ends
+                // no fragment and starts none, before a <br> or at a soft wrap alike; pre and
+                // break-spaces keep theirs; pre-wrap's hangs at a soft wrap, and Chromium
+                // reports it as a fragment of its own past the line's content.
+                LineAlignOptions lineOptions = item.Buffer.Lines[run.LineIndex].AlignOptions;
+                bool softWrapHere = !lastRunOfLine || lineOptions.SoftWrapEnd;
+                bool trailingRemoved = lineOptions.Trailing == TrailingSpace.Removed;
+                bool trailingHangs = lineOptions.Trailing == TrailingSpace.HangsAtSoftWrap && softWrapHere;
+                float trailingAdvance = 0f;
+                int contentEnd = int.MaxValue;
+                if (item.OwnerBoxes.Count > 0 && (trailingRemoved || trailingHangs))
                 {
-                    lineRight -= TrailingSpaceAdvance(run);
+                    trailingAdvance = TrailingSpaceAdvance(run, out contentEnd);
+                    lineRight -= trailingAdvance;
                 }
 
                 // RunCursorX scans the run's glyphs, and every owner open across the line asks
@@ -1227,6 +1771,10 @@ public sealed partial class TextEngine : IDisposable
                 }
 
                 bool lineHasRtl = item.OwnerBoxes.Count > 0 && LineHasRtlGlyph(run);
+                int rtlTrailingFrom = lineHasRtl && (trailingRemoved || trailingHangs)
+                    ? LogicalContentEnd(run)
+                    : int.MaxValue;
+                float[]? visualShifts = lineHasRtl ? InlineGeometry.VisualEdgeShifts(item, run, lineStart, lineEnd) : null;
                 foreach (InlineOwnerBox owner in item.OwnerBoxes)
                 {
                     bool empty = owner.Start == owner.End;
@@ -1251,24 +1799,124 @@ public sealed partial class TextEngine : IDisposable
                             + InlineGeometry.LineAdvanceBeforeEvent(item, owner.EndEvent, lineStart, lineEnd)
                             + owner.EndEdge.BorderPadding
                         : lineRight;
+                    bool onlyTrailing = false;
+                    if (trailingAdvance > 0f && !empty && !lineHasRtl)
+                    {
+                        float baseX = item.Origin.X + firstLineOffset + alignmentShift;
+                        if (trailingHangs && owner.End - lineStart > contentEnd)
+                        {
+                            float hangLeft = F32.Max(lineRight, rawLeft);
+                            float hangRight = F32.Min(
+                                lineRight + trailingAdvance,
+                                F32.Max(last ? rawRight : lineRight + trailingAdvance, hangLeft));
+                            output.Add(new InlineOwnerLineFragment(
+                                owner.Owner,
+                                itemIndex,
+                                lineIndex,
+                                baseX + hangLeft,
+                                item.Origin.Y + OwnerBaselineY(run, owner.Extent),
+                                F32.Max(hangRight - hangLeft, 0f)));
+                        }
+
+                        onlyTrailing = owner.Start - lineStart >= contentEnd;
+                        rawRight = F32.Min(rawRight, lineRight);
+                    }
+
+                    if (onlyTrailing)
+                    {
+                        continue;
+                    }
                     // DEVIATION from crates/obscura-render/src/inline.rs, which measures from
                     // the logical start cursor to the logical end cursor. On a right-to-left
                     // line the start cursor is the right edge, so the width came out negative
                     // and clamped to 0: Chromium 141 reports a `direction: rtl` span of
                     // Arabic at 1235,37 wide where this gave 1263.4,0. A line with any
                     // right-to-left glyph takes the visual extent of the owner's glyphs.
-                    if (!empty
-                        && lineHasRtl
-                        && OwnerGlyphExtent(run, owner.Start - lineStart, owner.End - lineStart)
-                            is { } visual)
+                    // Chromium gives an owner one fragment per bidi run it has on the line,
+                    // left to right (a dir=rtl span of Hebrew, English and Hebrew is three).
+                    if (!empty && lineHasRtl)
                     {
-                        rawLeft = visual.Left;
-                        rawRight = visual.Right;
+                        bool startOnRight = OwnerGlyphExtents(item, run, lineStart, lineEnd, owner, rtlTrailingFrom, visualShifts, extents);
+                        if (extents.Count > 0)
+                        {
+                            // The box's own border and padding sit outside its glyphs, on the
+                            // start side where it opens on this line and the end side where it
+                            // closes; the start is on the right when its text is right to left.
+                            int startSide = startOnRight ? extents.Count - 1 : 0;
+                            int endSide = startOnRight ? 0 : extents.Count - 1;
+                            if (first)
+                            {
+                                extents[startSide] = startOnRight
+                                    ? (extents[startSide].Left, extents[startSide].Right + owner.StartEdge.BorderPadding)
+                                    : (extents[startSide].Left - owner.StartEdge.BorderPadding, extents[startSide].Right);
+                            }
+
+                            if (last)
+                            {
+                                extents[endSide] = startOnRight
+                                    ? (extents[endSide].Left - owner.EndEdge.BorderPadding, extents[endSide].Right)
+                                    : (extents[endSide].Left, extents[endSide].Right + owner.EndEdge.BorderPadding);
+                            }
+
+                            rawLeft = extents[0].Left;
+                            rawRight = extents[0].Right;
+                            for (int more = 1; more < extents.Count; more++)
+                            {
+                                output.Add(new InlineOwnerLineFragment(
+                                    owner.Owner,
+                                    itemIndex,
+                                    lineIndex,
+                                    item.Origin.X + firstLineOffset + alignmentShift + extents[more].Left,
+                                    item.Origin.Y + OwnerBaselineY(run, owner.Extent),
+                                    F32.Max(extents[more].Right - extents[more].Left, 0f)));
+                            }
+                        }
+                        else if (owner.Start - lineStart >= rtlTrailingFrom)
+                        {
+                            continue;
+                        }
                     }
 
                     float x = item.Origin.X + firstLineOffset + alignmentShift + rawLeft;
                     float width = F32.Max(rawRight - rawLeft, 0f);
                     float baselineY = item.Origin.Y + OwnerBaselineY(run, owner.Extent);
+
+                    if (culled is not null
+                        && !lineHasRtl
+                        && !empty
+                        && item.FloatAnchors is { Count: > 0 } floats
+                        && owner.StartEdge.Advance == 0f
+                        && owner.EndEdge.Advance == 0f
+                        && culled(owner.Owner))
+                    {
+                        float pieceLeft = x;
+                        bool split = false;
+                        foreach ((NodeId _, int anchor) in floats)
+                        {
+                            if (anchor <= owner.Start || anchor >= owner.End || anchor <= lineStart || anchor >= lineEnd)
+                            {
+                                continue;
+                            }
+
+                            float at = item.Origin.X + firstLineOffset + alignmentShift
+                                + CursorX(anchor - lineStart)
+                                + InlineGeometry.LineAdvanceBeforeText(item, anchor, lineStart, lineEnd);
+                            if (at <= pieceLeft || at >= x + width)
+                            {
+                                continue;
+                            }
+
+                            output.Add(new InlineOwnerLineFragment(owner.Owner, itemIndex, lineIndex, pieceLeft, baselineY, at - pieceLeft));
+                            pieceLeft = at;
+                            split = true;
+                        }
+
+                        if (split)
+                        {
+                            output.Add(new InlineOwnerLineFragment(owner.Owner, itemIndex, lineIndex, pieceLeft, baselineY, x + width - pieceLeft));
+                            continue;
+                        }
+                    }
 
                     // Keyed lookup: a linear search of the output made nested inline boxes,
                     // which put every open owner on every line, quadratic in fragments.
@@ -1300,8 +1948,11 @@ public sealed partial class TextEngine : IDisposable
     }
 
     /// <summary>The advance of the spaces a left-to-right visual line ends with.</summary>
-    private static float TrailingSpaceAdvance(LayoutRun run)
+    /// <param name="run">The line.</param>
+    /// <param name="from">The text offset the trailing spaces start at; <c>int.MaxValue</c> when none.</param>
+    private static float TrailingSpaceAdvance(LayoutRun run, out int from)
     {
+        from = int.MaxValue;
         if (run.Rtl)
         {
             return 0f;
@@ -1335,9 +1986,34 @@ public sealed partial class TextEngine : IDisposable
             }
 
             advance += glyph.W;
+            from = Math.Min(from, glyph.Start);
         }
 
         return advance;
+    }
+
+    /// <summary>The end of the last glyph, in text order, that is not a space.</summary>
+    private static int LogicalContentEnd(LayoutRun run)
+    {
+        int end = 0;
+        foreach (LayoutGlyph glyph in run.Glyphs)
+        {
+            if (glyph.End <= end || glyph.Start < 0 || glyph.End > run.Text.Length)
+            {
+                continue;
+            }
+
+            for (int at = glyph.Start; at < glyph.End; at++)
+            {
+                if (run.Text[at] != ' ')
+                {
+                    end = glyph.End;
+                    break;
+                }
+            }
+        }
+
+        return end;
     }
 
     private static bool LineHasRtlGlyph(LayoutRun run)
@@ -1359,26 +2035,88 @@ public sealed partial class TextEngine : IDisposable
     }
 
     /// <summary>The visual x extent of the glyphs whose text lies in <c>start..end</c>.</summary>
-    private static (float Left, float Right)? OwnerGlyphExtent(LayoutRun run, int start, int end)
+    /// <param name="run">The line.</param>
+    /// <param name="start">The owner's first text offset.</param>
+    /// <param name="end">The owner's text end.</param>
+    /// <param name="trailingFrom">Glyphs from this text offset on are white space the line
+    /// ends with, removed or hanging, and belong to no fragment.</param>
+    /// <param name="shifts">The line's <see cref="InlineGeometry.VisualEdgeShifts"/>.</param>
+    /// <param name="extents">Receives one extent per bidi run, left to right, each glyph moved
+    /// by the inline-box edges the way paint moves it.</param>
+    /// <returns>Whether the owner's logically first glyph on the line is right to left.</returns>
+    private static bool OwnerGlyphExtents(
+        InlineItem item,
+        LayoutRun run,
+        int lineStart,
+        int lineEnd,
+        InlineOwnerBox owner,
+        int trailingFrom,
+        float[]? shifts,
+        List<(float Left, float Right)> extents)
     {
+        extents.Clear();
+        int start = owner.Start - lineStart;
+        int end = owner.End - lineStart;
+        int firstStart = int.MaxValue;
+        bool firstRtl = item.Rtl;
+        int glyphIndex = -1;
         float left = float.PositiveInfinity;
         float right = float.NegativeInfinity;
+        int level = -1;
         foreach (LayoutGlyph glyph in run.Glyphs)
         {
-            if (glyph.Start < end && glyph.End > start)
+            glyphIndex++;
+            bool owned = glyph.Start < end && glyph.End > start && glyph.Start < trailingFrom;
+            if (owned && glyph.Start < firstStart)
             {
-                left = F32.Min(left, glyph.X);
-                right = F32.Max(right, glyph.X + glyph.W);
+                firstStart = glyph.Start;
+                firstRtl = (glyph.Level & 1) != 0;
             }
+
+            if (!owned || glyph.Level != level)
+            {
+                if (left <= right)
+                {
+                    extents.Add((left, right));
+                }
+
+                left = float.PositiveInfinity;
+                right = float.NegativeInfinity;
+                level = owned ? glyph.Level : -1;
+                if (!owned)
+                {
+                    continue;
+                }
+            }
+
+            float x = glyph.X + (shifts is not null
+                ? shifts[glyphIndex]
+                : InlineGeometry.LineAdvanceBeforeText(item, lineStart + glyph.Start, lineStart, lineEnd));
+            left = F32.Min(left, x);
+            right = F32.Max(right, x + glyph.W);
         }
 
-        return left <= right ? (left, right) : null;
+        if (left <= right)
+        {
+            extents.Add((left, right));
+        }
+
+        extents.Sort((a, b) => a.Left.CompareTo(b.Left));
+        return firstRtl;
     }
 
     /// <summary>Lines at most this long are always probed whole.</summary>
-    private const int ProbeWindowMinLine = 2048;
+    /// <remarks>
+    /// Was 2048. Below it every line of a paragraph re-shaped the whole remainder, so a 2000
+    /// character post body cost ~40 times its length, and a min-content measurement (one
+    /// word per line) far more: reddit.com's feed shaped 2.35M characters in one cold layout
+    /// pass, 0.33M with these windows. The window is exact whatever its size (see
+    /// <see cref="ProbeFirstLine"/>).
+    /// </remarks>
+    private const int ProbeWindowMinLine = 256;
 
-    private const int ProbeInitialWindow = 256;
+    /// <summary>The first window probed; later lines start at four times the last split.</summary>
+    private const int ProbeInitialWindow = 64;
 
     /// <summary>
     /// Lay out the first visual line of <paramref name="line"/> at <paramref name="available"/>,
@@ -1423,7 +2161,7 @@ public sealed partial class TextEngine : IDisposable
                     return line.Layout(_shaper, fontSize, available, wrap, mono, tabWidth);
                 }
 
-                probe = new BufferLine(text[..cut], line.AttrsList.Prefix(cut)) { Align = line.Align };
+                probe = new BufferLine(text[..cut], line.AttrsList.Prefix(cut)) { Align = line.Align, BaseRtl = line.BaseRtl };
             }
 
             List<LayoutLine> layouts = probe.Layout(_shaper, fontSize, available, wrap, mono, tabWidth);
@@ -1495,6 +2233,17 @@ public sealed partial class TextEngine : IDisposable
         return secondEnd <= lastStart;
     }
 
+    /// <summary>A <c>text-align</c> keyword as the physical side a line aligns to.</summary>
+    internal static Align PhysicalAlign(TextAlignKeyword keyword, bool rtl) => keyword switch
+    {
+        TextAlignKeyword.Center => Align.Center,
+        TextAlignKeyword.Justify => Align.Justified,
+        TextAlignKeyword.Left => Align.Left,
+        TextAlignKeyword.Right => Align.Right,
+        TextAlignKeyword.End => rtl ? Align.Left : Align.Right,
+        _ => rtl ? Align.Right : Align.Left,
+    };
+
     /// <summary>
     /// Shape one IFC with first-line indent and ordinary-inline boundary advances.
     /// </summary>
@@ -1505,21 +2254,59 @@ public sealed partial class TextEngine : IDisposable
     /// edges force an earlier break. Only final visual-line boundaries split buffer lines, so
     /// ligatures and kerning are not broken merely because an inline element starts or ends.
     /// </remarks>
-    private void ShapeWithTextIndent(InlineItem item, float? width, Wrap wrap)
+    private void ShapeWithTextIndent(InlineItem item, float? width, Wrap wrap, FloatBands? bands = null)
     {
-        float indent = InlineGeometry.UsedTextIndent(item.TextIndent, width);
+        float indent = InlineGeometry.UsedTextIndent(item.TextIndent, width) + item.MarkerIndent;
+        // The first line is aligned in the full width and then moved: by the indent on the
+        // left of a left-aligned line, half of it when centred, none when right-aligned. Right
+        // to left, the indent is on the right, so each moves back by all of it. A justified
+        // line, and a line with a negative indent, which can be wider than the box, are laid
+        // out in the width the indent leaves (see NarrowLines), so they move by the indent left
+        // to right and not at all right to left.
+        // DEVIATION from crates/obscura-render/src/inline.rs, which has no right-to-left case
+        // and indents a justified line by moving it, past the right edge, and lays a line out
+        // of a negative indent in the box's width, where it wrapped again (Chromium 141 keeps
+        // "... adipiscing", 280px, on the first line of a 270px box with text-indent:-30px).
         item.FirstLineOffset = indent * item.Align switch
         {
-            Align.Center => 0.5f,
-            Align.End or Align.Right => 0f,
-            _ => 1f,
+            _ when indent < 0f => item.Rtl ? 0f : 1f,
+            Align.Justified => item.Rtl ? 0f : 1f,
+            Align.Center => item.Rtl ? -0.5f : 0.5f,
+            Align.End or Align.Right => item.Rtl ? -1f : 0f,
+            _ => item.Rtl ? 0f : 1f,
         };
+
+        // DEVIATION from crates/obscura-render/src/inline.rs, which lays the paragraph out
+        // again at every call. The layout is a function of the item (fixed once built), the
+        // width and the wrap, and only this method and ShapeAroundFloats lay the buffer out: an
+        // item whose buffer is already laid out at this width keeps it. A carried-over box's
+        // final layout asks again for the width the previous pass finalized its item at, and
+        // an item with a text indent or inline box edges copied its whole source buffer to do it.
+        (long WidthBits, Wrap Wrap) request = (width is { } asked ? BitConverter.SingleToInt32Bits(asked) : -1L, wrap);
+        if (bands is null && item.ShapedFor == request)
+        {
+            return;
+        }
+
+        item.ShapedFor = null;
+        if (bands is not null && width is { } floatWidth)
+        {
+            ShapeAroundFloats(item, floatWidth, indent, wrap, bands);
+            return;
+        }
 
         if (item.SourceBuffer is not { } source)
         {
+            if (item.PristineBuffer is { } pristine)
+            {
+                // A float layout split the lines; start again from the paragraphs as built.
+                item.Buffer = pristine.Clone();
+            }
+
             item.Buffer.SetWrap(wrap);
             item.Buffer.SetSize(width is { } value ? F32.Max(value, 0f) : null, null);
             item.Buffer.ShapeUntilScroll(_shaper);
+            item.ShapedFor = request;
             return;
         }
 
@@ -1531,9 +2318,10 @@ public sealed partial class TextEngine : IDisposable
             TextMetrics metrics = item.Buffer.Metrics;
             float? mono = item.Buffer.MonospaceWidth;
             int tabWidth = item.Buffer.TabWidth;
-            bool windowable = !Bidi.AnyRightToLeft(sourceText);
+            bool windowable = !item.Rtl && !Bidi.AnyRightToLeft(sourceText);
             int probeChars = ProbeInitialWindow;
             int lineIndex = 0;
+            LineCarry? carry = null;
 
             // SourceLineStarts, kept incrementally: lines before lineIndex no longer change.
             int sourceOffset = 0;
@@ -1558,37 +2346,66 @@ public sealed partial class TextEngine : IDisposable
                 float available = F32.Max(baseAvailable - negativeEdges, 0f);
                 int? split = null;
                 BufferLine? probe = null;
+                bool settledFirstTry = false;
 
                 for (int attempt = 0; attempt <= item.BoundaryEvents.Count; attempt++)
                 {
                     BufferLine line = item.Buffer.Lines[lineIndex];
-                    List<LayoutLine> layouts = windowable
-                        ? ProbeFirstLine(line, ref probe, ref probeChars, metrics.FontSize, available, wrap, mono, tabWidth)
-                        : line.Layout(_shaper, metrics.FontSize, available, wrap, mono, tabWidth);
-                    if (layouts.Count == 0)
+                    LayoutLine layout;
+                    int shift = 0;
+                    if (attempt == 0
+                        && carry is { } carried
+                        && BitConverter.SingleToInt32Bits(carried.Available) == BitConverter.SingleToInt32Bits(available))
                     {
-                        break;
+                        // This line is the tail of one already laid out whole at this width.
+                        layout = carried.Layouts[carried.Index];
+                        shift = carried.Shift;
+                    }
+                    else
+                    {
+                        carry = null;
+                        List<LayoutLine> layouts = windowable
+                            ? ProbeFirstLine(line, ref probe, ref probeChars, metrics.FontSize, available, wrap, mono, tabWidth)
+                            : line.Layout(_shaper, metrics.FontSize, available, wrap, mono, tabWidth);
+                        if (layouts.Count == 0)
+                        {
+                            break;
+                        }
+
+                        layout = layouts[0];
+                        if (attempt == 0
+                            && windowable
+                            && !LineCarryDisabled
+                            && layouts.Count > 1
+                            && line.Text.Length <= ProbeWindowMinLine
+                            && line.Text.IndexOf('\t') < 0
+                            && line.ShapeOpt is { } wholeShape)
+                        {
+                            carry = new LineCarry(layouts, 0, 0, available, wholeShape);
+                        }
                     }
 
-                    LayoutLine layout = layouts[0];
                     int? candidate = null;
                     foreach (LayoutGlyph glyph in layout.Glyphs)
                     {
                         candidate = candidate is { } current ? Math.Max(current, glyph.End) : glyph.End;
                     }
 
-                    if (candidate is not { } candidateEndLocal)
+                    if (candidate is not { } candidateEndShifted)
                     {
+                        carry = null;
                         break;
                     }
 
+                    int candidateEndLocal = candidateEndShifted - shift;
                     float lineWidth = layout.W;
                     int candidateEnd = globalStart + candidateEndLocal;
                     float edges = InlineGeometry.LineEdgeAdvance(item, globalStart, candidateEnd);
                     float requiredAvailable = F32.Max(baseAvailable - edges, 0f);
                     split = candidateEndLocal;
+                    settledFirstTry = attempt == 0;
                     if (lineWidth + edges > baseAvailable + 0.01f
-                        && LastWordStartX(line.Text, layout) is { } lastWordCut
+                        && LastWordStartX(line.Text, layout, shift) is { } lastWordCut
                         && lastWordCut > requiredAvailable)
                     {
                         // DEVIATION from crates/obscura-render/src/inline.rs, which retries at
@@ -1608,22 +2425,37 @@ public sealed partial class TextEngine : IDisposable
                     }
 
                     available = requiredAvailable;
+                    settledFirstTry = false;
+                    carry = null;
                     item.Buffer.Lines[lineIndex].ResetLayout();
                     probe?.ResetLayout();
                 }
 
                 if (split is not { } splitAt)
                 {
+                    carry = null;
                     lineIndex++;
                     continue;
                 }
 
                 string text = item.Buffer.Lines[lineIndex].Text;
                 splitAt = SkipTrailingWhitespace(text, splitAt);
+                LineCarry? used = settledFirstTry ? carry : null;
+                carry = used?.Advance(used.Shift + splitAt);
                 if (splitAt > 0 && splitAt < text.Length)
                 {
-                    BufferLine tail = item.Buffer.Lines[lineIndex].SplitOff(splitAt);
+                    BufferLine head = item.Buffer.Lines[lineIndex];
+                    BufferLine tail = head.SplitOff(splitAt);
                     item.Buffer.Lines.Insert(lineIndex + 1, tail);
+                    if (used is not null)
+                    {
+                        // Both halves are runs of whole words of a paragraph already shaped.
+                        head.ShapeAsSliceOf(used.Shape, used.Shift);
+                        if (carry is not null)
+                        {
+                            tail.ShapeAsSliceOf(carry.Shape, carry.Shift);
+                        }
+                    }
 
                     // The next line's start follows this line's new text.
                     sourceOffset = lineOffset;
@@ -1666,7 +2498,269 @@ public sealed partial class TextEngine : IDisposable
         }
 
         item.Buffer.SetSize(width is { } finalWidth ? F32.Max(finalWidth, 0f) : null, null);
+        if (width is { } narrowWidth)
+        {
+            NarrowLines(item, narrowWidth, indent);
+        }
+
         item.Buffer.ShapeUntilScroll(_shaper);
+        item.ShapedFor = request;
+    }
+
+    /// <summary>
+    /// A justified line fills the width its indent and its inline boxes' margins, borders
+    /// and padding leave, so it is laid out in that width rather than in the whole and moved
+    /// (Chromium 141: a 300px paragraph with text-indent:40px justifies its first line to
+    /// 40..300, and a span with 5px side padding on a justified line takes 10px from the
+    /// spaces). Other alignments place the line in the whole width and shift it instead,
+    /// except below a negative indent, where the first line can be wider than the box.
+    /// </summary>
+    private static void NarrowLines(InlineItem item, float width, float indent)
+    {
+        List<BufferLine> lines = item.Buffer.Lines;
+        if (lines.Count == 0)
+        {
+            return;
+        }
+
+        if (item.Align != Align.Justified && lines[^1].AlignOptions.Last != Align.Justified)
+        {
+            if (indent < 0f)
+            {
+                lines[0].WidthOverride = (lines[0].WidthOverride ?? width) - indent;
+            }
+
+            return;
+        }
+
+        bool edges = item.BoundaryEvents.Count > 0 && item.OwnerText is not null;
+        if (indent == 0f && !edges)
+        {
+            return;
+        }
+
+        List<int>? starts = edges ? InlineGeometry.SourceLineStarts(item.Buffer, item.OwnerText!) : null;
+        for (int index = 0; index < lines.Count; index++)
+        {
+            BufferLine line = lines[index];
+            float narrowed = (line.WidthOverride ?? width) - (index == 0 ? indent : 0f);
+            if (starts is not null && index < starts.Count)
+            {
+                narrowed -= InlineGeometry.LineEdgeAdvance(item, starts[index], starts[index] + line.Text.Length);
+            }
+
+            line.WidthOverride = F32.Max(narrowed, 0f);
+        }
+    }
+
+    /// <summary>
+    /// Lay the IFC's lines out around floats (CSS 2.1 9.5): each line box is shortened by the
+    /// floats beside it, and a line whose first word does not fit beside them moves down to the
+    /// next float edge. Every visual line becomes its own buffer line, laid out (and aligned)
+    /// at its own width and drawn from its own left edge.
+    /// </summary>
+    /// <remarks>
+    /// New behaviour, not a port: crates/obscura-render lays floats out as flex rows and its
+    /// line breaker only knows one width.
+    /// </remarks>
+    private void ShapeAroundFloats(InlineItem item, float width, float indent, Wrap wrap, FloatBands bands)
+    {
+        TextBuffer source = item.SourceBuffer ?? (item.PristineBuffer ??= item.Buffer.Clone());
+        item.Buffer = source.Clone();
+        TextBuffer buffer = item.Buffer;
+        buffer.SetWrap(wrap);
+        TextMetrics metrics = buffer.Metrics;
+        float? mono = buffer.MonospaceWidth;
+        int tabWidth = buffer.TabWidth;
+        float fullWidth = F32.Max(width, 0f);
+        string? sourceText = item.OwnerText;
+        float strut = F32.Max(metrics.Above + metrics.Below, 0f);
+        bool windowable = !item.Rtl;
+        foreach (BufferLine paragraph in source.Lines)
+        {
+            if (Bidi.AnyRightToLeft(paragraph.Text))
+            {
+                windowable = false;
+                break;
+            }
+        }
+
+        int sourceOffset = 0;
+        bool sourceAfterBreak = false;
+        float y = 0f;
+        int lineIndex = 0;
+        while (lineIndex < buffer.Lines.Count)
+        {
+            WorkCancellation.ThrowIfCancellationRequested();
+            int lineOffset = sourceOffset;
+            bool lineAfterBreak = sourceAfterBreak;
+            int globalStart = sourceText is null
+                ? 0
+                : InlineGeometry.NextSourceLineStart(
+                    buffer.Lines[lineIndex].Text, sourceText, ref sourceOffset, ref sourceAfterBreak);
+            float firstIndent = lineIndex == 0 ? indent : 0f;
+
+            float lineTop = y;
+            float probeHeight = strut;
+            float left = 0f;
+            float lineWidth = fullWidth;
+            int? split = null;
+            float height = strut;
+            for (int attempt = 0; attempt < 512; attempt++)
+            {
+                (float bandLeft, float bandRight) = bands.Insets(lineTop, probeHeight);
+                left = bandLeft;
+                lineWidth = F32.Max(fullWidth - bandLeft - bandRight, 0f);
+                bool intruded = bandLeft > 0f || bandRight > 0f;
+                float baseAvailable = F32.Max(lineWidth - firstIndent, 0f);
+                (LayoutLine? first, split) = LayoutFirstLine(
+                    item, buffer.Lines[lineIndex], windowable, globalStart, baseAvailable, metrics, wrap, mono, tabWidth);
+                if (first is null)
+                {
+                    break;
+                }
+
+                height = buffer.LineBox(first).Height;
+                float firstWidth = first.W + (split is { } end
+                    ? InlineGeometry.LineEdgeAdvance(item, globalStart, globalStart + end)
+                    : 0f);
+                if (intruded
+                    && first.Glyphs.Count != 0
+                    && firstWidth > baseAvailable + 0.01f
+                    && bands.NextEdgeBelow(lineTop) is { } next)
+                {
+                    // Not even the first word fits beside the floats: try below the next edge.
+                    lineTop = next;
+                    probeHeight = strut;
+                    continue;
+                }
+
+                if (height > probeHeight + 0.01f)
+                {
+                    // A tall inline box reaches further down than the strut did; the floats
+                    // over the whole line box decide its width.
+                    (float tallLeft, float tallRight) = bands.Insets(lineTop, height);
+                    if (tallLeft > bandLeft + 0.01f || tallRight > bandRight + 0.01f)
+                    {
+                        probeHeight = height;
+                        continue;
+                    }
+                }
+
+                break;
+            }
+
+            BufferLine current = buffer.Lines[lineIndex];
+            if (split is { } splitAt)
+            {
+                string text = current.Text;
+                splitAt = SkipTrailingWhitespace(text, splitAt);
+                if (splitAt > 0 && splitAt < text.Length)
+                {
+                    BufferLine tail = current.SplitOff(splitAt);
+                    buffer.Lines.Insert(lineIndex + 1, tail);
+                    if (sourceText is not null)
+                    {
+                        sourceOffset = lineOffset;
+                        sourceAfterBreak = lineAfterBreak;
+                        InlineGeometry.NextSourceLineStart(
+                            current.Text, sourceText, ref sourceOffset, ref sourceAfterBreak);
+                    }
+                }
+            }
+
+            current.ResetLayout();
+            current.WidthOverride = lineWidth;
+
+            current.OffsetX = left;
+            current.GapBefore = lineTop - y;
+            y = lineTop + height;
+            lineIndex++;
+        }
+
+        buffer.SetSize(fullWidth, null);
+        NarrowLines(item, fullWidth, indent);
+        buffer.ShapeUntilScroll(_shaper);
+    }
+
+    /// <summary>
+    /// The first visual line of <paramref name="line"/> at <paramref name="baseAvailable"/>,
+    /// and where it ends, paying for the inline boxes' margins, borders and padding on it the
+    /// way <see cref="ShapeWithTextIndent"/> does.
+    /// </summary>
+    private (LayoutLine? First, int? Split) LayoutFirstLine(
+        InlineItem item,
+        BufferLine line,
+        bool windowable,
+        int globalStart,
+        float baseAvailable,
+        TextMetrics metrics,
+        Wrap wrap,
+        float? mono,
+        int tabWidth)
+    {
+        int lineSourceEnd = globalStart + line.Text.Length;
+        float negativeEdges = item.BoundaryEvents.Count == 0
+            ? 0f
+            : item.EdgeIndex.NegativeEdges(globalStart, lineSourceEnd);
+        float available = F32.Max(baseAvailable - negativeEdges, 0f);
+        LayoutLine? first = null;
+        int? split = null;
+
+        // Shape a window of a long line rather than all of it for each visual line (see
+        // ProbeFirstLine), or a long paragraph beside floats is quadratic in its length.
+        BufferLine? probe = null;
+        int probeChars = ProbeInitialWindow;
+        for (int attempt = 0; attempt <= item.BoundaryEvents.Count; attempt++)
+        {
+            line.ResetLayout();
+            probe?.ResetLayout();
+            List<LayoutLine> layouts = windowable
+                ? ProbeFirstLine(line, ref probe, ref probeChars, metrics.FontSize, available, wrap, mono, tabWidth)
+                : line.Layout(_shaper, metrics.FontSize, available, wrap, mono, tabWidth);
+            if (layouts.Count == 0)
+            {
+                break;
+            }
+
+            first = layouts[0];
+            int? candidate = null;
+            foreach (LayoutGlyph glyph in first.Glyphs)
+            {
+                candidate = candidate is { } current ? Math.Max(current, glyph.End) : glyph.End;
+            }
+
+            if (candidate is not { } candidateEndLocal)
+            {
+                split = null;
+                break;
+            }
+
+            split = candidateEndLocal;
+            if (item.BoundaryEvents.Count == 0)
+            {
+                break;
+            }
+
+            float edges = InlineGeometry.LineEdgeAdvance(item, globalStart, globalStart + candidateEndLocal);
+            float requiredAvailable = F32.Max(baseAvailable - edges, 0f);
+            if (first.W + edges > baseAvailable + 0.01f
+                && LastWordStartX(line.Text, first) is { } lastWordCut
+                && lastWordCut > requiredAvailable)
+            {
+                // See ShapeWithTextIndent: never retry below the width that drops the last word.
+                requiredAvailable = lastWordCut;
+            }
+
+            if (first.W + edges <= baseAvailable + 0.01f || requiredAvailable + 0.01f >= available)
+            {
+                break;
+            }
+
+            available = requiredAvailable;
+        }
+
+        return (first, split);
     }
 
     /// <summary>
@@ -1674,19 +2768,20 @@ public sealed partial class TextEngine : IDisposable
     /// of the last space that has a non-space glyph after it. <c>null</c> when the line is one
     /// word, or is not a plain left-to-right line.
     /// </summary>
-    private static float? LastWordStartX(string text, LayoutLine layout)
+    private static float? LastWordStartX(string text, LayoutLine layout, int shift = 0)
     {
         List<LayoutGlyph> glyphs = layout.Glyphs;
         bool sawWord = false;
         for (int index = glyphs.Count - 1; index >= 0; index--)
         {
             LayoutGlyph glyph = glyphs[index];
-            if ((glyph.Level & 1) != 0 || glyph.Start < 0 || glyph.Start >= text.Length)
+            int start = glyph.Start - shift;
+            if ((glyph.Level & 1) != 0 || start < 0 || start >= text.Length)
             {
                 return null;
             }
 
-            if (text[glyph.Start] == ' ')
+            if (text[start] == ' ')
             {
                 if (sawWord)
                 {
@@ -1700,6 +2795,92 @@ public sealed partial class TextEngine : IDisposable
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The visual lines of a line laid out whole, kept so that its tails, once split off, can
+    /// take their first visual line from it instead of being shaped and laid out again.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs <c>shape_with_text_indent</c>, which
+    /// shapes and wraps each split-off tail afresh to find its first visual line. A paragraph of
+    /// n lines was shaped n times, and a min-content measurement (width 0, one word a line) was
+    /// quadratic in its word count: 2,000 short grid items spent 1.9s of a 3.9s cold layout
+    /// re-shaping remainders. The result is the same. Wrapping is greedy, so the tail's first
+    /// line is the whole line's next one when the tail starts where that line starts, at a word
+    /// boundary (shaping is per word, and a tail cut inside a word, at an emergency break,
+    /// shapes that word's rest differently), at the same available width, and the whole line
+    /// was left to right, without tabs (whose advances run from the paragraph start) and short
+    /// enough to be laid out whole (<see cref="ProbeWindowMinLine"/>). Anything else, and any
+    /// retry for inline box edges, lays the tail out as before.
+    /// </remarks>
+    /// <summary>A diagnostic: <c>POCKETCALCULATOR_NO_LINE_CARRY=1</c> lays every tail out afresh.</summary>
+    internal static bool LineCarryDisabled { get; set; } =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_NO_LINE_CARRY") == "1";
+
+    private sealed class LineCarry(List<LayoutLine> layouts, int index, int shift, float available, ShapeLine shape)
+    {
+        public List<LayoutLine> Layouts { get; } = layouts;
+
+        /// <summary>The visual line the current tail starts with.</summary>
+        public int Index { get; } = index;
+
+        /// <summary>Where the current tail starts in the whole line's text.</summary>
+        public int Shift { get; } = shift;
+
+        public float Available { get; } = available;
+
+        /// <summary>The whole line's shaping.</summary>
+        public ShapeLine Shape { get; } = shape;
+
+        /// <summary>The carry for the tail starting at <paramref name="start"/>, or null.</summary>
+        public LineCarry? Advance(int start)
+        {
+            int next = Index + 1;
+            if (next >= Layouts.Count || Layouts[next].Glyphs.Count == 0)
+            {
+                return null;
+            }
+
+            int first = int.MaxValue;
+            foreach (LayoutGlyph glyph in Layouts[next].Glyphs)
+            {
+                first = Math.Min(first, glyph.Start);
+            }
+
+            return first == start && StartsWord(start)
+                ? new LineCarry(Layouts, next, start, Available, Shape)
+                : null;
+        }
+
+        private bool StartsWord(int offset)
+        {
+            if (Shape.Rtl || Shape.Spans.Count != 1 || Shape.Spans[0].IsRtl)
+            {
+                return false;
+            }
+
+            foreach (ShapeWord word in Shape.Spans[0].Words)
+            {
+                if (word.Glyphs.Count == 0)
+                {
+                    continue;
+                }
+
+                int start = word.Glyphs[0].Start;
+                if (start == offset)
+                {
+                    return true;
+                }
+
+                if (start > offset)
+                {
+                    return false;
+                }
+            }
+
+            return false;
+        }
     }
 
     private static int SkipTrailingWhitespace(string text, int split)
@@ -1847,7 +3028,11 @@ public sealed partial class TextEngine : IDisposable
         return visualTop < surfaceBottom && visualBottom > 0f;
     }
 
-    private SpanCtx BaseSpanCtx(LayoutStyle baseStyle, ResolvedFont font, Collector collector)
+    private SpanCtx BaseSpanCtx(
+        LayoutStyle baseStyle,
+        ResolvedFont font,
+        Collector collector,
+        WhiteSpace? whiteSpace = null)
     {
         int? clipFill = null;
         if (Inline.ClipTextFillFor(baseStyle) is { } fill)
@@ -1868,6 +3053,7 @@ public sealed partial class TextEngine : IDisposable
         {
             FontSize = baseSize,
             LineHeight = lineHeight,
+            LineHeightNormal = Inline.IsNormalLineHeight(baseStyle),
             Above = strutAbove,
             Below = strutBelow,
             LetterSpacing = baseStyle.LetterSpacing ?? 0f,
@@ -1882,7 +3068,7 @@ public sealed partial class TextEngine : IDisposable
             SyntheticItalic = font.SyntheticItalic,
             Underline = baseStyle.Underline ?? false,
             Transform = baseStyle.TextTransform ?? TextTransform.None,
-            WhiteSpace = baseStyle.WhiteSpace ?? WhiteSpace.Normal,
+            WhiteSpace = whiteSpace ?? baseStyle.WhiteSpace ?? WhiteSpace.Normal,
             OverflowWrap = baseStyle.OverflowWrap ?? OverflowWrap.Normal,
             WordBreak = baseStyle.WordBreak ?? WordBreak.Normal,
             Family = font.Family,
@@ -1898,7 +3084,7 @@ public sealed partial class TextEngine : IDisposable
         List<(string Text, SpanAttrs Attrs)> output,
         Collector collector)
     {
-        foreach (NodeId cid in Inline.RenderedChildren(tree, id))
+        foreach (NodeId cid in DomTraversal.EachRenderedChild(tree, id))
         {
             CollectNodeSpans(tree, cid, styles, context, output, collector);
         }
@@ -1924,7 +3110,16 @@ public sealed partial class TextEngine : IDisposable
 
         if (node.Data is TextData text)
         {
+            int start = collector.TextLength;
+            bool lastWasSpace = collector.LastWasSpace;
             Inline.PushText(text.Contents, context.Transform, context.WhiteSpace, context.ToSpanAttrs(), output, collector);
+            collector.TextNodes.Add(new TextNodeChunk(
+                cid,
+                start,
+                collector.TextLength,
+                lastWasSpace,
+                context.WhiteSpace,
+                context.Transform));
             return;
         }
 
@@ -1936,6 +3131,40 @@ public sealed partial class TextEngine : IDisposable
         styles.TryGetValue(cid, out LayoutStyle? style);
         if (style is not null && style.Display == Display.None)
         {
+            return;
+        }
+
+        if (collector.FloatAnchors is { } floatAnchors
+            && style is { Float: not null }
+            && style.Position != Position.Absolute)
+        {
+            // Out of the inline flow: remember where it sits for the block formatting context.
+            floatAnchors.Add((cid, collector.TextLength));
+            return;
+        }
+
+        if (collector.Atomics is { } atomics
+            && style is not null
+            && Inline.IsAtomicInline(element.Name.Local, style))
+        {
+            // An atomic inline is one object replacement character whose glyph takes its margin
+            // box (sized once it is laid out, see SetAtomic): it breaks like an ideograph, is a
+            // neutral to bidi, and is not white space to collapsing.
+            atomics.Add(new AtomicInline
+            {
+                Node = cid,
+                Offset = collector.TextLength,
+                VerticalAlign = style.InlineVerticalAlign,
+                ParentFontSize = context.FontSize,
+                ParentMetrics = context.FontMetrics,
+                ParentShift = context.BaselineShift,
+                ParentAlign = context.Align,
+                LineHeight = FontResolution.UsedLineHeight(style),
+            });
+            collector.FlushLastSpan(output);
+            output.Add((ObjectReplacement, context.ToSpanAttrs() with { Atomic = atomics.Count - 1 }));
+            collector.RecordText(1);
+            collector.LastWasSpace = false;
             return;
         }
 
@@ -2022,6 +3251,7 @@ public sealed partial class TextEngine : IDisposable
         {
             FontSize = childFontSize,
             LineHeight = childLineHeight,
+            LineHeightNormal = style is not null ? Inline.IsNormalLineHeight(style) : context.LineHeightNormal,
             Above = extent.Above,
             Below = extent.Below,
             Align = extent.Align,
@@ -2057,6 +3287,11 @@ public sealed partial class TextEngine : IDisposable
     public void Dispose()
     {
         _rasterizer.Dispose();
-        _database.Dispose();
+
+        // A shared database belongs to the engine that built it (ForPass).
+        if (!_sharesDatabase)
+        {
+            _database.Dispose();
+        }
     }
 }

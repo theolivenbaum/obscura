@@ -28,6 +28,7 @@ namespace PocketCalculator.Js.Ops;
 /// </remarks>
 public sealed class PocketCalculatorState
 {
+    private TimeProvider _animationClock = TimeProvider.System;
     private long _animationTimelineOrigin = Stopwatch.GetTimestamp();
     private int _borrowDepth;
 
@@ -67,6 +68,12 @@ public sealed class PocketCalculatorState
 
     /// <summary>Bodies of this document's internal loads, held for the host (see <see cref="InternalLoads"/>).</summary>
     public InternalLoadStore InternalLoadStore { get; } = new();
+
+    /// <summary>
+    /// Sources of <c>blob:</c> URLs minted for JavaScript Blobs, for the module loader. The
+    /// page's instance holds every realm's (see <see cref="BlobScriptStore"/>). Port addition.
+    /// </summary>
+    public BlobScriptStore BlobScripts { get; } = new();
 
     /// <summary>
     /// WHATWG canonical name of the document's character encoding (e.g. "UTF-8",
@@ -152,6 +159,12 @@ public sealed class PocketCalculatorState
     public List<string> BlockedUrls { get; } = [];
 
     public CookieJar? CookieJar { get; set; }
+
+    /// <summary>The browser context's <c>localStorage</c> areas; null keeps them realm-local.</summary>
+    public WebStorage? LocalStorage { get; set; }
+
+    /// <summary>The page's <c>sessionStorage</c> areas; null keeps them realm-local.</summary>
+    public WebStorage? SessionStorage { get; set; }
 
     public PocketCalculatorHttpClient? HttpClient { get; set; }
 
@@ -280,6 +293,13 @@ public sealed class PocketCalculatorState
     /// </summary>
     public List<PendingFrame> PendingFrames { get; } = [];
 
+    /// <summary>
+    /// Frame document loads (<c>op_fetch_url</c> in <c>navigate</c> mode for an iframe) that
+    /// have not answered yet. The Page keeps building a new document's frames while one is in
+    /// flight, rather than taking a quiet 50 ms as the end of them.
+    /// </summary>
+    public InFlightCounter FrameDocumentLoadsInFlight { get; } = new();
+
     /// <summary>Total URL and HTML bytes held by <see cref="PendingFrames"/>.</summary>
     public long PendingFrameBytes { get; set; }
 
@@ -336,7 +356,21 @@ public sealed class PocketCalculatorState
     /// Final image/font-aware layout shared by CSSOM geometry and screenshots.
     /// DOM/style/viewport changes clear this value but retain resource bytes.
     /// </summary>
-    public PreparedRender? PreparedRender { get; set; }
+    public PreparedRender? PreparedRender
+    {
+        get => _preparedRender;
+        set
+        {
+            if (value is null && _preparedRender is not null && RenderState.PrepTrace)
+            {
+                RenderState.TraceDrop();
+            }
+
+            _preparedRender = value;
+        }
+    }
+
+    private PreparedRender? _preparedRender;
 
     /// <summary>
     /// CSS media type selected for the next retained layout. Live pages use screen;
@@ -362,16 +396,34 @@ public sealed class PocketCalculatorState
         set => _animationTimelineOrigin = value;
     }
 
+    /// <summary>
+    /// The clock the document timeline reads; the system's monotonic clock unless a test
+    /// installs a manual one, so animation births land at exact times however slow the
+    /// host is. Replacing it keeps the current elapsed time.
+    /// </summary>
+    public TimeProvider AnimationClock
+    {
+        get => _animationClock;
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            var elapsed = AnimationTimelineElapsedMilliseconds;
+            _animationClock = value;
+            SetAnimationTimelineElapsed(TimeSpan.FromMilliseconds(elapsed));
+        }
+    }
+
     /// <summary>Milliseconds since <see cref="AnimationTimelineOrigin"/>.</summary>
     public double AnimationTimelineElapsedMilliseconds =>
-        (Stopwatch.GetTimestamp() - _animationTimelineOrigin) * 1000.0 / Stopwatch.Frequency;
+        (_animationClock.GetTimestamp() - _animationTimelineOrigin) * 1000.0 / _animationClock.TimestampFrequency;
 
     /// <summary>Restarts the document timeline, as <c>Instant::now()</c> does in Rust.</summary>
-    public void ResetAnimationTimelineOrigin() => _animationTimelineOrigin = Stopwatch.GetTimestamp();
+    public void ResetAnimationTimelineOrigin() => _animationTimelineOrigin = _animationClock.GetTimestamp();
 
     /// <summary>Moves the timeline origin <paramref name="elapsed"/> into the past.</summary>
     public void SetAnimationTimelineElapsed(TimeSpan elapsed) =>
-        _animationTimelineOrigin = Stopwatch.GetTimestamp() - (long)(elapsed.TotalSeconds * Stopwatch.Frequency);
+        _animationTimelineOrigin = _animationClock.GetTimestamp()
+            - (long)(elapsed.TotalSeconds * _animationClock.TimestampFrequency);
 
     /// <summary>
     /// Host/HTML task epoch for document-timeline sampling. Geometry and
@@ -418,6 +470,12 @@ public sealed class PocketCalculatorState
     /// what replaces the reference's single-threaded reaction.
     /// </remarks>
     public object AsyncResourceGate { get; } = new();
+
+    /// <summary>
+    /// The page isolate's lock, for host code that touches page state outside script (see
+    /// the <c>IsolateLock</c> class). Shared by reference with child frames.
+    /// </summary>
+    public IsolateLock IsolateLock { get; set; } = IsolateLock.None;
 
     /// <summary>
     /// Page-transport loads for resources that cache-only layout or paint missed
@@ -495,6 +553,26 @@ public sealed class PocketCalculatorState
     /// call. Null until then, and reset to null by <c>document.open()</c>.
     /// </summary>
     public DocumentWriteStream? WriteStream { get; set; }
+
+    /// <summary>
+    /// The document's parser while it runs, which takes <c>document.write()</c> text at its
+    /// insertion point (port addition: the Rust engine parses the document before running
+    /// any of its scripts). Null once parsing has finished, and in frame realms.
+    /// </summary>
+    public IDocumentWriteTarget? ParserWriter { get; set; }
+
+    /// <summary>
+    /// The custom element names defined in this realm (op_dom <c>ce_define</c>), for the parser
+    /// to stop after inserting one (port addition).
+    /// </summary>
+    public HashSet<string> DefinedCustomElements { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// How many times <c>document.close()</c> has ended a parser <c>document.open()</c>
+    /// started on a loaded document since the CDP layer last looked. Each one is a load
+    /// of the document Chromium reports with lifecycle events.
+    /// </summary>
+    public int ScriptDocumentLoads { get; set; }
 
     /// <summary>
     /// Whether a mutable borrow is currently outstanding.
@@ -720,7 +798,11 @@ public sealed class BaseUrlCache
 }
 
 /// <summary>A console call recorded for the CDP Runtime domain.</summary>
-public sealed record RuntimeConsoleEvent(string Kind, List<JsonNode?> Args, double Timestamp);
+/// <param name="ContextKey">
+/// The CDP execution context of the isolated world the call came from, or 0 for the
+/// page realm (port addition).
+/// </param>
+public sealed record RuntimeConsoleEvent(string Kind, List<JsonNode?> Args, double Timestamp, long ContextKey = 0);
 
 /// <summary>An uncaught script exception recorded for the CDP Runtime domain.</summary>
 public sealed record RuntimeExceptionEvent(

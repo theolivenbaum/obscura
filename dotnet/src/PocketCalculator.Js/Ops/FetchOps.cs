@@ -339,8 +339,15 @@ public static partial class FetchOps
         string mode,
         string credentials,
         bool internalLoad = false,
-        PocketCalculatorState? document = null)
+        PocketCalculatorState? document = null,
+        bool tailOnPageLoop = false)
     {
+        bool frameDocument = internalLoad && string.Equals(mode, "navigate", StringComparison.Ordinal);
+        if (frameDocument)
+        {
+            state.FrameDocumentLoadsInFlight.Increment();
+        }
+
         try
         {
             // `origin` is the shim's argument slot and is ignored as an origin: see
@@ -348,7 +355,7 @@ public static partial class FetchOps
             // (FetchReferrer.Parse); anything else means the defaults.
             return await FetchUrlAsync(
                     state, document ?? state, url, method, headersJson, body, mode, credentials, internalLoad,
-                    referrer: FetchReferrer.Parse(origin))
+                    referrer: FetchReferrer.Parse(origin), tailOnPageLoop: tailOnPageLoop)
                 .ConfigureAwait(false);
         }
         catch (OpException)
@@ -363,6 +370,13 @@ public static partial class FetchOps
         {
             throw new OpException(ex.Message);
         }
+        finally
+        {
+            if (frameDocument)
+            {
+                state.FrameDocumentLoadsInFlight.Decrement();
+            }
+        }
     }
 
     internal static async Task<string> FetchUrlAsync(
@@ -376,7 +390,8 @@ public static partial class FetchOps
         string credentials,
         bool internalLoad,
         bool hostConsumesBody = false,
-        FetchReferrer? referrer = null)
+        FetchReferrer? referrer = null,
+        bool tailOnPageLoop = false)
     {
         ArgumentNullException.ThrowIfNull(gs);
         ArgumentNullException.ThrowIfNull(document);
@@ -1072,97 +1087,112 @@ public static partial class FetchOps
                         built);
                 }
 
-                gs.NetworkResponseBodyCounter++;
-                var requestId = "fetch-" + gs.NetworkResponseBodyCounter.ToString(CultureInfo.InvariantCulture);
-                var maxEntries = ResponseBodyEntryLimit();
-                var maxBytes = ResponseBodyByteLimit();
-                if (maxEntries > 0 && maxBytes > 0 && respBytes.Length <= maxBytes)
+                // Everything from here on writes page state (the stored bodies, the network events
+                // CDP drains, the resource timeline) and runs on the page's own loop between tasks,
+                // as the reference's op reaction does, rather than on whichever thread finished
+                // reading the body: 64 fetches finishing together corrupted the stored-body queue
+                // ("Operations that change non-concurrent collections must have exclusive access").
+                // Only when called as an op (tailOnPageLoop): a host caller awaiting this directly
+                // drives no loop, and the tail then runs where the body was read, as before.
+                // The transport is done with: the next queued request need not wait for the loop.
+                slot.Dispose();
+                Func<string> finish = () =>
                 {
-                    respBody ??= Encoding.UTF8.GetString(respBytes);
-                    gs.NetworkResponseBodies[requestId] = new StoredNetworkResponseBody(respBody, false);
-                    gs.NetworkResponseBodyOrder.Enqueue(requestId);
-                    while (gs.NetworkResponseBodyOrder.Count > maxEntries)
+                    gs.NetworkResponseBodyCounter++;
+                    var requestId = "fetch-" + gs.NetworkResponseBodyCounter.ToString(CultureInfo.InvariantCulture);
+                    var maxEntries = ResponseBodyEntryLimit();
+                    var maxBytes = ResponseBodyByteLimit();
+                    if (maxEntries > 0 && maxBytes > 0 && respBytes.Length <= maxBytes)
                     {
-                        gs.NetworkResponseBodies.Remove(gs.NetworkResponseBodyOrder.Dequeue());
+                        respBody ??= Encoding.UTF8.GetString(respBytes);
+                        gs.NetworkResponseBodies[requestId] = new StoredNetworkResponseBody(respBody, false);
+                        gs.NetworkResponseBodyOrder.Enqueue(requestId);
+                        while (gs.NetworkResponseBodyOrder.Count > maxEntries)
+                        {
+                            gs.NetworkResponseBodies.Remove(gs.NetworkResponseBodyOrder.Dequeue());
+                        }
                     }
-                }
 
-                // Record a network event so the CDP layer emits requestWillBeSent /
-                // responseReceived for this script-initiated request, keyed by the same
-                // fetch-{N} id as the stored body so Network.getResponseBody resolves.
-                gs.JsNetworkEvents.Add(new JsNetworkEvent
-                {
-                    RequestId = requestId,
-                    Url = currentUrl,
-                    Method = currentMethod.Method,
-                    Status = finalStatus,
-                    ResponseHeaders = respHeaders,
-                    BodySize = respBytes.Length,
-                    Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0,
-                });
-                if (gs.JsNetworkEvents.Count > MaxJsNetworkEvents)
-                {
-                    gs.JsNetworkEvents.RemoveRange(0, gs.JsNetworkEvents.Count - MaxJsNetworkEvents);
-                }
-
-                // The one request the page can see go out, so it is also the one whose
-                // start the shim could have measured itself. Recording it here keeps
-                // fetch()/XHR on the same timeline as the host-owned subresources, and
-                // the start is the real one rather than the resolution of the promise.
-                PerformanceOps.RecordResourceTiming(
-                    gs,
-                    new ResourceTimingRecord
+                    // Record a network event so the CDP layer emits requestWillBeSent /
+                    // responseReceived for this script-initiated request, keyed by the same
+                    // fetch-{N} id as the stored body so Network.getResponseBody resolves.
+                    gs.JsNetworkEvents.Add(new JsNetworkEvent
                     {
+                        RequestId = requestId,
                         Url = currentUrl,
-                        InitiatorType = "fetch",
+                        Method = currentMethod.Method,
                         Status = finalStatus,
-                        StartedAtUnixMs = startedAtUnixMs,
-                        EndedAtUnixMs = PerformanceOps.UnixMilliseconds(),
-                        DecodedBodySize = respBytes.Length,
-                        EncodedBodySize = PerformanceOps.EncodedBodySize(respHeaders, respBytes.Length),
-                        ContentType = respHeaders.GetValueOrDefault("content-type", string.Empty),
+                        ResponseHeaders = respHeaders,
+                        BodySize = respBytes.Length,
+                        Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0,
                     });
+                    if (gs.JsNetworkEvents.Count > MaxJsNetworkEvents)
+                    {
+                        gs.JsNetworkEvents.RemoveRange(0, gs.JsNetworkEvents.Count - MaxJsNetworkEvents);
+                    }
 
-                if (internalLoad)
-                {
-                    return InternalLoadResponse(
-                        document,
-                        mode,
-                        finalStatus,
-                        url,
-                        currentUrl,
-                        respBody ?? Encoding.UTF8.GetString(respBytes),
-                        tainted: crossedOrigin || string.Equals(pageOrigin, "null", StringComparison.Ordinal),
-                        redirected,
+                    // The one request the page can see go out, so it is also the one whose
+                    // start the shim could have measured itself. Recording it here keeps
+                    // fetch()/XHR on the same timeline as the host-owned subresources, and
+                    // the start is the real one rather than the resolution of the promise.
+                    PerformanceOps.RecordResourceTiming(
+                        gs,
+                        new ResourceTimingRecord
+                        {
+                            Url = currentUrl,
+                            InitiatorType = "fetch",
+                            Status = finalStatus,
+                            StartedAtUnixMs = startedAtUnixMs,
+                            EndedAtUnixMs = PerformanceOps.UnixMilliseconds(),
+                            DecodedBodySize = respBytes.Length,
+                            EncodedBodySize = PerformanceOps.EncodedBodySize(respHeaders, respBytes.Length),
+                            ContentType = respHeaders.GetValueOrDefault("content-type", string.Empty),
+                        });
+
+                    if (internalLoad)
+                    {
+                        return InternalLoadResponse(
+                            document,
+                            mode,
+                            finalStatus,
+                            url,
+                            currentUrl,
+                            respBody ?? Encoding.UTF8.GetString(respBytes),
+                            tainted: crossedOrigin || string.Equals(pageOrigin, "null", StringComparison.Ordinal),
+                            redirected,
+                            requestId,
+                            VisibleResponseHeaders(respHeaders, finalIsCrossOrigin, credentialsMode),
+                            hostConsumesBody,
+                            // The host keeps the policy of every response, a cross-origin frame
+                            // document's or sheet's included, though page script is not shown
+                            // the header.
+                            ReferrerPolicyHeaderOf(respHeaders));
+                    }
+
+                    // Page script sees an opaque no-cors response as status 0 with no body
+                    // and no headers; the engine's own subresource loads (internalLoad) still
+                    // get the body. Set-Cookie and unexposed cross-origin headers never
+                    // reach script (upstream 04418a5). The CDP-facing records above keep
+                    // the full response.
+                    var opaque = !internalLoad
+                        && string.Equals(mode, "no-cors", StringComparison.Ordinal)
+                        && crossedOrigin;
+                    var scriptHeaders = opaque
+                        ? new Dictionary<string, string>(StringComparer.Ordinal)
+                        : VisibleResponseHeaders(respHeaders, finalIsCrossOrigin, credentialsMode);
+
+                    return ScriptResponseJson(
+                        StatusText(opaque, finalStatus),
+                        respBytes,
                         requestId,
-                        VisibleResponseHeaders(respHeaders, finalIsCrossOrigin, credentialsMode),
-                        hostConsumesBody,
-                        // The host keeps the policy of every response, a cross-origin frame
-                        // document's or sheet's included, though page script is not shown
-                        // the header.
-                        ReferrerPolicyHeaderOf(respHeaders));
-                }
-
-                // Page script sees an opaque no-cors response as status 0 with no body
-                // and no headers; the engine's own subresource loads (internalLoad) still
-                // get the body. Set-Cookie and unexposed cross-origin headers never
-                // reach script (upstream 04418a5). The CDP-facing records above keep
-                // the full response.
-                var opaque = !internalLoad
-                    && string.Equals(mode, "no-cors", StringComparison.Ordinal)
-                    && crossedOrigin;
-                var scriptHeaders = opaque
-                    ? new Dictionary<string, string>(StringComparer.Ordinal)
-                    : VisibleResponseHeaders(respHeaders, finalIsCrossOrigin, credentialsMode);
-
-                return ScriptResponseJson(
-                    StatusText(opaque, finalStatus),
-                    respBytes,
-                    requestId,
-                    currentUrl,
-                    redirected,
-                    opaque,
-                    scriptHeaders);
+                        currentUrl,
+                        redirected,
+                        opaque,
+                        scriptHeaders);
+                };
+                return tailOnPageLoop
+                    ? await gs.IsolateLock.RunOnPageAsync(finish).ConfigureAwait(false)
+                    : finish();
             }
             finally
             {

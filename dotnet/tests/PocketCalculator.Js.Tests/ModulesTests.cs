@@ -927,8 +927,11 @@ public sealed class CdpWatchdogTests
         var handle = new RecordingHandle();
         var armed = CdpWatchdog.Arm(handle, TimeSpan.FromMilliseconds(50));
 
-        Assert.True(SpinUntil(() => armed.Fired, TimeSpan.FromSeconds(10)));
+        // The worker marks the slot fired before it terminates the handle, so wait for the
+        // termination itself: reading the count as soon as Fired shows raced the worker.
+        Assert.True(SpinUntil(() => handle.Terminations > 0, TimeSpan.FromSeconds(10)));
         Assert.Equal(1, handle.Terminations);
+        Assert.True(armed.Fired);
         // The dispatcher must learn that it fired, so it can clear the isolate's
         // termination state before the next command runs.
         Assert.True(CdpWatchdog.Disarm(armed));
@@ -957,8 +960,10 @@ public sealed class CdpWatchdogTests
         var slow = CdpWatchdog.Arm(longLived, TimeSpan.FromMinutes(10));
         var fast = CdpWatchdog.Arm(shortLived, TimeSpan.FromMilliseconds(50));
 
-        Assert.True(SpinUntil(() => fast.Fired, TimeSpan.FromSeconds(10)));
+        // Wait for the termination, not for Fired, which the worker sets first.
+        Assert.True(SpinUntil(() => shortLived.Terminations > 0, TimeSpan.FromSeconds(10)));
         Assert.Equal(1, shortLived.Terminations);
+        Assert.True(fast.Fired);
         Assert.Equal(0, longLived.Terminations);
 
         Assert.True(CdpWatchdog.Disarm(fast));
@@ -1208,6 +1213,69 @@ public sealed class ModuleGraphLoadTests : IDisposable
         Assert.Equal(0, loader.Activity.Pending);
     }
 
+    [Fact]
+    public async Task APrefetchedGraphIsEvaluatedFromTheCacheWithOneRequestPerModule()
+    {
+        using var loader = Loader("{}");
+        using var engine = NewEngine(loader);
+
+        await loader.PrefetchGraphAsync(_origin + "/a.js", dynamic: false, CancellationToken.None);
+        await loader.PrefetchGraphAsync(_origin + "/b.js", dynamic: false, CancellationToken.None);
+        Assert.Equal(1, Hits("/a.js"));
+        Assert.Equal(1, Hits("/b.js"));
+        Assert.Equal(1, Hits("/c.js"));
+
+        engine.Execute(
+            RootInfo(),
+            "import { a } from '/a.js'; import { b } from '/b.js'; globalThis.sum = a + b;");
+
+        Assert.Equal(211, engine.Evaluate("globalThis.sum"));
+        Assert.Equal(1, Hits("/a.js"));
+        Assert.Equal(1, Hits("/c.js"));
+        Assert.False(loader.Activity.IsPendingOrRecent(TimeSpan.FromSeconds(30)));
+    }
+
+    [Fact]
+    public async Task APrefetchFailureFailsTheEvaluationWithItsOwnErrorAndIsNotFetchedTwice()
+    {
+        using var loader = Loader("{}");
+        using var engine = NewEngine(loader);
+
+        await loader.PrefetchGraphAsync(_origin + "/imports-missing.js", dynamic: false, CancellationToken.None);
+        Assert.Equal(1, Hits("/missing.js"));
+
+        var error = Assert.Throws<ScriptEngineException>(
+            () => engine.Execute(RootInfo(), "import '/imports-missing.js';"));
+        Assert.Contains("returned HTTP 404", error.Message, StringComparison.Ordinal);
+        Assert.Equal(1, Hits("/missing.js"));
+
+        // Reported once, then forgotten: a later import tries again, as before prefetching.
+        Assert.Throws<ScriptEngineException>(() => engine.Execute(RootInfo("again.js"), "import '/missing.js';"));
+        Assert.Equal(2, Hits("/missing.js"));
+    }
+
+    [Fact]
+    public async Task AnInlineModuleGraphIsPrefetchedThroughTheImportMap()
+    {
+        using var loader = Loader("""{"imports":{"dep":"/vendor/dep.js"}}""");
+        using var engine = NewEngine(loader);
+
+        await loader.PrefetchInlineGraphAsync(
+            "import { v } from 'dep'; import { a } from './a.js'; import('/dyn.js');",
+            _origin + "/index.html",
+            CancellationToken.None);
+
+        Assert.Equal(1, Hits("/vendor/dep.js"));
+        Assert.Equal(1, Hits("/a.js"));
+        Assert.Equal(1, Hits("/c.js"));
+        // A dynamic import is the page's to make, when it makes it.
+        Assert.Equal(0, Hits("/dyn.js"));
+    }
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _hits = new(StringComparer.Ordinal);
+
+    private int Hits(string path) => _hits.GetValueOrDefault(path);
+
     private PocketCalculatorModuleLoader Loader(string importMapJson)
     {
         Assert.True(
@@ -1247,6 +1315,7 @@ public sealed class ModuleGraphLoadTests : IDisposable
             }
 
             var path = context.Request.Url?.AbsolutePath ?? "/";
+            _hits.AddOrUpdate(path, 1, (_, n) => n + 1);
             var response = context.Response;
             try
             {
@@ -1266,6 +1335,7 @@ public sealed class ModuleGraphLoadTests : IDisposable
                     "/a.js" => "import { c } from '/c.js'; export const a = 1 + c;",
                     "/b.js" => "import { c } from '/c.js'; export const b = 10 + c;",
                     "/c.js" => "export const c = 100;",
+                    "/imports-missing.js" => "import '/missing.js'; export const never = 1;",
                     _ => null,
                 };
 

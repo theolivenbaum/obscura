@@ -40,6 +40,48 @@ public static class FontResolution
         bool requestedItalic,
         IReadOnlyDictionary<string, LoadedFamily> loaded)
     {
+        // Not in crates/obscura-render, which parses the family list on every call. The answer
+        // is a function of the request and of the loaded families, which a text engine fills
+        // in its constructor and never changes after (engines that share a font database share
+        // the dictionary too, TextEngine.ForPass); the shaping of every span, every inline box
+        // fragment and every font-relative unit asks, many times per element and pass.
+        Dictionary<(string? Family, ushort Weight, bool Italic), ResolvedFont> memo =
+            ResolvedMemo.GetValue(loaded, static _ => []);
+        (string? Family, ushort Weight, bool Italic) key = (family, requestedWeight, requestedItalic);
+        lock (memo)
+        {
+            if (memo.TryGetValue(key, out ResolvedFont? known))
+            {
+                return known;
+            }
+        }
+
+        ResolvedFont resolved = ResolveLoadedFontUncached(family, requestedWeight, requestedItalic, loaded);
+        lock (memo)
+        {
+            if (memo.Count >= MaxResolvedMemo)
+            {
+                memo.Clear();
+            }
+
+            memo[key] = resolved;
+        }
+
+        return resolved;
+    }
+
+    private const int MaxResolvedMemo = 4096;
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<
+        IReadOnlyDictionary<string, LoadedFamily>,
+        Dictionary<(string? Family, ushort Weight, bool Italic), ResolvedFont>> ResolvedMemo = new();
+
+    private static ResolvedFont ResolveLoadedFontUncached(
+        string? family,
+        ushort requestedWeight,
+        bool requestedItalic,
+        IReadOnlyDictionary<string, LoadedFamily> loaded)
+    {
         if (family is not null)
         {
             foreach (string token in family.Split(','))
@@ -136,7 +178,12 @@ public static class FontResolution
             case LineHeightKind.Px:
                 return lineHeight.Number;
             case LineHeightKind.Ratio:
-                return fontSize * lineHeight.Number;
+                // Blink multiplies a unitless line-height at layout time and stores the product
+                // as LayoutUnit(float), which truncates to 1/64px: 16px * 1.2 is 19.1875, not
+                // the 19.203125 that rounding gives. A length (px, em, %) is resolved at style
+                // time and rounds instead; see FontAssets.QuantizedLineHeight. Measured on
+                // Chromium 141 across 7 fonts and 4 ratios.
+                return FontAssets.TruncatedToLayoutUnit(fontSize * lineHeight.Number);
             case LineHeightKind.Relative:
                 Dimension relative = lineHeight.Length;
                 if (relative.Kind == DimensionKind.Percent)

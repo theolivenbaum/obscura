@@ -114,6 +114,14 @@ public interface IBlockItemStyle : ICoreStyle
 
     /// <summary>Whether the item clears floats.</summary>
     EClear Clear => EClear.None;
+
+    /// <summary>
+    /// Whether the item establishes an independent block formatting context (CSS 2.1 9.4.1:
+    /// <c>display: flow-root</c>, an inline-block, a table cell, an overflow clip and so on), so
+    /// it neither shares its parent's floats nor lets its own escape. Not in vendor/taffy, which
+    /// only knows scroll containers; set by the DOM builder for documents that have floats.
+    /// </summary>
+    bool EstablishesBfc => false;
 }
 
 /// <summary>The set of styles required for a Flexbox container.</summary>
@@ -136,6 +144,13 @@ public interface IFlexboxContainerStyle : ICoreStyle
 
     /// <summary>How should this node's children be aligned in the main axis.</summary>
     EAlignContent? JustifyContent => null;
+
+    /// <summary>
+    /// The container is an anonymous stand-in for a run of inline-level boxes (a line box), so
+    /// its items' percentages resolve against the block that contains the line, which is the
+    /// container's own percentage basis, not its (float-narrowed) width. Not in vendor/taffy.
+    /// </summary>
+    bool PercentBasisFromContainingBlock => false;
 }
 
 /// <summary>The set of styles required for a Flexbox item.</summary>
@@ -277,6 +292,12 @@ public sealed class Style
     /// <summary>Should the box clear floats.</summary>
     public EClear Clear { get; set; } = EClear.None;
 
+    /// <summary>See <see cref="IBlockItemStyle.EstablishesBfc"/>.</summary>
+    public bool EstablishesBfc { get; set; }
+
+    /// <summary>See <see cref="IFlexboxContainerStyle.PercentBasisFromContainingBlock"/>.</summary>
+    public bool PercentBasisFromContainingBlock { get; set; }
+
     /// <summary>What should the <c>position</c> value of this struct use as a base offset?</summary>
     public EPosition Position { get; set; } = EPosition.Relative;
 
@@ -348,28 +369,77 @@ public sealed class Style
     public float FlexShrink { get; set; } = 1.0f;
 
     /// <summary>Defines the track sizing functions (heights) of the grid rows.</summary>
-    public List<GridTemplateComponent> GridTemplateRows { get; set; } = [];
+    /// <remarks>Allocated on first read (see <see cref="Default"/>).</remarks>
+    public List<GridTemplateComponent> GridTemplateRows
+    {
+        get => _gridTemplateRows ??= [];
+        set => _gridTemplateRows = value;
+    }
+
+    private List<GridTemplateComponent>? _gridTemplateRows;
 
     /// <summary>Defines the track sizing functions (widths) of the grid columns.</summary>
-    public List<GridTemplateComponent> GridTemplateColumns { get; set; } = [];
+    /// <remarks>Allocated on first read (see <see cref="Default"/>).</remarks>
+    public List<GridTemplateComponent> GridTemplateColumns
+    {
+        get => _gridTemplateColumns ??= [];
+        set => _gridTemplateColumns = value;
+    }
+
+    private List<GridTemplateComponent>? _gridTemplateColumns;
 
     /// <summary>Defines the size of implicitly created rows.</summary>
-    public List<TrackSizingFunction> GridAutoRows { get; set; } = [];
+    /// <remarks>Allocated on first read (see <see cref="Default"/>).</remarks>
+    public List<TrackSizingFunction> GridAutoRows
+    {
+        get => _gridAutoRows ??= [];
+        set => _gridAutoRows = value;
+    }
+
+    private List<TrackSizingFunction>? _gridAutoRows;
 
     /// <summary>Defines the size of implicitly created columns.</summary>
-    public List<TrackSizingFunction> GridAutoColumns { get; set; } = [];
+    /// <remarks>Allocated on first read (see <see cref="Default"/>).</remarks>
+    public List<TrackSizingFunction> GridAutoColumns
+    {
+        get => _gridAutoColumns ??= [];
+        set => _gridAutoColumns = value;
+    }
+
+    private List<TrackSizingFunction>? _gridAutoColumns;
 
     /// <summary>Controls how items get placed into the grid for auto-placed items.</summary>
     public EGridAutoFlow GridAutoFlow { get; set; } = EGridAutoFlow.Row;
 
     /// <summary>Defines the rectangular grid areas.</summary>
-    public List<GridTemplateArea> GridTemplateAreas { get; set; } = [];
+    /// <remarks>Allocated on first read (see <see cref="Default"/>).</remarks>
+    public List<GridTemplateArea> GridTemplateAreas
+    {
+        get => _gridTemplateAreas ??= [];
+        set => _gridTemplateAreas = value;
+    }
+
+    private List<GridTemplateArea>? _gridTemplateAreas;
 
     /// <summary>The named lines between the columns.</summary>
-    public List<List<string>> GridTemplateColumnNames { get; set; } = [];
+    /// <remarks>Allocated on first read (see <see cref="Default"/>).</remarks>
+    public List<List<string>> GridTemplateColumnNames
+    {
+        get => _gridTemplateColumnNames ??= [];
+        set => _gridTemplateColumnNames = value;
+    }
+
+    private List<List<string>>? _gridTemplateColumnNames;
 
     /// <summary>The named lines between the rows.</summary>
-    public List<List<string>> GridTemplateRowNames { get; set; } = [];
+    /// <remarks>Allocated on first read (see <see cref="Default"/>).</remarks>
+    public List<List<string>> GridTemplateRowNames
+    {
+        get => _gridTemplateRowNames ??= [];
+        set => _gridTemplateRowNames = value;
+    }
+
+    private List<List<string>>? _gridTemplateRowNames;
 
     /// <summary>Defines which row in the grid the item should start and end at.</summary>
     public Line<GridPlacement> GridRow { get; set; } = new(EGridPlacement.Auto, EGridPlacement.Auto);
@@ -378,7 +448,40 @@ public sealed class Style
     public Line<GridPlacement> GridColumn { get; set; } = new(EGridPlacement.Auto, EGridPlacement.Auto);
 
     /// <summary>The default style, matching taffy's <c>Style::DEFAULT</c>.</summary>
+    /// <remarks>
+    /// Not in vendor/taffy, where the empty grid lists cost nothing: the seven lists of a
+    /// style are allocated on first read, and the internal readers below (equality, cloning,
+    /// the grid container view) read an absent one as empty without allocating it. Every box
+    /// of every pass gets a new style, and the lists were a third of a box tree's allocation.
+    /// </remarks>
     public static Style Default => new();
+
+    private static IReadOnlyList<T> OrEmpty<T>(List<T>? list) => list is null ? [] : list;
+
+    /// <summary>The grid track lists without allocating an absent one, for readers that only look.</summary>
+    internal List<GridTemplateComponent>? GridTemplateRowsIfAny => _gridTemplateRows;
+
+    /// <inheritdoc cref="GridTemplateRowsIfAny"/>
+    internal List<GridTemplateComponent>? GridTemplateColumnsIfAny => _gridTemplateColumns;
+
+    /// <inheritdoc cref="GridTemplateRowsIfAny"/>
+    internal List<TrackSizingFunction>? GridAutoRowsIfAny => _gridAutoRows;
+
+    /// <inheritdoc cref="GridTemplateRowsIfAny"/>
+    internal List<TrackSizingFunction>? GridAutoColumnsIfAny => _gridAutoColumns;
+
+    private static int CountOf<T>(List<T>? list) => list?.Count ?? 0;
+
+    private static bool ListEqual<T>(List<T>? a, List<T>? b)
+    {
+        int count = CountOf(a);
+        if (count != CountOf(b))
+        {
+            return false;
+        }
+
+        return count == 0 || System.Linq.Enumerable.SequenceEqual(a!, b!);
+    }
 
     // ------------------------------------------------------------- ICoreStyle
 
@@ -393,19 +496,19 @@ public sealed class Style
 
     // -------------------------------------------------- IGridContainerStyle
 
-    IReadOnlyList<GridTemplateComponent>? IGridContainerStyle.GridTemplateRows => GridTemplateRows;
+    IReadOnlyList<GridTemplateComponent>? IGridContainerStyle.GridTemplateRows => OrEmpty(_gridTemplateRows);
 
-    IReadOnlyList<GridTemplateComponent>? IGridContainerStyle.GridTemplateColumns => GridTemplateColumns;
+    IReadOnlyList<GridTemplateComponent>? IGridContainerStyle.GridTemplateColumns => OrEmpty(_gridTemplateColumns);
 
-    IReadOnlyList<TrackSizingFunction> IGridContainerStyle.GridAutoRows => GridAutoRows;
+    IReadOnlyList<TrackSizingFunction> IGridContainerStyle.GridAutoRows => OrEmpty(_gridAutoRows);
 
-    IReadOnlyList<TrackSizingFunction> IGridContainerStyle.GridAutoColumns => GridAutoColumns;
+    IReadOnlyList<TrackSizingFunction> IGridContainerStyle.GridAutoColumns => OrEmpty(_gridAutoColumns);
 
-    IReadOnlyList<GridTemplateArea>? IGridContainerStyle.GridTemplateAreas => GridTemplateAreas;
+    IReadOnlyList<GridTemplateArea>? IGridContainerStyle.GridTemplateAreas => OrEmpty(_gridTemplateAreas);
 
-    IReadOnlyList<IReadOnlyList<string>>? IGridContainerStyle.GridTemplateColumnNames => GridTemplateColumnNames;
+    IReadOnlyList<IReadOnlyList<string>>? IGridContainerStyle.GridTemplateColumnNames => OrEmpty(_gridTemplateColumnNames);
 
-    IReadOnlyList<IReadOnlyList<string>>? IGridContainerStyle.GridTemplateRowNames => GridTemplateRowNames;
+    IReadOnlyList<IReadOnlyList<string>>? IGridContainerStyle.GridTemplateRowNames => OrEmpty(_gridTemplateRowNames);
 
     // ----------------------------------------------------- IBlockItemStyle
 
@@ -425,6 +528,8 @@ public sealed class Style
         ScrollbarWidth = ScrollbarWidth,
         Float = Float,
         Clear = Clear,
+        EstablishesBfc = EstablishesBfc,
+        PercentBasisFromContainingBlock = PercentBasisFromContainingBlock,
         Position = Position,
         Inset = Inset,
         Size = Size,
@@ -447,14 +552,14 @@ public sealed class Style
         FlexBasis = FlexBasis,
         FlexGrow = FlexGrow,
         FlexShrink = FlexShrink,
-        GridTemplateRows = [.. GridTemplateRows.Select(static c => c.Clone())],
-        GridTemplateColumns = [.. GridTemplateColumns.Select(static c => c.Clone())],
-        GridAutoRows = [.. GridAutoRows],
-        GridAutoColumns = [.. GridAutoColumns],
+        _gridTemplateRows = CountOf(_gridTemplateRows) == 0 ? null : [.. _gridTemplateRows!.Select(static c => c.Clone())],
+        _gridTemplateColumns = CountOf(_gridTemplateColumns) == 0 ? null : [.. _gridTemplateColumns!.Select(static c => c.Clone())],
+        _gridAutoRows = CountOf(_gridAutoRows) == 0 ? null : [.. _gridAutoRows!],
+        _gridAutoColumns = CountOf(_gridAutoColumns) == 0 ? null : [.. _gridAutoColumns!],
         GridAutoFlow = GridAutoFlow,
-        GridTemplateAreas = [.. GridTemplateAreas],
-        GridTemplateColumnNames = [.. GridTemplateColumnNames.Select(static n => new List<string>(n))],
-        GridTemplateRowNames = [.. GridTemplateRowNames.Select(static n => new List<string>(n))],
+        _gridTemplateAreas = CountOf(_gridTemplateAreas) == 0 ? null : [.. _gridTemplateAreas!],
+        _gridTemplateColumnNames = CountOf(_gridTemplateColumnNames) == 0 ? null : [.. _gridTemplateColumnNames!.Select(static n => new List<string>(n))],
+        _gridTemplateRowNames = CountOf(_gridTemplateRowNames) == 0 ? null : [.. _gridTemplateRowNames!.Select(static n => new List<string>(n))],
         GridRow = GridRow,
         GridColumn = GridColumn,
     };
@@ -483,6 +588,8 @@ public sealed class Style
             && ScrollbarWidth.Equals(other.ScrollbarWidth)
             && Float == other.Float
             && Clear == other.Clear
+            && EstablishesBfc == other.EstablishesBfc
+            && PercentBasisFromContainingBlock == other.PercentBasisFromContainingBlock
             && Position == other.Position
             && Inset == other.Inset
             && Size == other.Size
@@ -505,28 +612,29 @@ public sealed class Style
             && FlexBasis == other.FlexBasis
             && FlexGrow.Equals(other.FlexGrow)
             && FlexShrink.Equals(other.FlexShrink)
-            && GridTemplateRows.SequenceEqual(other.GridTemplateRows)
-            && GridTemplateColumns.SequenceEqual(other.GridTemplateColumns)
-            && GridAutoRows.SequenceEqual(other.GridAutoRows)
-            && GridAutoColumns.SequenceEqual(other.GridAutoColumns)
+            && ListEqual(_gridTemplateRows, other._gridTemplateRows)
+            && ListEqual(_gridTemplateColumns, other._gridTemplateColumns)
+            && ListEqual(_gridAutoRows, other._gridAutoRows)
+            && ListEqual(_gridAutoColumns, other._gridAutoColumns)
             && GridAutoFlow == other.GridAutoFlow
-            && GridTemplateAreas.SequenceEqual(other.GridTemplateAreas)
-            && NamesEqual(GridTemplateColumnNames, other.GridTemplateColumnNames)
-            && NamesEqual(GridTemplateRowNames, other.GridTemplateRowNames)
+            && ListEqual(_gridTemplateAreas, other._gridTemplateAreas)
+            && NamesEqual(_gridTemplateColumnNames, other._gridTemplateColumnNames)
+            && NamesEqual(_gridTemplateRowNames, other._gridTemplateRowNames)
             && GridRow == other.GridRow
             && GridColumn == other.GridColumn;
     }
 
-    private static bool NamesEqual(List<List<string>> a, List<List<string>> b)
+    private static bool NamesEqual(List<List<string>>? a, List<List<string>>? b)
     {
-        if (a.Count != b.Count)
+        int count = CountOf(a);
+        if (count != CountOf(b))
         {
             return false;
         }
 
-        for (int i = 0; i < a.Count; i++)
+        for (int i = 0; i < count; i++)
         {
-            if (!a[i].SequenceEqual(b[i], StringComparer.Ordinal))
+            if (!a![i].SequenceEqual(b![i], StringComparer.Ordinal))
             {
                 return false;
             }

@@ -656,7 +656,7 @@ public sealed class OpsTests
             });
             """);
 
-        await runtime.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(runtime);
         var result = runtime.Evaluate("""
             [
                 __postedTaskBench.message,
@@ -717,7 +717,7 @@ public sealed class OpsTests
             Promise.resolve().then(() => __sharedPostedOrder.push("initial-microtask"));
             """);
 
-        await runtime.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(runtime);
         var order = Assert.IsAssignableFrom<System.Text.Json.Nodes.JsonArray>(
             runtime.Evaluate("__sharedPostedOrder"));
         Assert.Equal(
@@ -761,7 +761,7 @@ public sealed class OpsTests
             Promise.all(tasks);
             """);
 
-        await runtime.RunEventLoopBoundedAsync(500);
+        await EventLoopWait.UntilIdleAsync(runtime);
         Assert.Equal(4096.0, runtime.Evaluate("__bulkPosted.count")!.GetValue<double>());
     }
 
@@ -791,7 +791,7 @@ public sealed class OpsTests
             });
             """);
 
-        await runtime.RunEventLoopBoundedAsync(300);
+        await EventLoopWait.UntilIdleAsync(runtime);
         Assert.Equal(250.0, runtime.Evaluate("__postedFromOp")!.GetValue<double>());
     }
 
@@ -818,7 +818,7 @@ public sealed class OpsTests
         runtime.ExecuteScript(
             "posted-task-new-document",
             "scheduler.postTask(() => document.body.setAttribute('data-fresh-task', 'ran'));");
-        await runtime.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(runtime);
 
         Assert.Null(runtime.Evaluate("document.body.getAttribute('data-stale-task')"));
         Assert.Equal("new", runtime.Evaluate("document.body.getAttribute('data-document')")!.GetValue<string>());
@@ -844,7 +844,7 @@ public sealed class OpsTests
             + "  { delay: 1 });");
 
         runtime.SetDom(HtmlParsing.ParseHtml("<html><body data-document='new'></body></html>"));
-        await runtime.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(runtime);
 
         Assert.Null(runtime.Evaluate("document.body.getAttribute('data-delayed-stale-task')"));
     }
@@ -893,11 +893,17 @@ public sealed class OpsTests
 
         Assert.True(StateHelpers.NodeIsConnected(dom, child));
         Assert.Contains(child, StateHelpers.ShadowIncludingConnectedNodes(dom));
-        Assert.Null(RenderInvalidation.RetainedMutation(
+
+        // DEVIATION from crates/obscura-js/src/ops.rs, which expects no retained mutation here
+        // (a shadow-tree mutation drops the prepared render): the retained planner plans shadow
+        // stylesheets too (RetainedStylePlanner.AddShadowDamage), so it is recorded like any
+        // other. See "A document with shadow roots keeps its retained styles" in todo.md.
+        var mutation = Assert.IsType<RetainedStyleMutation.Attribute>(RenderInvalidation.RetainedMutation(
             dom,
             "set_attribute",
             child.Index.ToString(System.Globalization.CultureInfo.InvariantCulture),
             "class\0changed"));
+        Assert.Equal(child, mutation.Mutation.Node);
 
         dom.AppendChild(source, host);
         Assert.True(StateHelpers.NodeIsConnected(dom, child));

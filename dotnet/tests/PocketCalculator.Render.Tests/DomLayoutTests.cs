@@ -1617,10 +1617,13 @@ public class DomLayoutTests
             Assert.True(MathF.Abs(rect.X - (index * 195f)) < 0.01f, $"{ids[index]}: {rect}");
         }
 
+        // Chromium 141: 780 x 0. The container is not a block formatting context root, so its
+        // floats do not give it height (CSS 2.1 10.6.3); the float-zone row this used to assert
+        // 150 for wrapped them in a flex row that did.
         Rect container = laid.Rects[Id(tree, "container")];
         Assert.True(
-            MathF.Abs(container.Height - 150f) < 0.01f,
-            $"one float band must be as tall as its tallest float: {container}");
+            MathF.Abs(container.Height) < 0.01f,
+            $"floats in a non-BFC block must not give it height: {container}");
     }
 
     [Fact]
@@ -2030,6 +2033,89 @@ public class DomLayoutTests
                 0,
                 0),
             telemetry);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(2f)]
+    [InlineData(1f)]
+    public void RetainedImageSourceSwapMatchesForcedFull(float? newRatio)
+    {
+        // An <img> source swap restyles the element instead of discarding every retained
+        // style (crates/obscura-render classifies `src` as Full). The first source was square;
+        // the second is not loaded yet (null), twice as wide, or square again.
+        const string initialHtml = """
+            <html><head><style>
+            html,body{margin:0}
+            #pic{display:block;width:40%}
+            img[src$=".png"]{border:1px solid}
+            .after{height:7px}
+            </style></head><body>
+            <div id=before style="height:5px"></div><img id=pic src="a.gif" alt=""><div id=after class=after></div>
+            </body></html>
+            """;
+        string finalHtml = initialHtml.Replace("a.gif", "b.png", StringComparison.Ordinal);
+        DomTree tree = Parse(initialHtml);
+        StylesheetCache cache = new();
+        NodeId pic = Id(tree, "pic");
+        DomLayout initial = RenderDom.LayoutDomWithWebFontsAndStylesheetCache(
+            tree,
+            (300f, 200f),
+            new Dictionary<NodeId, ReplacedIntrinsic> { [pic] = ReplacedIntrinsic.FromDimensions(1f, 1f) },
+            [],
+            cache);
+        Assert.Equal(120f, initial.Rects[pic].Height);
+
+        Assert.Equal(
+            RetainedAttributeMutationKind.Subtree,
+            RetainedStylePlanner.RetainedAttributeMutationKindOf(tree, pic, "src"));
+        tree.GetNode(pic)!.SetAttribute("src", "b.png");
+        Dictionary<NodeId, ReplacedIntrinsic> after = newRatio is { } ratio
+            ? new() { [pic] = ReplacedIntrinsic.FromDimensions(ratio, 1f) }
+            : [];
+        (DomLayout incremental, ContainerLayoutTelemetry telemetry) =
+            RenderDom.LayoutDomWithWebFontsPassLimit(
+                tree,
+                (300f, 200f),
+                after,
+                [],
+                null,
+                cache,
+                initial.TakeRetainedStyleMaps(),
+                [RetainedStyleMutation.From(new AttributeStyleMutation(pic, "src", "a.gif", "b.png"))]);
+
+        DomTree finalTree = Parse(finalHtml);
+        NodeId finalPic = Id(finalTree, "pic");
+        DomLayout full = RenderDom.LayoutDomWithWebFontsAndStylesheetCache(
+            finalTree,
+            (300f, 200f),
+            newRatio is { } finalRatio
+                ? new Dictionary<NodeId, ReplacedIntrinsic> { [finalPic] = ReplacedIntrinsic.FromDimensions(finalRatio, 1f) }
+                : NoIntrinsic,
+            [],
+            new StylesheetCache());
+
+        Assert.Equal(0, telemetry.RetainedFallback);
+        Assert.True(telemetry.RetainedReused > 0, "clean elements must keep their styles");
+        foreach (string id in new[] { "before", "pic", "after" })
+        {
+            Assert.Equal(full.Rects[Id(finalTree, id)], incremental.Rects[Id(tree, id)]);
+        }
+
+        Assert.Equal(full.Styles[finalPic].IntrinsicSize, incremental.Styles[pic].IntrinsicSize);
+    }
+
+    [Fact]
+    public void ImageResourceSelectionAttributesKeepTheirClassification()
+    {
+        DomTree tree = Parse("<picture id=p><source id=s srcset=a.png><img id=i src=a.png></picture>");
+        NodeId img = Id(tree, "i");
+        NodeId source = Id(tree, "s");
+        Assert.Equal(RetainedAttributeMutationKind.Subtree, RetainedStylePlanner.RetainedAttributeMutationKindOf(tree, img, "srcset"));
+        Assert.Equal(RetainedAttributeMutationKind.Subtree, RetainedStylePlanner.RetainedAttributeMutationKindOf(tree, img, "sizes"));
+        Assert.Equal(RetainedAttributeMutationKind.Full, RetainedStylePlanner.RetainedAttributeMutationKindOf(tree, img, "crossorigin"));
+        Assert.Equal(RetainedAttributeMutationKind.Full, RetainedStylePlanner.RetainedAttributeMutationKindOf(tree, source, "srcset"));
+        Assert.Equal(RetainedAttributeMutationKind.Full, RetainedStylePlanner.RetainedAttributeMutationKindOf(tree, source, "src"));
     }
 
     [Fact]
@@ -2459,7 +2545,9 @@ public class DomLayoutTests
             new(
                 "image resource mutation",
                 "#image{width:17px;height:19px}",
-                "image", "src", "replacement.png", ConservativeFallback),
+                // DEVIATION from the Rust case, which expects ConservativeFallback: the port
+                // restyles the <img> subtree for `src` (RetainedStylePlanner, see todo.md).
+                "image", "src", "replacement.png", Incremental),
             new(
                 "inherited language semantic mutation",
                 ".scope{width:113px}",
@@ -5459,6 +5547,7 @@ public class DomLayoutTests
     {
         DomTree tree = Parse(
             """
+            <!doctype html>
             <style>
                 * { box-sizing:border-box }
                 html,body { margin:0 }
@@ -5480,11 +5569,16 @@ public class DomLayoutTests
         Rect bulk = Get("bulk");
         Rect submit = Get("submit");
 
-        Assert.True(MathF.Abs(group.Height - 55f) < 0.1f, $"{group}");
+        // Chromium 141: group and actions 59 tall, field 55, bulk at y 0 and submit at y 3.
+        // The empty link's baseline is its bottom margin edge and the empty button's is its
+        // content-box bottom (3px of border and padding up), and the strut's descent hangs
+        // below the shared baseline. This used to assert a 55px row with both boxes at y 0.
+        Assert.True(MathF.Abs(group.Height - 59f) < 0.1f, $"{group}");
         Assert.True(MathF.Abs(field.Height - 55f) < 0.1f, $"{field}");
-        Assert.True(MathF.Abs(actions.Height - 55f) < 0.1f, $"{actions}");
+        Assert.True(MathF.Abs(actions.Height - 59f) < 0.1f, $"{actions}");
         Assert.True(MathF.Abs(submit.X - (bulk.X + bulk.Width)) < 0.1f);
-        Assert.True(MathF.Abs(bulk.Y - submit.Y) < 0.1f);
+        Assert.True(MathF.Abs(bulk.Y) < 0.1f, $"{bulk}");
+        Assert.True(MathF.Abs(submit.Y - 3f) < 0.1f, $"{submit}");
         Assert.True(MathF.Abs(submit.X + submit.Width - (group.X + group.Width)) < 0.1f);
     }
 

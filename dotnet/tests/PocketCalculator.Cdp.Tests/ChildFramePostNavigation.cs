@@ -48,7 +48,9 @@ public sealed class ChildFramePostNavigation
     private static async Task<string?> WaitForFrameUrlAsync(CdpContext ctx, string session, string suffix)
     {
         string? url = null;
-        for (int attempt = 0; attempt < 60 && url?.EndsWith(suffix, StringComparison.Ordinal) != true; attempt++)
+        // Polls until a deadline, not a number of attempts: a loaded host can take longer than
+        // a fixed count of 50 ms sleeps to load a frame, and the deadline still fails a hang.
+        for (var clock = System.Diagnostics.Stopwatch.StartNew(); clock.ElapsedMilliseconds < 20_000 && url?.EndsWith(suffix, StringComparison.Ordinal) != true;)
         {
             await ctx.GetSessionPageMut(session)!.RunAutonomousEventLoopTurnAsync();
             JsonNode tree = await CoreCdp.CdpAsync(ctx, 52, "Page.getFrameTree", new JsonObject(), session);

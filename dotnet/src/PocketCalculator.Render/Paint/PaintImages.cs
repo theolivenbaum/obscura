@@ -10,6 +10,14 @@ namespace PocketCalculator.Render;
 
 internal static class PaintImages
 {
+    /// <summary>An HTML <c>&lt;input type=image&gt;</c>, which is laid out and painted as its image.</summary>
+    internal static bool IsImageButton(Node node) =>
+        node.AsElement() is { } element
+        && string.Equals(element.Name.Local, "input", StringComparison.Ordinal)
+        && string.Equals(element.Name.Ns, Namespaces.Html, StringComparison.Ordinal)
+        && node.GetAttribute("type") is { } type
+        && string.Equals(type.Trim(), "image", StringComparison.OrdinalIgnoreCase);
+
     internal static ImageRequestProfile ImageRequestProfileFor(DomTree tree, NodeId id)
     {
         string? value = tree.GetNode(id)?.GetAttribute("crossorigin")?.Trim().ToLowerInvariant();
@@ -54,6 +62,19 @@ internal static class PaintImages
                     }
 
                     (url, density) = candidate;
+                    break;
+                }
+
+                case "input" when IsImageButton(node):
+                {
+                    string? source = node.GetAttribute("src")?.Trim();
+                    if (string.IsNullOrEmpty(source))
+                    {
+                        continue;
+                    }
+
+                    url = source;
+                    density = 1f;
                     break;
                 }
 
@@ -267,7 +288,7 @@ internal static class PaintImages
             }
 
             string? srcset = child.GetAttribute("srcset");
-            if (srcset is null || srcset.Trim().Length == 0)
+            if (srcset is null || srcset.AsSpan().Trim().Length == 0)
             {
                 continue;
             }
@@ -278,7 +299,7 @@ internal static class PaintImages
             }
 
             if (child.GetAttribute("media") is { } media
-                && media.Trim().Length > 0
+                && media.AsSpan().Trim().Length > 0
                 && !Css.CssMediaQuery.AppliesForViewport(media, viewport))
             {
                 continue;

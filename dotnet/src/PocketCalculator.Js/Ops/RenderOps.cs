@@ -220,6 +220,11 @@ public static class RenderOps
         {
             ArgumentNullException.ThrowIfNull(state);
             var nid = ParseNode(nidStr);
+            if (RenderState.PrepTrace)
+            {
+                RenderState.TraceQuery = nid;
+            }
+
             RenderState.SampleLiveDocumentAnimations(state);
             if (!RenderState.EnsureResolvedScrollForGeometry(state))
             {
@@ -262,6 +267,286 @@ public static class RenderOps
             sb.Append(prepared.ViewportFixedNodes().Contains(nid) ? "true" : "false");
             sb.Append('}');
             return sb.ToString();
+        },
+        string.Empty);
+
+    /// <summary>
+    /// <c>op_hit_test</c>. The elements under a viewport point, topmost first, as a JSON array
+    /// of node ids: just the topmost unless <paramref name="all"/>. A non-negative
+    /// <paramref name="scope"/> is the node id of the document or shadow root asking, and every
+    /// hit is retargeted against it (DOM's retargeting: a node in a shadow tree the scope is not
+    /// in becomes its host) and duplicates dropped; a negative one reports the deepest elements,
+    /// shadow trees included, which is what input dispatch targets.
+    /// </summary>
+    /// <remarks>
+    /// Additive: crates/obscura-js has no hit testing, and its shim's elementFromPoint picks the
+    /// highest node id whose bounding rect holds the point. See <see cref="PreparedRender.HitTest"/>.
+    /// </remarks>
+    public static string OpHitTest(PocketCalculatorState state, double x, double y, double scope, bool all) => OpGuard.Run(
+        "op_hit_test",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            RenderState.SampleLiveDocumentAnimations(state);
+            if (!RenderState.EnsureResolvedScrollForGeometry(state)
+                || state.Dom is not { } dom
+                || state.ResolvedScroll is not { } resolved
+                || state.PreparedRender is not { } prepared)
+            {
+                return string.Empty;
+            }
+
+            List<NodeId> hits = prepared.HitTest(dom, resolved.State, (float)x, (float)y, all);
+            NodeId? scopeRoot = scope >= 0 && scope <= uint.MaxValue ? NodeId.New((uint)scope) : null;
+            var sb = new StringBuilder(16 + (hits.Count * 6));
+            sb.Append('[');
+            HashSet<NodeId>? emitted = scopeRoot is null ? null : [];
+            bool first = true;
+            foreach (NodeId hit in hits)
+            {
+                NodeId target = scopeRoot is { } root ? Retarget(dom, hit, root) : hit;
+                if (emitted is not null && !emitted.Add(target))
+                {
+                    continue;
+                }
+
+                if (!first)
+                {
+                    sb.Append(',');
+                }
+
+                first = false;
+                sb.Append(target.Value.ToString(CultureInfo.InvariantCulture));
+                if (!all)
+                {
+                    break;
+                }
+            }
+
+            sb.Append(']');
+            return sb.ToString();
+        },
+        string.Empty);
+
+    /// <summary>
+    /// <c>op_range_rects</c>. <c>Range.getClientRects()</c> for the range between two boundary
+    /// points, as a JSON array of <c>[x, y, width, height]</c> in the viewport, or the empty
+    /// string when there is no layout to measure. Additive: crates/obscura-js answers every
+    /// range with its common ancestor element's box. See <see cref="PreparedRender.RangeClientRects"/>.
+    /// </summary>
+    public static string OpRangeRects(
+        PocketCalculatorState state,
+        double startNid,
+        double startOffset,
+        double endNid,
+        double endOffset) => OpGuard.Run(
+        "op_range_rects",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            if (!(startNid >= 0 && startNid <= uint.MaxValue && endNid >= 0 && endNid <= uint.MaxValue))
+            {
+                return string.Empty;
+            }
+
+            RenderState.SampleLiveDocumentAnimations(state);
+            if (!RenderState.EnsureResolvedScrollForGeometry(state)
+                || state.Dom is not { } dom
+                || state.ResolvedScroll is not { } resolved
+                || state.PreparedRender is not { } prepared)
+            {
+                return string.Empty;
+            }
+
+            List<Rect> rects = prepared.RangeClientRects(
+                dom,
+                resolved.State,
+                NodeId.New((uint)startNid),
+                (int)Math.Clamp(startOffset, 0, int.MaxValue),
+                NodeId.New((uint)endNid),
+                (int)Math.Clamp(endOffset, 0, int.MaxValue));
+            var sb = new StringBuilder(2 + (rects.Count * 32));
+            sb.Append('[');
+            for (int i = 0; i < rects.Count; i++)
+            {
+                if (i > 0)
+                {
+                    sb.Append(',');
+                }
+
+                Rect r = rects[i];
+                sb.Append('[').Append(SerdeJson.NumberF32(r.X));
+                sb.Append(',').Append(SerdeJson.NumberF32(r.Y));
+                sb.Append(',').Append(SerdeJson.NumberF32(r.Width));
+                sb.Append(',').Append(SerdeJson.NumberF32(r.Height)).Append(']');
+            }
+
+            sb.Append(']');
+            return sb.ToString();
+        },
+        string.Empty);
+
+    /// <summary>DOM's retargeting of <paramref name="node"/> against tree root <paramref name="scope"/>.</summary>
+    private static NodeId Retarget(DomTree dom, NodeId node, NodeId scope)
+    {
+        NodeId current = node;
+        for (int guard = 0; guard < 1024; guard++)
+        {
+            NodeId root = RootOf(dom, current);
+            if (!dom.IsShadowRoot(root) || ShadowIncludingInclusiveAncestor(dom, root, scope))
+            {
+                return current;
+            }
+
+            if (dom.ShadowRootInfo(root) is not { } info)
+            {
+                return current;
+            }
+
+            current = info.Host;
+        }
+
+        return current;
+    }
+
+    private static bool ShadowIncludingInclusiveAncestor(DomTree dom, NodeId root, NodeId scope)
+    {
+        NodeId current = scope;
+        for (int guard = 0; guard < 1024; guard++)
+        {
+            NodeId currentRoot = RootOf(dom, current);
+            if (current == root || currentRoot == root)
+            {
+                return true;
+            }
+
+            if (dom.ShadowRootInfo(currentRoot) is not { } info)
+            {
+                return false;
+            }
+
+            current = info.Host;
+        }
+
+        return false;
+    }
+
+    private static NodeId RootOf(DomTree dom, NodeId node)
+    {
+        NodeId current = node;
+        for (int guard = 0; guard < 1 << 20 && dom.GetNode(current)?.Parent is { } parent; guard++)
+        {
+            current = parent;
+        }
+
+        return current;
+    }
+
+    /// <summary>
+    /// <c>op_layout_offset</c>. CSSOM View's <c>offsetParent</c> and <c>offset*</c> integers for
+    /// an element, or the empty string when it has no box.
+    /// </summary>
+    /// <remarks>
+    /// Additive, like <c>op_inner_text</c>: crates/obscura-js has no such op and derives every
+    /// <c>offset*</c> value from <c>getBoundingClientRect()</c>. Those moved with scrolling and
+    /// transforms, ignored the offset parent and, once that rect became fractional, stopped
+    /// being integers. See <see cref="PreparedRender.OffsetMetrics"/>.
+    /// </remarks>
+    public static string OpLayoutOffset(PocketCalculatorState state, string nidStr) => OpGuard.Run(
+        "op_layout_offset",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            var nid = ParseNode(nidStr);
+            RenderState.SampleLiveDocumentAnimations(state);
+
+            // An element the pending mutations cannot give a box has offset metrics of zero
+            // whatever else they change; see PreparedRender.TryRetainedOffsetParent.
+            if (state.Dom is { } pendingDom
+                && RenderState.PreparedWithPendingMutations(state) is { } retained
+                && retained.TryRetainedOffsetParent(pendingDom, state.PendingStyleMutations, nid, out var hasBox, out _)
+                && !hasBox)
+            {
+                return string.Empty;
+            }
+
+            // A geometry consumer, like op_layout_geometry and op_layout_metrics: offset* read
+            // only box rects, so a newer animation sample whose effects are paint-only (opacity,
+            // color) leaves them exact. Through EnsurePreparedRender every offsetWidth read in a
+            // new task on a page with a running opacity animation rebuilt the whole layout.
+            if (state.Dom is not { } dom
+                || RenderState.EnsurePreparedGeometry(state) is not { } prepared
+                || prepared.OffsetMetrics(dom, nid) is not { } offset)
+            {
+                return string.Empty;
+            }
+
+            var sb = new StringBuilder(96);
+            sb.Append("{\"parent\":");
+            if (offset.Parent is { } parent)
+            {
+                sb.Append(parent.Value);
+            }
+            else
+            {
+                sb.Append("null");
+            }
+
+            sb.Append(",\"left\":").Append(SerdeJson.NumberF32(offset.Left));
+            sb.Append(",\"top\":").Append(SerdeJson.NumberF32(offset.Top));
+            sb.Append(",\"width\":").Append(SerdeJson.NumberF32(offset.Width));
+            sb.Append(",\"height\":").Append(SerdeJson.NumberF32(offset.Height));
+            sb.Append('}');
+            return sb.ToString();
+        },
+        string.Empty);
+
+    /// <summary>
+    /// <c>op_layout_offset_parent</c>. CSSOM View's <c>offsetParent</c> alone:
+    /// <c>{"parent":nid|null}</c>, or the empty string when the node has no box.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-js (see <see cref="OpLayoutOffset"/>). Split from
+    /// <c>op_layout_offset</c> because it depends on computed styles only, so it can be answered
+    /// from the prepared render while mutations that provably leave the element's styles and
+    /// ancestors alone are still pending (<see cref="PreparedRender.TryRetainedOffsetParent"/>),
+    /// where the offsets need the layout those mutations produce.
+    /// </remarks>
+    public static string OpLayoutOffsetParent(PocketCalculatorState state, string nidStr) => OpGuard.Run(
+        "op_layout_offset_parent",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            var nid = ParseNode(nidStr);
+            RenderState.SampleLiveDocumentAnimations(state);
+            if (state.Dom is not { } dom)
+            {
+                return string.Empty;
+            }
+
+            bool hasBox;
+            NodeId? parent;
+            if (RenderState.PreparedWithPendingMutations(state) is { } retained
+                && retained.TryRetainedOffsetParent(dom, state.PendingStyleMutations, nid, out hasBox, out parent))
+            {
+                // Answered without a layout.
+            }
+            else if (RenderState.EnsurePreparedGeometry(state)?.OffsetMetrics(dom, nid) is { } offset)
+            {
+                hasBox = true;
+                parent = offset.Parent;
+            }
+            else
+            {
+                return string.Empty;
+            }
+
+            if (!hasBox)
+            {
+                return string.Empty;
+            }
+
+            return parent is { } found ? "{\"parent\":" + found.Value + "}" : "{\"parent\":null}";
         },
         string.Empty);
 
@@ -309,6 +594,95 @@ public static class RenderOps
     /// </summary>
     public static string OpComputedStylePseudo(PocketCalculatorState state, string nidStr, string pseudo) =>
         ComputedStyleSnapshot(state, nidStr, pseudo, "op_computed_style_pseudo");
+
+    /// <summary>
+    /// <c>op_computed_style_static</c>. The layout-independent part of the
+    /// <c>op_computed_style</c> snapshot, answered without restyling or laying out the pending
+    /// mutations when they cannot change it: <c>[{...}, [omitted names]]</c>, or the empty string
+    /// when getComputedStyle() has to take <c>op_computed_style</c>.
+    /// </summary>
+    /// <remarks>
+    /// Additive, like <c>op_computed_style_pseudo</c>: crates/obscura-js has no such op, and its
+    /// getComputedStyle() prepares the whole render for every snapshot. The omitted names are the
+    /// used values (size, insets, margins, padding, transform, grid tracks); bootstrap.js asks
+    /// <c>op_computed_style</c> when page script reads one of them. See
+    /// <see cref="PreparedRender.TryRetainedComputedStyle"/>.
+    /// </remarks>
+    public static string OpComputedStyleStatic(PocketCalculatorState state, string nidStr) => OpGuard.Run(
+        "op_computed_style_static",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            var nid = ParseNode(nidStr);
+            RenderState.SampleLiveDocumentAnimations(state);
+            if (state.Dom is not { } dom
+                || RenderState.PreparedForStaticStyle(state, out var sampleAdvanced) is not { } prepared)
+            {
+                return string.Empty;
+            }
+
+            HashSet<NodeId>? waapi = null;
+            var timeline = state.AnimationTimeline;
+            if (prepared.TryRetainedComputedStyle(
+                    dom,
+                    state.PendingStyleMutations,
+                    nid,
+                    sampleAdvanced,
+                    node => (waapi ??= timeline.WaapiNodes()).Contains(node),
+                    state.ActivityGeneration,
+                    out var omitted) is not { } snapshot)
+            {
+                return string.Empty;
+            }
+
+            var custom = prepared.ComputedCustomProperties(nid);
+            var sb = new StringBuilder(4096);
+            sb.Append("[{");
+            var first = true;
+            foreach (var (name, value) in snapshot)
+            {
+                if (!first)
+                {
+                    sb.Append(',');
+                }
+
+                first = false;
+                SerdeJson.AppendString(sb, name);
+                sb.Append(':');
+                SerdeJson.AppendString(sb, value);
+            }
+
+            if (custom is not null)
+            {
+                foreach (var (name, value) in custom)
+                {
+                    if (!first)
+                    {
+                        sb.Append(',');
+                    }
+
+                    first = false;
+                    SerdeJson.AppendString(sb, name);
+                    sb.Append(':');
+                    SerdeJson.AppendString(sb, value);
+                }
+            }
+
+            sb.Append("},[");
+            for (var i = 0; i < omitted.Length; i++)
+            {
+                if (i != 0)
+                {
+                    sb.Append(',');
+                }
+
+                SerdeJson.AppendString(sb, omitted[i]);
+            }
+
+            sb.Append("]]");
+            return sb.ToString();
+        },
+        string.Empty);
 
     /// <summary>
     /// <c>op_inner_text</c>. The <c>innerText</c> of a rendered element as a JSON string, or the
@@ -623,6 +997,9 @@ public static class RenderOps
                 Easing = parsed.EasingBezier,
                 LinearEasing = parsed.LinearEasing,
                 StartTimeMs = startTimeMs,
+                // Resolved at the next document-time style flush, as Chromium resolves it at
+                // the next frame (see WaapiAnimation.StartPending).
+                StartPending = true,
                 HoldTimeMs = null,
                 PlayState = WaapiPlayState.Running,
             });
@@ -1083,97 +1460,116 @@ public static class RenderOps
         if (follower is not null)
         {
             await follower.Task.ConfigureAwait(false);
-            lock (shared.AsyncResourceGate)
-            {
-                return FinishAsyncImageMetadata(shared, nodeId, documentGeneration, selectedUrl, profile);
-            }
+            // On the page's loop: it reads the document (IsolateLock.RunOnPageAsync).
+            return await shared.IsolateLock.RunOnPageAsync(
+                () => FinishAsyncImageMetadata(shared, nodeId, documentGeneration, selectedUrl, profile))
+                .ConfigureAwait(false);
         }
 
-        shared.PageInFlight.Increment();
+        bool settled = false;
         try
         {
-            var parsedUrl = TryUri(selectedUrl);
-            Response? response = null;
-            if (!blocked && parsedUrl is not null)
+            byte[]? bytes = null;
+            shared.PageInFlight.Increment();
+            try
             {
-                try
+                var parsedUrl = TryUri(selectedUrl);
+                if (!blocked && parsedUrl is not null)
                 {
-                    response = stealthClient is { IsAvailable: true }
-                        ? await stealthClient
-                            .FetchResourceWithCallbacksAsync(parsedUrl, resourceRequest, shared.Callbacks)
-                            .ConfigureAwait(false)
-                        : await httpClient!
-                            .FetchResourceWithCallbacksAsync(parsedUrl, resourceRequest, shared.Callbacks)
-                            .ConfigureAwait(false);
-                }
-                catch (Exception ex) when (ex is not OutOfMemoryException)
-                {
-                    response = null;
+                    try
+                    {
+                        Response? response = stealthClient is { IsAvailable: true }
+                            ? await stealthClient
+                                .FetchResourceWithCallbacksAsync(parsedUrl, resourceRequest, shared.Callbacks)
+                                .ConfigureAwait(false)
+                            : await httpClient!
+                                .FetchResourceWithCallbacksAsync(parsedUrl, resourceRequest, shared.Callbacks)
+                                .ConfigureAwait(false);
+                        bytes = response is { Status: >= 200 and < 300 } ok ? ok.Body : null;
+                    }
+                    catch (Exception ex) when (ex is not OutOfMemoryException)
+                    {
+                        bytes = null;
+                    }
                 }
             }
+            finally
+            {
+                shared.PageInFlight.Decrement();
+            }
 
-            var bytes = response is { Status: >= 200 and < 300 } ok ? ok.Body : null;
-
-            // Everything from here on reads or writes page state, and concurrent image
-            // requests get here on different thread-pool threads. Rust resumes each
-            // reaction on the one thread that owns the state; the gate is the port's
-            // equivalent. Seeding, invalidating and handing the result to the waiters
-            // is one step: a follower released before the bytes are in the cache reads
+            // Everything from here on reads or writes page state: the renderer cache, the
+            // retained render's pending mutations, the resolved scroll and the document. It runs
+            // on the page's own loop between tasks (IsolateLock.RunOnPageAsync), as Rust resumes
+            // the reaction on the one thread that owns the state, rather than on whichever
+            // thread completed the transport; the gate still orders it against the other image
+            // requests (AsyncResourceGate). Seeding, invalidating and handing the result to the
+            // waiters is one step: a follower released before the bytes are in the cache reads
             // its own request back as unknown and reports a load error.
-            List<TaskCompletionSource> pending = [];
-            string result;
-            lock (shared.AsyncResourceGate)
+            return await shared.IsolateLock.RunOnPageAsync(() =>
             {
-                if (shared.DocumentGeneration == documentGeneration)
+                List<TaskCompletionSource> pending = [];
+                string result;
+                lock (shared.AsyncResourceGate)
                 {
-                    if (bytes is not null && RenderPaint.ImageIntrinsicDimensions(bytes) is not null)
+                    if (shared.DocumentGeneration == documentGeneration)
                     {
-                        shared.RenderResources.SeedImage(selectedUrl, profile, bytes);
-                        // The leader owns the unknown-to-known cache transition. Followers
-                        // only observe this result and must not invalidate again.
-                        RenderInvalidation.InvalidateRenderResourceGeometry(shared);
+                        if (bytes is not null && RenderPaint.ImageIntrinsicDimensions(bytes) is not null)
+                        {
+                            shared.RenderResources.SeedImage(selectedUrl, profile, bytes);
+                            // The leader owns the unknown-to-known cache transition. Followers
+                            // only observe this result and must not invalidate again.
+                            RenderInvalidation.InvalidateRenderResourceGeometry(shared);
+                        }
+                        else
+                        {
+                            shared.RenderResources.SeedImageMissing(selectedUrl, profile);
+                        }
                     }
-                    else
+
+                    if (shared.RenderImageInFlight.Remove(requestKey, out var registered))
                     {
-                        shared.RenderResources.SeedImageMissing(selectedUrl, profile);
+                        pending = registered;
+                    }
+
+                    settled = true;
+                    try
+                    {
+                        result = FinishAsyncImageMetadata(shared, nodeId, documentGeneration, selectedUrl, profile);
+                    }
+                    finally
+                    {
+                        foreach (var waiter in pending)
+                        {
+                            waiter.TrySetResult();
+                        }
                     }
                 }
 
-                if (shared.RenderImageInFlight.Remove(requestKey, out var registered))
-                {
-                    pending = registered;
-                }
-
-                result = FinishAsyncImageMetadata(shared, nodeId, documentGeneration, selectedUrl, profile);
-            }
-
-            foreach (var waiter in pending)
-            {
-                waiter.TrySetResult();
-            }
-
-            return result;
+                return result;
+            }).ConfigureAwait(false);
         }
         finally
         {
-            // A leader that failed after registering still owns every waiter on its key.
-            // Leaving them registered strands each follower's op on a promise nothing can
+            // A leader that failed before it settled its key still owns every waiter on its
+            // key. Leaving them registered strands each follower's op on a promise nothing can
             // settle, and the element never completes.
-            List<TaskCompletionSource> abandoned = [];
-            lock (shared.AsyncResourceGate)
+            if (!settled)
             {
-                if (shared.RenderImageInFlight.Remove(requestKey, out var registered))
+                List<TaskCompletionSource> abandoned = [];
+                lock (shared.AsyncResourceGate)
                 {
-                    abandoned = registered;
+                    if (shared.RenderImageInFlight.Remove(requestKey, out var registered))
+                    {
+                        abandoned = registered;
+                    }
+                }
+
+                foreach (var waiter in abandoned)
+                {
+                    waiter.TrySetResult();
                 }
             }
-
-            foreach (var waiter in abandoned)
-            {
-                waiter.TrySetResult();
-            }
-
-            shared.PageInFlight.Decrement();
         }
     }
 

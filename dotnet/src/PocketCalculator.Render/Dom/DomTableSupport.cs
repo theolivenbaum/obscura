@@ -567,7 +567,7 @@ internal static class DomTableSupport
 
         // Source formatting between table-internal boxes is not content; CSS 2.1 17.2.1 drops
         // it rather than wrapping it in an anonymous cell.
-        return tree.GetNode(id) is { IsElement: false } && tree.TextContent(id).Trim().Length == 0;
+        return tree.GetNode(id) is { IsElement: false } && tree.TextContent(id).AsSpan().Trim().Length == 0;
     }
 
     /// <summary>The same, for a node.</summary>
@@ -1461,26 +1461,6 @@ internal static class DomTableSupport
         }
     }
 
-    /// <summary>Largest definite (px) width among <paramref name="id"/> and its descendants.</summary>
-    internal static float? MaxDefiniteDescendantWidth(
-        DomTree tree,
-        NodeId id,
-        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
-    {
-        float? best = null;
-        foreach (NodeId d in tree.Descendants(id))
-        {
-            if (styles.TryGetValue(d, out LayoutStyle? style)
-                && style.Width.Kind == DimensionKind.Px
-                && style.Width.Value > 0f)
-            {
-                best = best is { } current ? F32.Max(current, style.Width.Value) : style.Width.Value;
-            }
-        }
-
-        return best;
-    }
-
     /// <summary>
     /// Fixed content descendants can floor a table's intrinsic minimum. Width hints on
     /// cells/rows/columns are different and must remain shrinkable to the content minimum.
@@ -1532,49 +1512,71 @@ internal static class DomTableSupport
     }
 
     /// <summary>
-    /// <see cref="MaxDefiniteTableContentWidth"/> for every node of the document at once.
+    /// <see cref="MaxDefiniteTableContentWidth"/> per node, memoized across the tables one pass
+    /// asks about.
     /// </summary>
     /// <remarks>
     /// The per-table walk visits the table's whole subtree, so a page of nested tables walked
-    /// every descendant once per table above it. This computes the same subtree maxima in one
-    /// post-order pass over the light tree; a node the pass did not reach (one in a shadow
-    /// tree) falls back to the walk.
+    /// every descendant once per table above it. This computes the same subtree maxima in a
+    /// post-order pass over the light tree, once per node; a node outside the document's light
+    /// tree (one in a shadow tree) falls back to the walk. Only the subtrees of the tables asked
+    /// about are walked: walking the whole document up front cost nvidia.com a whole-document
+    /// walk on every layout for the 16 small anonymous tables it has.
     /// </remarks>
     internal sealed class DefiniteContentWidthIndex(
         DomTree tree,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles)
     {
-        private Dictionary<NodeId, float>? _subtreeMax;
-        private HashSet<NodeId>? _visited;
+        // Every node whose subtree maximum is known; the maximum itself only where there is one.
+        private readonly Dictionary<NodeId, float> _subtreeMax = [];
+        private readonly HashSet<NodeId> _visited = [];
 
         internal float? Get(NodeId id)
         {
-            if (_visited is null)
+            if (!_visited.Contains(id))
             {
-                Build();
+                if (!InDocumentLightTree(id))
+                {
+                    return MaxDefiniteTableContentWidth(tree, id, styles);
+                }
+
+                Build(id);
             }
 
-            if (!_visited!.Contains(id))
-            {
-                return MaxDefiniteTableContentWidth(tree, id, styles);
-            }
-
-            return _subtreeMax!.TryGetValue(id, out float best) ? best : null;
+            return _subtreeMax.TryGetValue(id, out float best) ? best : null;
         }
 
-        private void Build()
+        private bool InDocumentLightTree(NodeId id)
         {
-            _subtreeMax = [];
-            _visited = [];
+            int steps = 0;
+            for (NodeId? current = id; current is { } node; current = tree.GetNode(node)?.Parent)
+            {
+                if (node == tree.Document)
+                {
+                    return true;
+                }
+
+                if (++steps > tree.SlotCount)
+                {
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        private void Build(NodeId root)
+        {
             var stack = new Stack<(NodeId Node, bool Exit)>();
-            stack.Push((tree.Document, false));
+            stack.Push((root, false));
             while (stack.Count > 0)
             {
                 WorkCancellation.ThrowIfCancellationRequested();
                 (NodeId node, bool exit) = stack.Pop();
                 if (!exit)
                 {
-                    // The same cycle guard as `DomTree.Descendants`: a node is entered once.
+                    // The same cycle guard as `DomTree.Descendants`: a node is entered once. A
+                    // node an earlier query already entered has its maximum.
                     if (!_visited.Add(node))
                     {
                         continue;
@@ -1617,292 +1619,5 @@ internal static class DomTableSupport
                 }
             }
         }
-    }
-
-    /// <summary>
-    /// Rough height budget for a float with no explicit size and no images.
-    /// </summary>
-    internal const float DefaultFloatHeightEstimate = 200f;
-
-    /// <summary>Estimate a float's rendered height in CSS px.</summary>
-    internal static float EstimateFloatHeight(
-        DomTree tree,
-        NodeId floatId,
-        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
-    {
-        if (styles.TryGetValue(floatId, out LayoutStyle? floatStyle)
-            && floatStyle.Height.Kind == DimensionKind.Px)
-        {
-            return floatStyle.Height.Value;
-        }
-
-        float imageHeight = 0f;
-        foreach (NodeId id in tree.Descendants(floatId))
-        {
-            if (!DomTraversal.IsLocal(tree, id, "img"))
-            {
-                continue;
-            }
-
-            if (styles.TryGetValue(id, out LayoutStyle? imageStyle)
-                && imageStyle.Height.Kind == DimensionKind.Px)
-            {
-                imageHeight += imageStyle.Height.Value;
-            }
-        }
-
-        const float assumedFloatWidth = 280f;
-        float textHeight = EstimateTextHeight(tree, floatId, styles, assumedFloatWidth);
-
-        // Flattened character count misses forced rows; add one line per structural row.
-        float structuralHeight = 0f;
-        foreach (NodeId id in tree.Descendants(floatId))
-        {
-            if (!DomTraversal.IsAnyLocal(
-                    tree, id, "li", "tr", "dt", "dd", "p", "figcaption", "h1", "h2", "h3", "h4", "h5", "h6"))
-            {
-                continue;
-            }
-
-            float fontSize = styles.TryGetValue(id, out LayoutStyle? rowStyle) && rowStyle.FontSize is { } size
-                ? size
-                : 16f;
-            structuralHeight += fontSize * 1.2f;
-        }
-
-        return F32.Max(imageHeight + textHeight + structuralHeight, DefaultFloatHeightEstimate);
-    }
-
-    /// <summary>
-    /// Estimate how tall a subtree's text would render at <paramref name="assumedWidth"/>,
-    /// using the same average-character-width heuristic as the layout-only text fallback.
-    /// </summary>
-    internal static float EstimateTextHeight(
-        DomTree tree,
-        NodeId id,
-        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
-        float assumedWidth)
-    {
-        float charCount = 0f;
-        foreach (char c in tree.TextContent(id))
-        {
-            if (!char.IsWhiteSpace(c))
-            {
-                charCount++;
-            }
-        }
-
-        if (charCount == 0f)
-        {
-            return 0f;
-        }
-
-        float fontSize = styles.TryGetValue(id, out LayoutStyle? style) && style.FontSize is { } size
-            ? size
-            : 16f;
-        const float avgCharWidthEm = 0.55f;
-        float charsPerLine = F32.Max(assumedWidth / (fontSize * avgCharWidthEm), 1f);
-        float lines = F32.Max(MathF.Ceiling(charCount / charsPerLine), 1f);
-        return (lines * fontSize * 1.2f) + 16f;
-    }
-
-    /// <summary>Estimate the normal-flow height consumed by one sibling alongside a float.</summary>
-    internal static float EstimateFlowSiblingHeight(
-        DomTree tree,
-        NodeId id,
-        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
-        float assumedWidth)
-    {
-        styles.TryGetValue(id, out LayoutStyle? style);
-        if (style is not null
-            && (style.Display == Display.None || style.Position == TaffyPosition.Absolute))
-        {
-            return 0f;
-        }
-
-        float explicitHeight = style is not null && style.Height.Kind == DimensionKind.Px
-            ? F32.Max(style.Height.Value, 0f)
-            : 0f;
-        float descendantImageHeight = 0f;
-        foreach (NodeId descendant in tree.Descendants(id))
-        {
-            if (!DomTraversal.IsLocal(tree, descendant, "img"))
-            {
-                continue;
-            }
-
-            if (styles.TryGetValue(descendant, out LayoutStyle? imageStyle)
-                && imageStyle.Height.Kind == DimensionKind.Px)
-            {
-                descendantImageHeight += F32.Max(imageStyle.Height.Value, 0f);
-            }
-        }
-
-        float ownImageHeight = DomTraversal.IsLocal(tree, id, "img") ? explicitHeight : 0f;
-        float contentHeight = F32.Max(
-            F32.Max(EstimateTextHeight(tree, id, styles, assumedWidth), explicitHeight),
-            descendantImageHeight + ownImageHeight);
-        float margins = style is not null
-            ? F32.Max(style.Margin.Top + style.Margin.Bottom, 0f)
-            : 0f;
-        return contentHeight + margins;
-    }
-
-    internal static bool IsStructuralNativeClearBox(DomTree tree, NodeId id, LayoutStyle style) =>
-        style.Display == Display.Block
-        && !style.DisplayContents
-        && !style.IsTableBox
-        && !style.IsInlineBlock
-        && !style.FlowRoot
-        && !style.OverflowHidden
-        && DomStyleFixups.EffectiveContainerType(style) == ContainerType.Normal
-        && style.Float is null
-        && style.Clear is not null
-        && style.Position != TaffyPosition.Absolute
-        && tree.TextContent(id).Trim().Length == 0
-        && style.BeforePseudo is null
-        && style.AfterPseudo is null;
-
-    internal static bool IsStructuralNativeFloatPseudo(LayoutStyle style) =>
-        style.Display != Display.None
-        && style.Display != Display.Inline
-        && !style.DisplayContents
-        && !style.IsInlineBlock
-        && (!style.FlowRoot || style.IsTableBox)
-        && !style.OverflowHidden
-        && DomStyleFixups.EffectiveContainerType(style) == ContainerType.Normal
-        && style.Float is null
-        && style.Position != TaffyPosition.Absolute
-        && (style.BeforeContent is null || style.BeforeContent.Trim().Length == 0);
-
-    /// <summary>
-    /// Native taffy floats are currently sound for a deliberately small structural subset.
-    /// </summary>
-    internal static bool CanUseNativeFloatBand(
-        DomTree tree,
-        LayoutStyle parentStyle,
-        IReadOnlyList<NodeId> domChildren,
-        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
-    {
-        if (parentStyle.Display != Display.Block
-            || parentStyle.InternalFlexContainer
-            || parentStyle.IsInlineBlock
-            || parentStyle.IsTableBox
-            || parentStyle.Position == TaffyPosition.Absolute
-            || parentStyle.Width.Kind is not (DimensionKind.Auto or DimensionKind.Px or DimensionKind.Percent)
-            || parentStyle.SizeExpressions[0] is not null)
-        {
-            return false;
-        }
-
-        bool hasLeft = false;
-        bool hasRight = false;
-        bool sawFloat = false;
-        bool sawClearAfterFloats = false;
-        bool sawFlowAfterFloats = false;
-
-        if (parentStyle.BeforePseudo is { } before && !IsStructuralNativeFloatPseudo(before))
-        {
-            return false;
-        }
-
-        foreach (NodeId id in domChildren)
-        {
-            if (tree.GetNode(id) is not { } node)
-            {
-                continue;
-            }
-
-            if (!node.IsElement)
-            {
-                // Comments, doctypes, and processing instructions generate no formatting box.
-                if (node.TextContentOfTextNode is { } contents && contents.Trim().Length != 0)
-                {
-                    return false;
-                }
-
-                continue;
-            }
-
-            if (!styles.TryGetValue(id, out LayoutStyle? style))
-            {
-                return false;
-            }
-
-            if (style.Display == Display.None)
-            {
-                continue;
-            }
-
-            if (style.Float is { } side)
-            {
-                if (sawClearAfterFloats
-                    || sawFlowAfterFloats
-                    || style.DisplayContents
-                    || style.IsTableBox
-                    || style.Position == TaffyPosition.Absolute
-                    || style.Width.Kind is not (DimensionKind.Auto or DimensionKind.Px or DimensionKind.Percent)
-                    || style.SizeExpressions[0] is not null
-                    || DomStyleFixups.HasDeferredOrAutoMargin(style))
-                {
-                    return false;
-                }
-
-                sawFloat = true;
-                hasLeft |= side == Float.Left;
-                hasRight |= side == Float.Right;
-            }
-            else if (IsStructuralNativeClearBox(tree, id, style))
-            {
-                if (!sawFloat)
-                {
-                    return false;
-                }
-
-                sawClearAfterFloats |= DomStyleFixups.ClearMatchesFloatSides(
-                    style.Clear!.Value, hasLeft, hasRight);
-            }
-            else if (sawFloat
-                && style.Display == Display.Block
-                && !style.DisplayContents
-                && !style.IsInlineBlock
-                && !style.IsTableBox
-                && !style.InternalFlexContainer
-                && style.Position != TaffyPosition.Absolute)
-            {
-                // Gecko keeps an ordinary block's border box at the BFC's full inline size and
-                // narrows only its descendant line boxes.
-                sawFlowAfterFloats = true;
-            }
-            else
-            {
-                return false;
-            }
-        }
-
-        if (parentStyle.AfterPseudo is { } after)
-        {
-            if (!IsStructuralNativeFloatPseudo(after))
-            {
-                return false;
-            }
-
-            if (after.Clear is { } clear)
-            {
-                sawClearAfterFloats |= DomStyleFixups.ClearMatchesFloatSides(clear, hasLeft, hasRight);
-            }
-        }
-
-        // Taffy represents scroll-container overflow as a real BFC root. Plain `clip` does not
-        // establish a BFC, and viewport-propagated overflow leaves its source box visible.
-        bool parentIsNativeBfc = parentStyle.OverflowScrollContainer
-            && !parentStyle.OverflowPropagatedToViewport;
-        // DEVIATION from crates/obscura-render/src/dom.rs, whose float-zone approximation lays a
-        // left and a right float out as one space-between row and every later float below it:
-        // left, right, left put the third float at 0,400 where Chromium 141 puts it at 100,0.
-        // Floats on both sides with nothing else in flow take the native float placement.
-        bool mixedSidesOnly = hasLeft && hasRight;
-        return sawFloat
-            && (sawFlowAfterFloats || sawClearAfterFloats || parentIsNativeBfc || mixedSidesOnly);
     }
 }

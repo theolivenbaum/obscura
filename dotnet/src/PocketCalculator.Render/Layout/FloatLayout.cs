@@ -148,6 +148,9 @@ public sealed class FloatContext
     /// <summary>Set the width of the float context.</summary>
     public void SetWidth(float availableWidth) => _availableWidth = availableWidth;
 
+    /// <summary>The width of the float context: the BFC root's border-box width.</summary>
+    public float AvailableWidth => _availableWidth;
+
     /// <summary>Returns the placed left floats.</summary>
     public IReadOnlyList<PlacedFloatedBox> LeftFloats => _leftFloats;
 
@@ -394,10 +397,15 @@ public sealed class FloatContext
         int resolvedEndIdx;
         if (!end.HasValue)
         {
+            // DEVIATION from vendor/taffy/src/compute/float.rs, which only covers the float down
+            // to the last existing segment, so the part of a float taller than every earlier one
+            // excluded nothing: a second left float 80px tall beside a 55px one let text run
+            // under it from 55px down. Extend the segments to the float's bottom.
             float lastYEnd = _segments.Count > 0 ? _segments[^1].YEnd : 0.0f;
-            if (minY > lastYEnd)
+            float floatBottom = startY + floatedBox.Height;
+            if (floatBottom > lastYEnd)
             {
-                _segments.Add(new Segment { YStart = lastYEnd, YEnd = minY, Inset0 = 0.0f, Inset1 = 0.0f });
+                _segments.Add(new Segment { YStart = lastYEnd, YEnd = floatBottom, Inset0 = 0.0f, Inset1 = 0.0f });
             }
 
             resolvedEndIdx = _segments.Count - 1;
@@ -406,7 +414,31 @@ public sealed class FloatContext
         {
             resolvedEndIdx = end.Value;
             float endY = startY + floatedBox.Height;
-            if (endY != _segments[resolvedEndIdx].YEnd)
+
+            // DEVIATION from vendor/taffy/src/compute/float.rs, which subdivides the segment the
+            // fitter stopped in at the float's bottom. The fitter measures the free height as
+            // float differences summed in double, and the bottom is one float sum, so the two
+            // can disagree by an ulp: the bottom then lands exactly on the start of the segment
+            // the fitter reached (or just past the end of it), and subdividing there threw
+            // ("cannot subdivide segment"), failing the whole layout. Use the segment that
+            // really holds the bottom.
+            while (resolvedEndIdx > resolvedStartIdx && endY <= _segments[resolvedEndIdx].YStart)
+            {
+                resolvedEndIdx--;
+            }
+
+            while (resolvedEndIdx + 1 < _segments.Count && endY > _segments[resolvedEndIdx].YEnd)
+            {
+                resolvedEndIdx++;
+            }
+
+            Segment last = _segments[resolvedEndIdx];
+            if (endY > last.YEnd)
+            {
+                _segments.Add(new Segment { YStart = last.YEnd, YEnd = endY, Inset0 = 0.0f, Inset1 = 0.0f });
+                resolvedEndIdx++;
+            }
+            else if (endY != last.YEnd && endY > last.YStart)
             {
                 SubdivideSegment(resolvedEndIdx, endY);
             }
@@ -448,6 +480,103 @@ public sealed class FloatContext
             : _lowestLeftFloatBottom ?? _lowestRightFloatBottom,
         _ => null,
     };
+
+    /// <summary>
+    /// The float exclusions from <paramref name="fromY"/> down, as horizontal bands relative to a
+    /// box whose left/right edges sit <paramref name="boxInsetLeft"/>/<paramref name="boxInsetRight"/>
+    /// in from the BFC root's border edges and whose top is at <paramref name="fromY"/>, or
+    /// <c>null</c> when no float reaches that far down.
+    /// </summary>
+    /// <remarks>
+    /// Not in vendor/taffy, whose block layout has no inline formatting context: the line
+    /// breaker of an inline formatting context in this BFC reads these to shorten each line box
+    /// (CSS 2.1 9.5).
+    /// </remarks>
+    public FloatBands? Bands(float fromY, float boxInsetLeft, float boxInsetRight)
+    {
+        if (!HasActiveFloats(fromY))
+        {
+            return null;
+        }
+
+        List<float>? values = null;
+        for (int i = 0; i < _segments.Count; i++)
+        {
+            Segment segment = _segments[i];
+            if (segment.YEnd <= fromY)
+            {
+                continue;
+            }
+
+            float left = Sys.F32Max(segment.Inset0 - boxInsetLeft, 0.0f);
+            float right = Sys.F32Max(segment.Inset1 - boxInsetRight, 0.0f);
+            values ??= [];
+            values.Add(Sys.F32Max(segment.YStart - fromY, 0.0f));
+            values.Add(segment.YEnd - fromY);
+            values.Add(left);
+            values.Add(right);
+        }
+
+        return values is null ? null : new FloatBands([.. values]);
+    }
+
+    /// <summary>
+    /// The horizontal space left by the floats over <c>[y, y + height)</c> for a box between the
+    /// given containing block insets: the largest inset on each side over every segment that
+    /// band touches.
+    /// </summary>
+    public (float Left, float Right) InsetsOver(
+        float y,
+        float height,
+        float containingBlockInsetLeft,
+        float containingBlockInsetRight)
+    {
+        float left = containingBlockInsetLeft;
+        float right = containingBlockInsetRight;
+        float bottom = y + Sys.F32Max(height, 0.0f);
+        for (int i = 0; i < _segments.Count; i++)
+        {
+            Segment segment = _segments[i];
+            if (segment.YEnd <= y)
+            {
+                continue;
+            }
+
+            // A zero-height query still sits in the segment that contains it.
+            if (segment.YStart >= bottom && !(height <= 0.0f && segment.YStart <= y))
+            {
+                break;
+            }
+
+            left = Sys.F32Max(left, segment.Inset0);
+            right = Sys.F32Max(right, segment.Inset1);
+        }
+
+        return (left, right);
+    }
+
+    /// <summary>The first segment boundary strictly below <paramref name="y"/>, or <c>null</c>.</summary>
+    public float? NextEdgeBelow(float y)
+    {
+        for (int i = 0; i < _segments.Count; i++)
+        {
+            Segment segment = _segments[i];
+            if (segment.YStart > y)
+            {
+                return segment.YStart;
+            }
+
+            if (segment.YEnd > y)
+            {
+                return segment.YEnd;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The bottom of the lowest float placed so far, or 0.</summary>
+    public float LowestFloatBottom => _segments.Count > 0 ? _segments[^1].YEnd : 0.0f;
 
     /// <summary>Search for a space suitable for laying out non-floated content into.</summary>
     public ContentSlot FindContentSlot(
@@ -516,19 +645,156 @@ public sealed class FloatContext
     }
 }
 
+/// <summary>
+/// An immutable snapshot of the float exclusions an inline formatting context lays its line
+/// boxes out around, relative to its content box: one band per float segment, each with the
+/// distance the floats intrude from the left and the right content edge.
+/// </summary>
+/// <remarks>Not in vendor/taffy; see <see cref="FloatContext.Bands"/>.</remarks>
+public sealed class FloatBands(float[] values) : IEquatable<FloatBands>
+{
+    // Four floats per band: top, bottom, left inset, right inset, in content-box coordinates.
+    private readonly float[] _values = values;
+
+    /// <summary>The number of bands.</summary>
+    public int Count => _values.Length / 4;
+
+    /// <summary>Band <paramref name="index"/>: top, bottom, left and right inset.</summary>
+    public (float Top, float Bottom, float Left, float Right) this[int index] =>
+        (_values[index * 4], _values[(index * 4) + 1], _values[(index * 4) + 2], _values[(index * 4) + 3]);
+
+    /// <summary>
+    /// The largest left and right intrusion over <c>[top, top + height)</c>. A zero height reads
+    /// the band at <paramref name="top"/>.
+    /// </summary>
+    public (float Left, float Right) Insets(float top, float height)
+    {
+        float left = 0.0f;
+        float right = 0.0f;
+        float bottom = top + Sys.F32Max(height, 0.0f);
+        for (int i = FirstBandEndingAfter(top) * 4; i < _values.Length; i += 4)
+        {
+            float bandTop = _values[i];
+            float bandBottom = _values[i + 1];
+            if (bandBottom <= top)
+            {
+                continue;
+            }
+
+            if (bandTop >= bottom && !(height <= 0.0f && bandTop <= top))
+            {
+                break;
+            }
+
+            left = Sys.F32Max(left, _values[i + 2]);
+            right = Sys.F32Max(right, _values[i + 3]);
+        }
+
+        return (left, right);
+    }
+
+    /// <summary>
+    /// The first band edge strictly below <paramref name="y"/> at which the free width can grow,
+    /// or <c>null</c> when nothing intrudes below it.
+    /// </summary>
+    public float? NextEdgeBelow(float y)
+    {
+        for (int i = FirstBandEndingAfter(y) * 4; i < _values.Length; i += 4)
+        {
+            if (_values[i] > y)
+            {
+                return _values[i];
+            }
+
+            if (_values[i + 1] > y)
+            {
+                return _values[i + 1];
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The first band whose bottom is below <paramref name="y"/>. The bands come from the float
+    /// context's segments, which are disjoint and in order, so their bottoms ascend.
+    /// </summary>
+    private int FirstBandEndingAfter(float y)
+    {
+        int low = 0;
+        int high = Count;
+        while (low < high)
+        {
+            int middle = (low + high) >>> 1;
+            if (_values[(middle * 4) + 1] <= y)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        return low;
+    }
+
+    /// <summary>Whether any band intrudes at all.</summary>
+    public bool Intrudes
+    {
+        get
+        {
+            for (int i = 0; i < _values.Length; i += 4)
+            {
+                if (_values[i + 2] > 0.0f || _values[i + 3] > 0.0f)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <inheritdoc/>
+    public bool Equals(FloatBands? other) =>
+        other is not null && _values.AsSpan().SequenceEqual(other._values);
+
+    /// <inheritdoc/>
+    public override bool Equals(object? obj) => Equals(obj as FloatBands);
+
+    /// <inheritdoc/>
+    public override int GetHashCode()
+    {
+        var hash = new HashCode();
+        foreach (float value in _values)
+        {
+            hash.Add(value);
+        }
+
+        return hash.ToHashCode();
+    }
+}
+
 /// <summary>Context for computing the intrinsic width contribution of a set of floats.</summary>
 public sealed class FloatIntrinsicWidthCalculator(AvailableSpace availableWidth)
 {
     private readonly AvailableSpace _availableWidth = availableWidth;
     private float _contribution;
+    private float _widest;
 
     /// <summary>Add a float to the computation.</summary>
     public void AddFloat(float width, FloatDirection direction, Clear clear)
     {
+        _widest = Sys.F32Max(_widest, width);
         switch (_availableWidth.Kind)
         {
             case AvailableSpaceKind.Definite:
-                // We will never hit this code path with definite available space.
+                // DEVIATION from vendor/taffy/src/compute/float.rs, which assumes a definite
+                // width never reaches here and counted nothing: an absolutely positioned box
+                // holding only floats shrank to 0 wide. Shrink-to-fit: the floats side by
+                // side, as wide as the space allows, never narrower than the widest.
+                _contribution += width;
                 break;
             case AvailableSpaceKind.MinContent:
                 _contribution = Sys.F32Max(_contribution, width);
@@ -540,5 +806,7 @@ public sealed class FloatIntrinsicWidthCalculator(AvailableSpace availableWidth)
     }
 
     /// <summary>Get the computed float contribution to intrinsic width.</summary>
-    public float Result() => _contribution;
+    public float Result() => _availableWidth.Kind == AvailableSpaceKind.Definite
+        ? Sys.F32Max(_widest, Sys.F32Min(_contribution, Sys.F32Max(_availableWidth.Unwrap(), 0.0f)))
+        : _contribution;
 }

@@ -72,11 +72,19 @@ public static class Compute
 
                 var minSize = blockStyle.MinSize
                     .MaybeResolve(parentSize, calc)
-                    .MaybeApplyAspectRatio(aspectRatio)
+                    .TransferLimitThroughAspectRatio(
+                        aspectRatio,
+                        blockStyle.Size.MaybeResolve(parentSize, calc),
+                        blockStyle.MaxSize.MaybeResolve(parentSize, calc),
+                        isMinimum: true)
                     .MaybeAdd(boxSizingAdjustment);
                 var maxSize = blockStyle.MaxSize
                     .MaybeResolve(parentSize, calc)
-                    .MaybeApplyAspectRatio(aspectRatio)
+                    .TransferLimitThroughAspectRatio(
+                        aspectRatio,
+                        blockStyle.Size.MaybeResolve(parentSize, calc),
+                        blockStyle.MinSize.MaybeResolve(parentSize, calc),
+                        isMinimum: false)
                     .MaybeAdd(boxSizingAdjustment);
                 var clampedStyleSize = blockStyle.Size
                     .MaybeResolve(parentSize, calc)

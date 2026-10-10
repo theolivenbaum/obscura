@@ -20,6 +20,32 @@ public static partial class ComputedStyle
         return style;
     }
 
+    /// <summary>
+    /// Every HTML element name the port's UA defaults know, current and obsolete. A name
+    /// outside it (an autonomous custom element, or an unknown tag) has no UA display rule.
+    /// </summary>
+    private static readonly HashSet<string> KnownHtmlTags = new(StringComparer.Ordinal)
+    {
+        "a", "abbr", "address", "area", "article", "aside", "audio", "b", "base", "bdi", "bdo",
+        "blockquote", "body", "br", "button", "canvas", "caption", "cite", "code", "col",
+        "colgroup", "data", "datalist", "dd", "del", "details", "dfn", "dialog", "div", "dl", "dt",
+        "em", "embed", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3",
+        "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html", "i", "iframe", "img", "input",
+        "ins", "kbd", "label", "legend", "li", "link", "main", "map", "mark", "menu", "meta",
+        "meter", "nav", "noscript", "object", "ol", "optgroup", "option", "output", "p", "param",
+        "picture", "pre", "progress", "q", "rp", "rt", "ruby", "s", "samp", "script", "search",
+        "section", "select", "slot", "small", "source", "span", "strong", "style", "sub",
+        "summary", "sup", "table", "tbody", "td", "template", "textarea", "tfoot", "th", "thead",
+        "time", "title", "tr", "track", "u", "ul", "var", "video", "wbr", "math", "svg",
+        "acronym", "applet", "basefont", "bgsound", "big", "blink", "center", "dir", "font",
+        "frame", "frameset", "image", "isindex", "keygen", "listing", "marquee", "menuitem",
+        "multicol", "nextid", "nobr", "noembed", "noframes", "plaintext", "rb", "rtc", "spacer",
+        "strike", "tt", "xmp", "selectedcontent",
+    };
+
+    private static bool IsUnknownHtmlTag(string tag) =>
+        tag.Length != 0 && !KnownHtmlTags.Contains(tag);
+
     /// <summary>Rust <c>ua_style</c>: the built-in UA defaults for an HTML-namespace tag.</summary>
     public static LayoutStyle UaStyle(string tag) => UaStyle(tag, null);
 
@@ -64,8 +90,21 @@ public static partial class ComputedStyle
                 or "time" or "s" or "u" or "del" or "ins" or "tt" or "big" or "bdi" or "bdo" or "br"
                 or "wbr" or "data" or "output" or "label" or "ruby" or "rt" or "rp" => Display.Inline,
             "tr" => Display.Flex,
+
+            // DEVIATION from crates/obscura-render/src/style.rs, which makes every other tag a
+            // block. `display` initially is `inline`, and Chromium's UA sheet names no
+            // autonomous custom element or unknown tag, nor these phrasing elements, so they
+            // are inline (Chromium 141 reports `inline` for all of them). A block custom
+            // element (msn.com's `cs-common-settings-dialog`) widened msn's header until its
+            // overflow logic hid the Sign in button.
+            "picture" or "map" or "nobr" or "acronym" or "strike" or "blink" or "rb" or "rtc"
+                or "spacer" => Display.Inline,
+            _ when ns is null or PocketCalculator.Dom.Namespaces.Html && IsUnknownHtmlTag(tag) =>
+                Display.Inline,
             _ => Display.Block,
         };
+
+        style.ListItemDisplay = tag == "li";
 
         if (tag == "slot")
         {
@@ -75,7 +114,7 @@ public static partial class ComputedStyle
         }
         else if (tag == "center")
         {
-            style.TextAlign = Layout.AlignItems.Center;
+            style.TextAlignKeyword = TextAlignKeyword.Center;
             style.LegacyCenter = true;
         }
         else if (tag is "head" or "script" or "style" or "title" or "meta" or "link" or "noscript"
@@ -124,11 +163,13 @@ public static partial class ComputedStyle
             {
                 style.ListStyle = PocketCalculator.Render.ListStyle.Disc;
                 style.Padding = style.Padding with { Left = 40.0f };
+                style.UaListPadding = true;
             }
             else if (tag == "ol")
             {
                 style.ListStyle = PocketCalculator.Render.ListStyle.Decimal;
                 style.Padding = style.Padding with { Left = 40.0f };
+                style.UaListPadding = true;
             }
         }
         else if (tag is "b" or "strong")
@@ -146,6 +187,8 @@ public static partial class ComputedStyle
         }
         else if (tag == "iframe")
         {
+            // See the replaced-element arm below: an iframe is inline in Chromium.
+            style.Display = Display.Inline;
             style.Border = new Edges(2.0f, 2.0f, 2.0f, 2.0f);
             style.BorderModel = style.BorderModel with
             {
@@ -158,7 +201,7 @@ public static partial class ComputedStyle
             style.Cursor = "default";
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
-            style.TextAlign = Layout.AlignItems.Center;
+            style.TextAlignKeyword = TextAlignKeyword.Center;
             style.BoxSizing = BoxSizing.BorderBox;
             style.Padding = new Edges(1.0f, 6.0f, 1.0f, 6.0f);
 
@@ -193,10 +236,28 @@ public static partial class ComputedStyle
             // with an inherited `line-height: 1.4` (Tesserae sets one) every button came out
             // 38px tall against Chromium's 21px, and its label box two line-heights tall
             // instead of one. See "Known deviations" in todo.md.
+            //
+            // The same shorthand resets font-weight and font-style to normal, so a control
+            // inside a bold or italic parent stays 400 / normal (Chromium 141) - every
+            // control arm here sets both. DEVIATION from crates/obscura-render, which lets
+            // them inherit.
             style.FontSize = 13.333_333f;
+            style.FontWeight = "400";
+            style.FontStyleItalic = false;
+            style.FontVariantCaps = "normal";
+            style.FontStretch = 1f;
             style.FontFamily = "arial";
             style.FontFamilySpecified = "Arial";
             style.LineHeight = PocketCalculator.Render.LineHeight.Normal;
+        }
+        else if (tag is "meter" or "progress")
+        {
+            // DEVIATION from crates/obscura-render/src/style.rs, which leaves both at the
+            // default `block`. Chromium's UA sheet makes them `inline-block` (measured on
+            // Chromium 141: an unstyled meter is an 80x16 box on the text line, not a
+            // viewport-wide block). See "Known deviations" in todo.md.
+            style.Display = Display.Inline;
+            style.IsInlineBlock = true;
         }
         else if (tag == "select")
         {
@@ -204,6 +265,10 @@ public static partial class ComputedStyle
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
             style.FontSize = 13.333_333f;
+            style.FontWeight = "400";
+            style.FontStyleItalic = false;
+            style.FontVariantCaps = "normal";
+            style.FontStretch = 1f;
             style.FontFamily = "arial";
             style.FontFamilySpecified = "Arial";
             style.LineHeight = PocketCalculator.Render.LineHeight.Normal;
@@ -224,6 +289,10 @@ public static partial class ComputedStyle
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
             style.FontSize = 13.333_333f;
+            style.FontWeight = "400";
+            style.FontStyleItalic = false;
+            style.FontVariantCaps = "normal";
+            style.FontStretch = 1f;
             style.FontFamily = "arial";
             style.FontFamilySpecified = "Arial";
             style.LineHeight = PocketCalculator.Render.LineHeight.Normal;
@@ -266,6 +335,10 @@ public static partial class ComputedStyle
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
             style.FontSize = 13.333_333f;
+            style.FontWeight = "400";
+            style.FontStyleItalic = false;
+            style.FontVariantCaps = "normal";
+            style.FontStretch = 1f;
             style.FontFamily = "monospace";
             style.FontFamilySpecified = "monospace";
             style.LineHeight = PocketCalculator.Render.LineHeight.Normal;
@@ -344,8 +417,22 @@ public static partial class ComputedStyle
             style.OverflowClipMargin = "content-box";
             RecomputeOverflow(style);
         }
+        else if (tag is "embed" or "object" or "audio")
+        {
+            // DEVIATION from crates/obscura-render/src/style.rs, whose display arm leaves every
+            // replaced element but `img` at the default `block`. Chromium's UA sheet gives them
+            // no display, so they are `inline`: an atomic inline on the text line, sized
+            // 300x150 (embed, object) or 300x54 (audio with controls) by default rather than
+            // stretched to the containing block. Measured on Chromium 141, render-repros/
+            // replaced-sizing. See "Known deviations" in todo.md.
+            style.Display = Display.Inline;
+        }
         else if (tag is "canvas" or "video")
         {
+            // Inline, as `embed` and `object` above (Chromium: `canvas`, `video` and `iframe`
+            // are atomic inlines; the Rust reference makes them blocks).
+            style.Display = Display.Inline;
+
             // The same UA rule as `img`: a replaced element clips to its content box.
             style.OverflowAxesSet = true;
             style.OverflowSpecifiedX = 1;
@@ -787,6 +874,11 @@ public static partial class ComputedStyle
     /// <summary>Rust <c>set_padding_side</c>.</summary>
     internal static void SetPaddingSide(LayoutStyle style, int index, string value)
     {
+        if (index is 1 or 3)
+        {
+            style.UaListPadding = false;
+        }
+
         string trimmed = value.Trim();
         if (DeferredLengthExpression(trimmed) is { } expression)
         {
@@ -969,6 +1061,18 @@ public static partial class ComputedStyle
     }
 
     /// <summary>Rust <c>apply_text_indent</c>.</summary>
+    /// <summary>A <c>text-align</c> / <c>text-align-last</c> keyword other than <c>auto</c>.</summary>
+    internal static TextAlignKeyword? ParseTextAlignKeyword(string value) => value switch
+    {
+        "start" => TextAlignKeyword.Start,
+        "end" => TextAlignKeyword.End,
+        "left" => TextAlignKeyword.Left,
+        "right" => TextAlignKeyword.Right,
+        "center" => TextAlignKeyword.Center,
+        "justify" => TextAlignKeyword.Justify,
+        _ => null,
+    };
+
     internal static void ApplyTextIndent(LayoutStyle style, string value)
     {
         switch (CssText.AsciiLower(value.Trim()))
@@ -1037,6 +1141,13 @@ public static partial class ComputedStyle
     /// <summary>Rust <c>apply_font_shorthand</c>.</summary>
     internal static void ApplyFontShorthand(LayoutStyle style, string value)
     {
+        string keyword = CssText.AsciiLower(value.Trim());
+        if (keyword is "inherit" or "initial" or "unset" or "revert" or "revert-layer")
+        {
+            ApplyFontShorthandKeyword(style, keyword);
+            return;
+        }
+
         List<string> tokens = SplitWsParen(value);
         int sizeIndex = -1;
         string size = string.Empty;
@@ -1093,6 +1204,8 @@ public static partial class ComputedStyle
 
         // The shorthand resets every constituent before applying supplied values.
         style.FontStyleItalic = false;
+        style.FontVariantCaps = "normal";
+        style.FontStretch = 1f;
         style.FontWeight = "400";
         style.FontOpticalSizing = PocketCalculator.Render.FontOpticalSizing.Auto;
         style.FontVariationSettings = [];
@@ -1104,6 +1217,15 @@ public static partial class ComputedStyle
             if (lower == "italic" || lower.StartsWith("oblique", StringComparison.Ordinal))
             {
                 style.FontStyleItalic = true;
+            }
+            else if (lower == "small-caps")
+            {
+                // CSS 2.1 font-variant: the only non-normal value the shorthand accepts.
+                style.FontVariantCaps = lower;
+            }
+            else if (FontStretchKeyword(lower) is { } stretch)
+            {
+                style.FontStretch = stretch;
             }
             else if (SpecifiedFontWeight(lower) is { } weight)
             {
@@ -1121,6 +1243,77 @@ public static partial class ComputedStyle
         style.FontFamily = CssText.AsciiLower(families);
         style.FontFamilySpecified = SerializeFontFamilyList(families);
     }
+
+    /// <summary>
+    /// A CSS-wide keyword given to the <c>font</c> shorthand applies to every longhand it
+    /// sets.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/style.rs, whose shorthand parser looks for a
+    /// font-size token, finds none in `inherit`, and drops the declaration. So the ubiquitous
+    /// reset `button, input, optgroup, select, textarea { font: inherit }` left every control
+    /// on the user-agent `13.333px Arial` while Chromium gives it the page's font. All of the
+    /// font longhands are inherited, so `unset` is `inherit`; `initial` is Chromium's
+    /// `normal 400 16px/normal "Times New Roman"`; `revert` keeps the cascaded value, which
+    /// is how every longhand here treats it. Of the font-variant longhands only
+    /// `font-variant-caps` is recorded. See "Known deviations" in todo.md.
+    /// </remarks>
+    private static void ApplyFontShorthandKeyword(LayoutStyle style, string keyword)
+    {
+        switch (keyword)
+        {
+            case "inherit":
+            case "unset":
+                style.FontStyleItalic = null;
+                style.FontWeight = "inherit";
+                ApplyFontSize(style, "inherit");
+                style.LineHeight = null;
+                style.LineHeightExpression = null;
+                style.FontFamily = null;
+                style.FontFamilySpecified = null;
+                style.FontOpticalSizing = null;
+                style.FontVariationSettings = null;
+                style.FontVariantCaps = null;
+                style.FontStretch = null;
+                break;
+            case "initial":
+                style.FontStyleItalic = false;
+                style.FontVariantCaps = "normal";
+                style.FontStretch = 1f;
+                style.FontWeight = "400";
+                ApplyFontSize(style, "initial");
+                style.LineHeight = PocketCalculator.Render.LineHeight.Normal;
+                style.LineHeightExpression = null;
+                style.FontFamily = InitialFontFamily;
+                style.FontFamilySpecified = InitialFontFamilySpecified;
+                style.FontOpticalSizing = PocketCalculator.Render.FontOpticalSizing.Auto;
+                style.FontVariationSettings = [];
+                break;
+        }
+    }
+
+    /// <summary>The fraction of normal width a <c>font-stretch</c> keyword names.</summary>
+    internal static float? FontStretchKeyword(string lower) => lower switch
+    {
+        "ultra-condensed" => 0.5f,
+        "extra-condensed" => 0.625f,
+        "condensed" => 0.75f,
+        "semi-condensed" => 0.875f,
+        "normal" => 1f,
+        "semi-expanded" => 1.125f,
+        "expanded" => 1.25f,
+        "extra-expanded" => 1.5f,
+        "ultra-expanded" => 2f,
+        _ => null,
+    };
+
+    /// <summary>
+    /// Chromium's initial <c>font-family</c>, which the face matcher resolves to the embedded
+    /// serif face.
+    /// </summary>
+    private const string InitialFontFamily = "times new roman";
+
+    private const string InitialFontFamilySpecified = "\"Times New Roman\"";
 
     /// <summary>
     /// Re-serialize a <c>font-family</c> list the way a computed-style query reports it: the
@@ -1282,6 +1475,22 @@ public static partial class ComputedStyle
                 ApplyDisplay(style, value);
                 return true;
 
+            // Not modeled by crates/obscura-render. Recorded so the end of the cascade can
+            // apply Chromium's form-control display adjustment, which only a control that
+            // keeps its native appearance takes (see AdjustFormControlStyle).
+            case "appearance":
+            case "-webkit-appearance":
+            {
+                string appearance = CssText.AsciiLower(value.Trim());
+                if (appearance.Length == 0 || appearance.Contains(' '))
+                {
+                    return false;
+                }
+
+                style.AppearanceSpecified = appearance is "revert" or "revert-layer" ? null : appearance;
+                return true;
+            }
+
             case "container-type":
                 if (CssText.EqualsAscii(value, "inherit"))
                 {
@@ -1405,11 +1614,32 @@ public static partial class ComputedStyle
                 return true;
 
             case "aspect-ratio":
-                style.AspectRatio = ParseAspectRatio(value);
+            {
+                // DEVIATION from crates/obscura-render/src/style.rs, which takes the ratio
+                // of `auto <ratio>` and drops `auto`. `auto` means the natural ratio wins
+                // where the box has one, and the given ratio is only the fallback: Chromium
+                // 141 lays a 150x36 image with `aspect-ratio: auto 1; width: 120px` out at
+                // 120x28.8, not 120x120. A natural ratio already mapped (a canvas's bitmap,
+                // an svg's or an image's width and height) is kept; one that arrives with
+                // the image replaces the fallback (AspectRatioIsMapped). See "Known
+                // deviations" in todo.md.
+                bool auto = false;
+                foreach (string token in value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    auto |= CssText.EqualsAscii(token, "auto");
+                }
+
                 style.AspectRatioSpecified = SerializeAspectRatio(value);
-                style.AspectRatioIsMapped = false;
+                if (auto && style.AspectRatioIsIntrinsic && style.AspectRatio is not null)
+                {
+                    return true;
+                }
+
+                style.AspectRatio = ParseAspectRatio(value);
+                style.AspectRatioIsMapped = auto && style.AspectRatio is not null;
                 style.AspectRatioIsIntrinsic = false;
                 return true;
+            }
 
             case "margin":
                 ApplyMarginShorthand(style, value);
@@ -1528,6 +1758,21 @@ public static partial class ComputedStyle
 
                 return true;
 
+            case "clip":
+                // DEVIATION from crates/obscura-render/src/style.rs, which ignores `clip`. The
+                // visually-hidden idiom `position: absolute; clip: rect(0 0 0 0)` (msn.com's
+                // "Skip to footer" link) painted in full.
+                if (CssText.AsciiLower(value.Trim()) is "auto" or "initial" or "unset" or "revert" or "revert-layer")
+                {
+                    style.Clip = null;
+                }
+                else if (ParseClipRect(value) is { } clipRect)
+                {
+                    style.Clip = clipRect;
+                }
+
+                return true;
+
             case "border":
                 ApplyBorderShorthand(style, null, value);
                 return true;
@@ -1641,7 +1886,7 @@ public static partial class ComputedStyle
             case "background":
                 // A shorthand resets every omitted background longhand. An empty
                 // value is invalid (an unresolved var()), so keep the prior winner.
-                if (value.Trim().Length != 0)
+                if (value.AsSpan().Trim().Length != 0)
                 {
                     style.BackgroundColor = null;
                     style.BackgroundColorIsSrgbFunction = false;
@@ -1685,7 +1930,7 @@ public static partial class ComputedStyle
 
             case "background-size":
                 style.BackgroundSize = ParseBackgroundSize(value);
-                style.BackgroundSizeExpression = value.Trim().Length != 0 ? value.Trim() : null;
+                style.BackgroundSizeExpression = value.AsSpan().Trim().Length != 0 ? value.Trim() : null;
                 style.BackgroundSizeFit = ParseBackgroundSizeFit(value);
                 return true;
 
@@ -1802,6 +2047,12 @@ public static partial class ComputedStyle
                     case "revert-layer":
                         break;
 
+                    // Not inherited: Chromium's initial family, reported as such.
+                    case "initial":
+                        style.FontFamily = InitialFontFamily;
+                        style.FontFamilySpecified = InitialFontFamilySpecified;
+                        break;
+
                     default:
                         if (family.Length != 0)
                         {
@@ -1913,23 +2164,24 @@ public static partial class ComputedStyle
             }
 
             case "text-align":
-                switch (value)
+                if (ParseTextAlignKeyword(value) is { } keyword)
                 {
-                    case "right":
-                    case "end":
-                        style.TextAlign = Layout.AlignItems.FlexEnd;
-                        style.LegacyCenter = false;
-                        break;
-                    case "center":
-                        style.TextAlign = Layout.AlignItems.Center;
-                        style.LegacyCenter = false;
-                        break;
-                    case "left":
-                    case "start":
-                    case "justify":
-                        style.TextAlign = Layout.AlignItems.FlexStart;
-                        style.LegacyCenter = false;
-                        break;
+                    style.TextAlignKeyword = keyword;
+                    style.LegacyCenter = false;
+                }
+
+                return true;
+
+            case "text-align-last":
+                if (value == "auto")
+                {
+                    style.TextAlignLast = null;
+                    style.TextAlignLastAuto = true;
+                }
+                else if (ParseTextAlignKeyword(value) is { } last)
+                {
+                    style.TextAlignLast = last;
+                    style.TextAlignLastAuto = false;
                 }
 
                 return true;
@@ -2160,12 +2412,23 @@ public static partial class ComputedStyle
                 {
                     case "left":
                         style.Float = PocketCalculator.Render.Float.Left;
+                        style.LogicalFloatClear &= unchecked((byte)~1);
                         break;
                     case "right":
                         style.Float = PocketCalculator.Render.Float.Right;
+                        style.LogicalFloatClear &= unchecked((byte)~1);
+                        break;
+                    case "inline-start":
+                        style.Float = PocketCalculator.Render.Float.Left;
+                        style.LogicalFloatClear |= 1;
+                        break;
+                    case "inline-end":
+                        style.Float = PocketCalculator.Render.Float.Right;
+                        style.LogicalFloatClear |= 1;
                         break;
                     case "none":
                         style.Float = null;
+                        style.LogicalFloatClear &= unchecked((byte)~1);
                         break;
                 }
 
@@ -2475,14 +2738,20 @@ public static partial class ComputedStyle
                 return true;
 
             case "clear":
-                style.Clear = CssText.AsciiLower(value.Trim()) switch
+            {
+                string clearValue = CssText.AsciiLower(value.Trim());
+                style.Clear = clearValue switch
                 {
                     "left" or "inline-start" => PocketCalculator.Render.Clear.Left,
                     "right" or "inline-end" => PocketCalculator.Render.Clear.Right,
                     "both" => PocketCalculator.Render.Clear.Both,
                     _ => null,
                 };
+                style.LogicalFloatClear = clearValue is "inline-start" or "inline-end"
+                    ? (byte)(style.LogicalFloatClear | 2)
+                    : (byte)(style.LogicalFloatClear & ~2);
                 return true;
+            }
 
             case "vertical-align":
                 style.VerticalAlign = CssText.AsciiLower(value.Trim()) switch
@@ -2503,13 +2772,36 @@ public static partial class ComputedStyle
                 return true;
 
             case "list-style":
-                // Shorthand: type | position | image in any order.
+                // Shorthand: type | position | image in any order; an omitted position is reset.
+                style.ListStyleInside = false;
                 foreach (string token in SplitWhitespace(value))
                 {
                     if (ListStyleKeyword(token) is { } listStyle)
                     {
                         style.ListStyle = listStyle;
                     }
+                    else if (CssText.EqualsAscii(token, "inside"))
+                    {
+                        style.ListStyleInside = true;
+                    }
+                }
+
+                return true;
+
+            case "list-style-position":
+                switch (CssText.AsciiLower(value.Trim()))
+                {
+                    case "inside":
+                        style.ListStyleInside = true;
+                        break;
+                    case "outside":
+                    case "initial":
+                        style.ListStyleInside = false;
+                        break;
+                    case "inherit":
+                    case "unset":
+                        style.ListStyleInside = null;
+                        break;
                 }
 
                 return true;
@@ -2525,7 +2817,14 @@ public static partial class ComputedStyle
                 }
 
                 style.LineHeightExpression = null;
-                if (CssText.EqualsAscii(trimmed, "normal"))
+                if (CssText.EqualsAscii(trimmed, "revert") || CssText.EqualsAscii(trimmed, "revert-layer"))
+                {
+                    return true;
+                }
+
+                // `initial` is `normal`; `inherit` and `unset` fall through to the unitless
+                // branch below, whose failed parse leaves null, which is inherit.
+                if (CssText.EqualsAscii(trimmed, "normal") || CssText.EqualsAscii(trimmed, "initial"))
                 {
                     style.LineHeight = PocketCalculator.Render.LineHeight.Normal;
                 }
@@ -2645,11 +2944,95 @@ public static partial class ComputedStyle
                 };
                 return true;
 
-            case "font-style":
+            // Not modeled by crates/obscura-render, so getComputedStyle answered the empty
+            // string for both. Recorded and reported, not rendered: the port synthesises no
+            // small capitals and the embedded faces have no width axis.
+            case "font-variant":
+            case "font-variant-caps":
             {
                 string lower = CssText.AsciiLower(value.Trim());
-                style.FontStyleItalic = lower.StartsWith("italic", StringComparison.Ordinal)
-                    || lower.StartsWith("oblique", StringComparison.Ordinal);
+                switch (lower)
+                {
+                    case "inherit":
+                    case "unset":
+                        style.FontVariantCaps = null;
+                        return true;
+                    case "revert":
+                    case "revert-layer":
+                        return true;
+                    case "initial":
+                    case "normal":
+                    case "none" when name == "font-variant":
+                        style.FontVariantCaps = "normal";
+                        return true;
+                }
+
+                string? caps = null;
+                foreach (string token in SplitWhitespace(lower))
+                {
+                    if (token is "small-caps" or "all-small-caps" or "petite-caps"
+                        or "all-petite-caps" or "unicase" or "titling-caps")
+                    {
+                        caps = token;
+                    }
+                    else if (name == "font-variant-caps")
+                    {
+                        return false;
+                    }
+                }
+
+                if (caps is null && name == "font-variant-caps")
+                {
+                    return false;
+                }
+
+                style.FontVariantCaps = caps ?? "normal";
+                return true;
+            }
+
+            case "font-stretch":
+            {
+                string lower = CssText.AsciiLower(value.Trim());
+                if (lower is "inherit" or "unset")
+                {
+                    style.FontStretch = null;
+                }
+                else if (lower == "initial")
+                {
+                    style.FontStretch = 1f;
+                }
+                else if (FontStretchKeyword(lower) is { } keywordStretch)
+                {
+                    style.FontStretch = keywordStretch;
+                }
+                else if (lower.EndsWith('%') && ParseF32(lower[..^1].Trim()) is { } percent && percent >= 0f)
+                {
+                    style.FontStretch = percent / 100f;
+                }
+                else if (lower is not ("revert" or "revert-layer"))
+                {
+                    return false;
+                }
+
+                return true;
+            }
+
+            case "font-style":
+            {
+                // `font-style` is inherited, so `inherit` and `unset` clear the cascaded value
+                // (null reads as "take the parent's"); they used to compute to `normal`.
+                // `revert` keeps the cascaded value, as the other font longhands do.
+                string lower = CssText.AsciiLower(value.Trim());
+                if (lower is "inherit" or "unset")
+                {
+                    style.FontStyleItalic = null;
+                }
+                else if (lower is not ("revert" or "revert-layer"))
+                {
+                    style.FontStyleItalic = lower.StartsWith("italic", StringComparison.Ordinal)
+                        || lower.StartsWith("oblique", StringComparison.Ordinal);
+                }
+
                 return true;
             }
 
@@ -3007,8 +3390,14 @@ public static partial class ComputedStyle
 
         if (value is "none" or "flex" or "inline-flex" or "inline" or "inline-block" or "grid"
             or "inline-grid" or "block" or "flow-root" or "table" or "inline-table" or "table-cell"
-            or "-webkit-box" or "-webkit-inline-box" or "contents" or "inherit" or "initial" or "unset")
+            or "-webkit-box" or "-webkit-inline-box" or "contents" or "inherit" or "initial" or "unset"
+            or "list-item")
         {
+            // DEVIATION from crates/obscura-render/src/style.rs, which rejects `list-item` and
+            // draws a marker for every `li` whatever its display. Only a list-item box has a
+            // marker: grammarly.com's carousel slides are `li { display: block }` flex items,
+            // and Chromium 141 draws no bullet in front of its cards.
+            style.ListItemDisplay = value == "list-item";
             // Every valid authored display value replaces the complete outer/inner
             // display pair, including the UA table/control approximation and any
             // internal-table keyword an earlier declaration recorded.
@@ -3078,6 +3467,7 @@ public static partial class ComputedStyle
                 style.IsInlineBlock = true;
                 break;
             case "block":
+            case "list-item":
                 style.Display = Display.Block;
                 break;
             case "flow-root":

@@ -24,7 +24,8 @@ internal static class TextLayout
         float? widthOpt,
         Wrap wrap,
         Align? alignOpt,
-        float? matchMonoWidth)
+        float? matchMonoWidth,
+        LineAlignOptions options = default)
     {
         var layoutLines = new List<LayoutLine>(1);
         var visualLines = new List<VisualLine>();
@@ -162,6 +163,17 @@ internal static class TextLayout
                                 current = new VisualLine();
                                 blanks = 0;
                             }
+                            else if (current.Ranges.Count > 0 && !word.Blank)
+                            {
+                                // DEVIATION from cosmic-text's layout_to_buffer, which kept
+                                // the word on the line when it was the first of its bidi span
+                                // to not fit: the earlier spans then overflowed the line
+                                // (Chromium 141 breaks before "English" in a 300px dir=rtl
+                                // line of Hebrew 271px wide, where this gave a 329px line).
+                                visualLines.Add(current);
+                                current = new VisualLine();
+                                blanks = 0;
+                            }
 
                             if (word.Blank)
                             {
@@ -261,6 +273,17 @@ internal static class TextLayout
                                 current = new VisualLine();
                                 blanks = 0;
                             }
+                            else if (current.Ranges.Count > 0 && !word.Blank)
+                            {
+                                // DEVIATION from cosmic-text's layout_to_buffer, which kept
+                                // the word on the line when it was the first of its bidi span
+                                // to not fit: the earlier spans then overflowed the line
+                                // (Chromium 141 breaks before "English" in a 300px dir=rtl
+                                // line of Hebrew 271px wide, where this gave a 329px line).
+                                visualLines.Add(current);
+                                current = new VisualLine();
+                                blanks = 0;
+                            }
 
                             if (word.Blank)
                             {
@@ -322,14 +345,35 @@ internal static class TextLayout
             float maxBelow = float.NegativeInfinity;
             float relativeAbove = float.NegativeInfinity;
             float relativeBelow = float.NegativeInfinity;
-            float correction = (align, shape.Rtl) switch
+            // DEVIATION from cosmic-text's layout_to_buffer, which aligns the line's whole
+            // advance and justifies every blank on it. CSS Text 3 4.1.3: white space at the end
+            // of a line is removed (normal, nowrap, pre-line) or hangs (pre-wrap, at a soft
+            // wrap), so it takes no part in alignment or justification. Chromium 141 centres
+            // "Lorem ... elit " in 400px at 9.69 where the whole advance put it at 7.47. The last
+            // line of the paragraph takes text-align-last, and justify's is start-aligned.
+            bool paragraphEnd = index == visualCount - 1 && !options.SoftWrapEnd;
+            Align lineAlign = paragraphEnd && options.Last is { } lastAlign ? lastAlign : align;
+            float contentW = visual.W;
+            uint contentSpaces = visual.Spaces;
+            int trailingFrom = int.MaxValue;
+            bool startAligned = lineAlign == (shape.Rtl ? Align.Right : Align.Left);
+            if (!startAligned
+                && (options.Trailing == TrailingSpace.Removed
+                    || (options.Trailing == TrailingSpace.HangsAtSoftWrap && !paragraphEnd)))
             {
-                (Align.Left, true) => lineWidth - visual.W,
+                (float hang, uint hangSpaces, trailingFrom) = TrailingBlanks(shape, visual, fontSize);
+                contentW -= hang;
+                contentSpaces -= Math.Min(hangSpaces, contentSpaces);
+            }
+
+            float correction = (lineAlign, shape.Rtl) switch
+            {
+                (Align.Left, true) => lineWidth - contentW,
                 (Align.Left, false) => 0f,
                 (Align.Right, true) => 0f,
-                (Align.Right, false) => lineWidth - visual.W,
-                (Align.Center, _) => (lineWidth - visual.W) / 2f,
-                (Align.End, _) => lineWidth - visual.W,
+                (Align.Right, false) => lineWidth - contentW,
+                (Align.Center, _) => (lineWidth - contentW) / 2f,
+                (Align.End, _) => lineWidth - contentW,
                 _ => 0f,
             };
 
@@ -342,8 +386,9 @@ internal static class TextLayout
                 x += correction;
             }
 
-            float justification = align == Align.Justified && visual.Spaces > 0 && index != visualCount - 1
-                ? (lineWidth - visual.W) / visual.Spaces
+            float justification = lineAlign == Align.Justified && contentSpaces > 0
+                && (options.Last is null ? index != visualCount - 1 : !paragraphEnd)
+                ? (lineWidth - contentW) / contentSpaces
                 : 0f;
 
             void ProcessRange((int Start, int End) range)
@@ -362,7 +407,8 @@ internal static class TextLayout
                         {
                             ShapeGlyph glyph = word.Glyphs[g];
                             float glyphFontSize = glyph.Metrics?.FontSize ?? fontSize;
-                            float xAdvance = (glyphFontSize * glyph.XAdvance) + (word.Blank ? justification : 0f);
+                            float xAdvance = (glyphFontSize * glyph.XAdvance)
+                                + (word.Blank && glyph.Start < trailingFrom ? justification : 0f);
                             if (shape.Rtl)
                             {
                                 x -= xAdvance;
@@ -390,6 +436,7 @@ internal static class TextLayout
                                 Color = glyph.Color,
                                 Metadata = glyph.Metadata,
                                 FakeItalic = glyph.FakeItalic,
+                                FakeBold = glyph.FakeBold,
                             });
                             if (!shape.Rtl)
                             {
@@ -437,7 +484,7 @@ internal static class TextLayout
 
             layoutLines.Add(new LayoutLine
             {
-                W = align != Align.Justified ? visual.W : (shape.Rtl ? startX - x : x),
+                W = lineAlign != Align.Justified ? visual.W : (shape.Rtl ? startX - x : x),
                 MaxAbove = maxAbove,
                 MaxBelow = maxBelow,
                 LineRelativeAbove = relativeAbove,
@@ -457,6 +504,71 @@ internal static class TextLayout
         }
 
         return layoutLines;
+    }
+
+    /// <summary>
+    /// The white space a visual line ends with in logical order: its advance, how many blank
+    /// words it is, and the text offset it starts at (every blank glyph at or after it trails).
+    /// </summary>
+    private static (float Advance, uint Spaces, int From) TrailingBlanks(ShapeLine shape, VisualLine visual, float fontSize)
+    {
+        int contentEnd = int.MinValue;
+        foreach ((int spanIndex, (int startingWord, int startingGlyph), (int endingWord, int endingGlyph)) in visual.Ranges)
+        {
+            ShapeSpan span = shape.Spans[spanIndex];
+            int last = endingWord + (endingGlyph != 0 ? 1 : 0);
+            for (int i = startingWord; i < last && i < span.Words.Count; i++)
+            {
+                ShapeWord word = span.Words[i];
+                if (word.Blank)
+                {
+                    continue;
+                }
+
+                int from = i == startingWord ? startingGlyph : 0;
+                int to = Math.Min(i == endingWord ? endingGlyph : word.Glyphs.Count, word.Glyphs.Count);
+                for (int g = from; g < to; g++)
+                {
+                    contentEnd = Math.Max(contentEnd, word.Glyphs[g].End);
+                }
+            }
+        }
+
+        float advance = 0f;
+        uint spaces = 0;
+        foreach ((int spanIndex, (int startingWord, int startingGlyph), (int endingWord, int endingGlyph)) in visual.Ranges)
+        {
+            ShapeSpan span = shape.Spans[spanIndex];
+            int last = endingWord + (endingGlyph != 0 ? 1 : 0);
+            for (int i = startingWord; i < last && i < span.Words.Count; i++)
+            {
+                ShapeWord word = span.Words[i];
+                if (!word.Blank)
+                {
+                    continue;
+                }
+
+                int from = i == startingWord ? startingGlyph : 0;
+                int to = Math.Min(i == endingWord ? endingGlyph : word.Glyphs.Count, word.Glyphs.Count);
+                bool trailing = false;
+                for (int g = from; g < to; g++)
+                {
+                    ShapeGlyph glyph = word.Glyphs[g];
+                    if (glyph.Start >= contentEnd)
+                    {
+                        advance += (glyph.Metrics?.FontSize ?? fontSize) * glyph.XAdvance;
+                        trailing = true;
+                    }
+                }
+
+                if (trailing)
+                {
+                    spaces++;
+                }
+            }
+        }
+
+        return (advance, spaces, contentEnd == int.MinValue ? 0 : contentEnd);
     }
 
     /// <summary>The number of glyphs <c>ProcessRange</c> emits for one visual line.</summary>

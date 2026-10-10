@@ -883,7 +883,7 @@ public static partial class ComputedStyle
                 }
                 else
                 {
-                    if (current.ToString().Trim().Length != 0)
+                    if (current.ToString().AsSpan().Trim().Length != 0)
                     {
                         terms.Add((sign, current.ToString()));
                         current.Clear();
@@ -898,7 +898,7 @@ public static partial class ComputedStyle
             }
         }
 
-        if (current.ToString().Trim().Length != 0)
+        if (current.ToString().AsSpan().Trim().Length != 0)
         {
             terms.Add((sign, current.ToString()));
         }
@@ -960,7 +960,7 @@ public static partial class ComputedStyle
             }
             else if ((character == '*' || character == '/') && depth == 0)
             {
-                if (current.ToString().Trim().Length == 0)
+                if (current.ToString().AsSpan().Trim().Length == 0)
                 {
                     return null;
                 }
@@ -975,7 +975,7 @@ public static partial class ComputedStyle
             }
         }
 
-        if (current.ToString().Trim().Length == 0)
+        if (current.ToString().AsSpan().Trim().Length == 0)
         {
             return null;
         }
@@ -1758,6 +1758,48 @@ public static partial class ComputedStyle
 
         Dimension dimension = DimensionValue(value);
         return dimension.IsAuto ? null : dimension;
+    }
+
+    /// <summary>
+    /// <c>rect(top, right, bottom, left)</c>, commas optional (CSS 2.1 11.1.2), each side a
+    /// length or <c>auto</c>. Anything else is invalid and returns <c>null</c>.
+    /// </summary>
+    internal static ClipRect? ParseClipRect(string value)
+    {
+        string trimmed = value.Trim();
+        if (!trimmed.StartsWith("rect(", StringComparison.OrdinalIgnoreCase) || !trimmed.EndsWith(')'))
+        {
+            return null;
+        }
+
+        string inner = trimmed[5..^1];
+        string[] parts = inner.Contains(',', StringComparison.Ordinal)
+            ? inner.Split(',')
+            : inner.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 4)
+        {
+            return null;
+        }
+
+        Span<float?> sides = stackalloc float?[4];
+        for (int index = 0; index < 4; index++)
+        {
+            string part = parts[index].Trim();
+            if (CssText.EqualsAscii(part, "auto"))
+            {
+                sides[index] = null;
+            }
+            else if (StrictBorderLength(part) is { } length && float.IsFinite(length))
+            {
+                sides[index] = length;
+            }
+            else
+            {
+                return null;
+            }
+        }
+
+        return new ClipRect(sides[0], sides[1], sides[2], sides[3]);
     }
 
     /// <summary>Rust <c>parse_clip_path_polygon</c>.</summary>

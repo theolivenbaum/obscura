@@ -66,10 +66,25 @@ internal static class DomCascade
                 AllAsciiDigits(height) ? $"height: {height}px" : $"height: {height}");
         }
 
-        if (style.AspectRatio is null)
+        // HTML maps width and height to aspect-ratio for img, canvas, video and an image
+        // button only; an inline svg's width and height give it its natural ratio. DEVIATION from crates/obscura-render/src/dom.rs, which maps them on
+        // every element: an iframe with width=120 height=24 and `width: 60px; height: auto`
+        // was 64x16; Chromium 141 keeps its natural 150px height (64x154).
+        if (style.AspectRatio is null
+            && node.AsElement()?.Name.Local is "img" or "canvas" or "video" or "input" or "svg")
         {
             float? aw = ParseFloat(node.GetAttribute("width"));
             float? ah = ParseFloat(node.GetAttribute("height"));
+            if (node.AsElement()?.Name.Local is "canvas")
+            {
+                // A canvas's natural size is its bitmap's, 300x150 for a missing attribute, so it
+                // always has a natural ratio (Chromium 141: `height: 24px` on a bare canvas is
+                // 48x24, `width: 50%` of 400px is 200x100). DEVIATION from
+                // crates/obscura-render/src/dom.rs, which maps a ratio only from both attributes.
+                aw ??= 300f;
+                ah ??= 150f;
+            }
+
             if (aw is { } w && ah is { } h && w > 0f && h > 0f)
             {
                 style.AspectRatio = w / h;
@@ -301,13 +316,13 @@ internal static class DomCascade
                 continue;
             }
 
-            if (source.GetAttribute("srcset") is not { } srcset || srcset.Trim().Length == 0)
+            if (source.GetAttribute("srcset") is not { } srcset || srcset.AsSpan().Trim().Length == 0)
             {
                 continue;
             }
 
             if (source.GetAttribute("media") is { } media
-                && media.Trim().Length != 0
+                && media.AsSpan().Trim().Length != 0
                 && !CssMediaQuery.AppliesForViewport(media, viewport))
             {
                 continue;
@@ -393,6 +408,52 @@ internal static class DomCascade
         internal required AnimationTimelineState AnimationTimeline { get; init; }
 
         internal HashSet<NodeId>? FreshStyles { get; init; }
+
+        /// <summary>
+        /// With <see cref="FreshStyles"/>, the nodes on a path to a fresh one
+        /// (<see cref="StylePaths"/>); the walk does not descend anywhere else. Not in
+        /// crates/obscura-render, which walks the whole document and reuses each retained
+        /// style it meets on the way.
+        /// </summary>
+        internal HashSet<NodeId>? VisitOnly { get; init; }
+    }
+
+    /// <summary>
+    /// The nodes the retained cascade has to visit: every fresh node and every node above one,
+    /// in the DOM and in the flat tree (a shadow root's host, an assigned node's slot), plus the
+    /// document. Every other node keeps its retained style and inherits nothing new: a style
+    /// change that reaches descendants or siblings is in the fresh set already
+    /// (<see cref="RetainedStylePlanner.Plan"/>).
+    /// </summary>
+    internal static HashSet<NodeId> StylePaths(DomTree tree, HashSet<NodeId> fresh)
+    {
+        HashSet<NodeId> paths = new(fresh.Count * 2) { tree.Document };
+        Stack<NodeId> pending = new(fresh);
+        while (pending.Count != 0)
+        {
+            NodeId id = pending.Pop();
+            if (!paths.Add(id) || tree.GetNode(id) is not { } node)
+            {
+                continue;
+            }
+
+            if (node.Parent is { } parent)
+            {
+                pending.Push(parent);
+            }
+
+            if (DomTraversal.RenderedParent(tree, id) is { } rendered)
+            {
+                pending.Push(rendered);
+            }
+
+            if (tree.ShadowRootInfo(id) is { } shadow)
+            {
+                pending.Push(shadow.Host);
+            }
+        }
+
+        return paths;
     }
 
     /// <summary>
@@ -555,6 +616,23 @@ internal static class DomCascade
                         style.Color = null;
                         style.BackgroundColor = null;
                         break;
+                    case "image":
+                        // DEVIATION from crates/obscura-render/src/dom.rs, which sizes an image
+                        // button as an empty text field (8x6 in Chromium's field padding and
+                        // border). Chromium lays it out and paints it as its image: no padding,
+                        // border or field background, sized like an <img> (a 150x36 source is
+                        // 150x36, `width:120px; height:24px` 120x24). See "Known deviations".
+                        style.Padding = Edges.Zero;
+                        style.Border = Edges.Zero;
+                        style.BorderModel = style.BorderModel with
+                        {
+                            SpecifiedWidths = Sides<float>.All(0f),
+                            Styles = Sides<BorderStyle>.All(BorderStyle.None),
+                        };
+                        style.BackgroundColor = null;
+                        style.NativeControlAppearance = false;
+                        style.Cursor = "pointer";
+                        break;
                     case "range":
                     case "color":
                         style.Margin = new Edges(2f, 2f, 2f, 2f);
@@ -583,6 +661,15 @@ internal static class DomCascade
             // the author cascade so a matching author `display` still wins.
             if (node.GetAttribute("hidden") is { } hidden
                 && !string.Equals(hidden, "until-found", StringComparison.OrdinalIgnoreCase))
+            {
+                style.Display = Display.None;
+            }
+
+            // UA rule `audio:not([controls]) { display: none }`. Chromium marks it !important;
+            // here an author `display` still wins, as for the other UA rules in this method.
+            if (!isSvgNamespace
+                && string.Equals(node.AsElement()?.Name.Local, "audio", StringComparison.Ordinal)
+                && node.GetAttribute("controls") is null)
             {
                 style.Display = Display.None;
             }
@@ -709,6 +796,20 @@ internal static class DomCascade
             }
 
             context.CustomProperties[id] = thisProps;
+            ComputedStyle.AdjustFormControlStyle(
+                style,
+                local,
+                string.Equals(elem.Name.Ns, Namespaces.Html, StringComparison.Ordinal),
+                string.Equals(local, "input", StringComparison.Ordinal)
+                    ? (node.GetAttribute("type") ?? "text").Trim().ToLowerInvariant()
+                    : null,
+                node.Parent is { } cascadeParent
+                    && context.Styles.TryGetValue(cascadeParent, out LayoutStyle? cascadeParentStyle)
+                    ? cascadeParentStyle.ComputedAppearance
+                    : null,
+                string.Equals(local, "select", StringComparison.Ordinal)
+                    && node.GetAttribute("multiple") is null
+                    && !(int.TryParse(node.GetAttribute("size"), out int selectSize) && selectSize > 1));
             style.IsReplacedBox |= style.ContentImage is not null;
             style.HasReplacedSizing |= style.ContentImage is not null;
             (LayoutStyle? beforePseudo,
@@ -717,7 +818,7 @@ internal static class DomCascade
                 LayoutStyle? sliderThumbPseudo,
                 LayoutStyle? scrollbarPseudo) =
                 sheet.AllPseudoStyles(tree, matcher, id, thisProps, style, containerEvaluator);
-            foreach (LayoutStyle? pseudo in new[] { beforePseudo, afterPseudo })
+            foreach (LayoutStyle? pseudo in (ReadOnlySpan<LayoutStyle?>)[beforePseudo, afterPseudo])
             {
                 if (pseudo is null)
                 {
@@ -736,6 +837,13 @@ internal static class DomCascade
                 : null;
             style.BeforePseudo = beforePseudo;
             style.AfterPseudo = afterPseudo;
+            style.MarkerText = style.ListItemDisplay
+                && string.Equals(local, "li", StringComparison.Ordinal)
+                && sheet.MarkerStyle(tree, matcher, id, thisProps, style, containerEvaluator) is
+                    { GeneratedContent: { } markerContent }
+                && markerContent.TrueForAll(static item => item is GeneratedContentItem.Text)
+                    ? string.Concat(markerContent.Select(static item => ((GeneratedContentItem.Text)item).Value))
+                    : null;
             style.PlaceholderPseudo = placeholderPseudo;
             style.SliderThumbPseudo = sliderThumbPseudo;
             if (scrollbarPseudo is not null)
@@ -873,6 +981,11 @@ internal static class DomCascade
                 List<NodeId> shadowChildren = tree.Children(shadowRoot);
                 for (int index = shadowChildren.Count - 1; index >= 0; index--)
                 {
+                    if (context.VisitOnly is { } shadowOnly && !shadowOnly.Contains(shadowChildren[index]))
+                    {
+                        continue;
+                    }
+
                     work.Add((new Visit(
                         shadowChildren[index],
                         shadowSheet,
@@ -889,6 +1002,11 @@ internal static class DomCascade
                 for (int index = assignedNodes.Count - 1; index >= 0; index--)
                 {
                     NodeId cid = assignedNodes[index];
+                    if (context.VisitOnly is { } assignedOnly && !assignedOnly.Contains(cid))
+                    {
+                        continue;
+                    }
+
                     Stylesheet assignedSheet = context.DocumentSheet;
                     if (tree.ContainingShadowRoot(cid) is { } root
                         && context.ShadowSheets.TryGetValue(root, out Stylesheet? found))
@@ -916,6 +1034,12 @@ internal static class DomCascade
 
                 // Assigned light children are cascaded from their flattened slot above.
                 if (isShadowHost && tree.AssignedSlot(cid) is not null)
+                {
+                    continue;
+                }
+
+                // A retained pass descends only towards fresh styles; see StylePaths.
+                if (context.VisitOnly is { } only && !only.Contains(cid))
                 {
                     continue;
                 }
@@ -1069,9 +1193,49 @@ internal static class DomCascade
     /// </summary>
     internal static void ResolveCssCounters(DomTree tree, Dictionary<NodeId, LayoutStyle> styles)
     {
+        // Not in crates/obscura-render, which walks the document for counters on every pass.
+        // The walk only renders the generated content of ::before/::after: with no counter()
+        // or counters() in any of it, what it would render is the zero-counter text the
+        // cascade already gave each pseudo, so nothing it could write differs.
+        if (!AnyCounterContent(styles))
+        {
+            return;
+        }
+
         CssCounterState counters = new();
         List<string> rootScopes = CounterWalk(tree, tree.Document, styles, counters);
         counters.PopCreated(rootScopes);
+    }
+
+    private static bool AnyCounterContent(Dictionary<NodeId, LayoutStyle> styles)
+    {
+        foreach (LayoutStyle style in styles.Values)
+        {
+            if (HasCounterItem(style.BeforePseudo) || HasCounterItem(style.AfterPseudo))
+            {
+                return true;
+            }
+        }
+
+        return false;
+
+        static bool HasCounterItem(LayoutStyle? pseudo)
+        {
+            if (pseudo?.GeneratedContent is not { } items)
+            {
+                return false;
+            }
+
+            foreach (GeneratedContentItem item in items)
+            {
+                if (item is not GeneratedContentItem.Text)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
     }
 
     private static List<string> CounterWalk(
@@ -1139,11 +1303,24 @@ internal static class DomCascade
     /// <summary>
     /// Compile one author stylesheet per native ShadowRoot.
     /// </summary>
+    /// <remarks>
+    /// Roots whose ordered sources are identical share one compiled sheet, and with a
+    /// <paramref name="cache"/> the sheets outlive the pass (<see cref="StylesheetCache.GetOrParseShadow"/>).
+    /// DEVIATION from crates/obscura-render, which parses each root's sheet on every pass.
+    /// </remarks>
     internal static Dictionary<NodeId, Stylesheet> CollectShadowStylesheets(
         DomTree tree,
         (float Width, float Height) viewport,
-        CssMediaType mediaType)
+        CssMediaType mediaType,
+        StylesheetCache? cache = null)
     {
+        // A document with no shadow root has nothing to collect; walking every node of it to
+        // find out cost a whole-document walk on every pass.
+        if (!tree.HasShadowRoots)
+        {
+            return [];
+        }
+
         List<NodeId> roots = [];
         List<NodeId> stack = [tree.Document];
         HashSet<NodeId> visited = [];
@@ -1174,6 +1351,13 @@ internal static class DomCascade
         }
 
         Dictionary<NodeId, Stylesheet> sheets = [];
+        if (roots.Count == 0)
+        {
+            return sheets;
+        }
+
+        cache ??= new StylesheetCache();
+        cache.BeginShadowPass(viewport, mediaType);
         foreach (NodeId root in roots)
         {
             List<string> sources = [];
@@ -1198,7 +1382,7 @@ internal static class DomCascade
 
                 string? media = node.GetAttribute("media");
                 if (media is not null
-                    && media.Trim().Length != 0
+                    && media.AsSpan().Trim().Length != 0
                     && !CssMediaQuery.AppliesForViewportAndType(media, viewport, mediaType))
                 {
                     continue;
@@ -1215,9 +1399,10 @@ internal static class DomCascade
                 }
             }
 
-            sheets[root] = Stylesheet.ParseForViewportAndMedia(tree, sources, viewport, mediaType);
+            sheets[root] = cache.GetOrParseShadow(tree, sources, root);
         }
 
+        cache.EndShadowPass();
         return sheets;
     }
 }

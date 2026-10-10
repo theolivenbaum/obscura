@@ -35,6 +35,38 @@ public enum Align
     End,
 }
 
+/// <summary>
+/// Whether the white space a line ends with takes part in its alignment (CSS Text 3 4.1.3,
+/// phase II).
+/// </summary>
+public enum TrailingSpace : byte
+{
+    /// <summary>It does: <c>pre</c>, <c>break-spaces</c>, and buffers that are not CSS text.</summary>
+    Counts = 0,
+
+    /// <summary>It is removed at the end of every line: <c>normal</c>, <c>nowrap</c>, <c>pre-line</c>.</summary>
+    Removed,
+
+    /// <summary>It hangs at a soft wrap and counts before a forced break: <c>pre-wrap</c>.</summary>
+    HangsAtSoftWrap,
+}
+
+/// <summary>
+/// What aligning a paragraph's lines needs beyond <see cref="Align"/>; the default is
+/// cosmic-text's behaviour.
+/// </summary>
+/// <param name="Last">
+/// The alignment of the paragraph's last line (<c>text-align-last</c>, or start for
+/// <c>justify</c>); <c>null</c> keeps cosmic-text's rule, which aligns it like the others and
+/// does not justify it.
+/// </param>
+/// <param name="Trailing">How the white space each line ends with is treated.</param>
+/// <param name="SoftWrapEnd">
+/// The paragraph was cut from a longer one at a soft wrap, so its last line is not the end
+/// of the CSS paragraph: it is justified, and its trailing white space hangs.
+/// </param>
+public readonly record struct LineAlignOptions(Align? Last, TrailingSpace Trailing, bool SoftWrapEnd);
+
 /// <summary>What an inline box's <c>vertical-align</c> aligns it to.</summary>
 public enum LineBoxAlign : byte
 {
@@ -63,6 +95,11 @@ public enum LineBoxAlign : byte
 /// <c>max(line_height)</c> gives 18; a 48px span is 27px. <see cref="Above"/> and
 /// <see cref="Below"/> are those two contributions, already carrying the box's
 /// <c>vertical-align</c> shift. See "Known deviations" in todo.md.
+/// <para>
+/// <see cref="LineHeightNormal"/> marks a box whose <c>line-height</c> is <c>normal</c>: Blink
+/// then unites the metrics of every fallback face its text was shaped with into the box's
+/// contribution, which <see cref="TextShaper"/> applies per glyph.
+/// </para>
 /// </remarks>
 public readonly record struct TextMetrics(
     float FontSize,
@@ -70,7 +107,8 @@ public readonly record struct TextMetrics(
     float Above = 0f,
     float Below = 0f,
     LineBoxAlign Align = LineBoxAlign.Baseline,
-    float Shift = 0f)
+    float Shift = 0f,
+    bool LineHeightNormal = false)
 {
     /// <summary>
     /// Aligned to the line box rather than to a baseline, so the box is out of the
@@ -163,7 +201,8 @@ public readonly record struct GlyphCacheKey(
     uint FontSizeBits,
     SubpixelBin XBin,
     SubpixelBin YBin,
-    bool FakeItalic)
+    bool FakeItalic,
+    bool FakeBold = false)
 {
     public float FontSize => BitConverter.UInt32BitsToSingle(FontSizeBits);
 
@@ -172,12 +211,13 @@ public readonly record struct GlyphCacheKey(
         ushort glyphId,
         float fontSize,
         (float X, float Y) position,
-        bool fakeItalic)
+        bool fakeItalic,
+        bool fakeBold = false)
     {
         (int x, SubpixelBin xBin) = SubpixelBinExtensions.New(position.X);
         (int y, SubpixelBin yBin) = SubpixelBinExtensions.New(position.Y);
         return (
-            new GlyphCacheKey(fontId, glyphId, BitConverter.SingleToUInt32Bits(fontSize), xBin, yBin, fakeItalic),
+            new GlyphCacheKey(fontId, glyphId, BitConverter.SingleToUInt32Bits(fontSize), xBin, yBin, fakeItalic, fakeBold),
             x,
             y);
     }
@@ -210,6 +250,7 @@ public struct LayoutGlyph
     public RgbaColor? Color;
     public ulong Metadata;
     public bool FakeItalic;
+    public bool FakeBold;
 
     public readonly PhysicalGlyph Physical((float X, float Y) offset, float scale)
     {
@@ -222,7 +263,8 @@ public struct LayoutGlyph
             (
                 ((X + xOffset) * scale) + offset.X,
                 MathF.Truncate(((Y - yOffset) * scale) + offset.Y)),
-            FakeItalic);
+            FakeItalic,
+            FakeBold);
         return new PhysicalGlyph(key, x, y);
     }
 }
@@ -267,6 +309,16 @@ public sealed class LayoutRun
     public required float LineHeight { get; init; }
 
     public required float LineW { get; init; }
+
+    /// <summary>
+    /// How far the line box starts in from the content box's left edge because floats shorten
+    /// it (CSS 2.1 9.5); already added to every glyph's <see cref="LayoutGlyph.X"/>. Zero
+    /// unless the inline formatting context flows around floats.
+    /// </summary>
+    public float X { get; init; }
+
+    /// <summary>The width the line was laid out (and aligned) in.</summary>
+    public float LineWidth { get; init; }
 
     /// <summary>
     /// The x extent of the character range <paramref name="start"/>..<paramref name="end"/>,
@@ -323,6 +375,55 @@ public sealed class BufferLine
 
     public Align? Align { get; set; }
 
+    /// <summary>Last-line alignment and trailing white space; see <see cref="LineAlignOptions"/>.</summary>
+    public LineAlignOptions AlignOptions
+    {
+        get => _alignOptions;
+        set
+        {
+            if (_alignOptions != value)
+            {
+                _alignOptions = value;
+                _layout = null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The paragraph's base direction from CSS <c>direction</c> (true: right to left), or
+    /// <c>null</c> for cosmic-text's first-strong-character rule (UAX#9 P2/P3).
+    /// </summary>
+    public bool? BaseRtl
+    {
+        get => _baseRtl;
+        set
+        {
+            if (_baseRtl != value)
+            {
+                _baseRtl = value;
+                ResetShaping();
+            }
+        }
+    }
+
+    private LineAlignOptions _alignOptions;
+    private bool? _baseRtl;
+
+    /// <summary>
+    /// Float layout only: the line box's own width when floats shorten it, used instead of the
+    /// buffer width to lay this (pre-split, single visual) line out and align it.
+    /// </summary>
+    public float? WidthOverride { get; set; }
+
+    /// <summary>Float layout only: the line box's left edge, added to every glyph.</summary>
+    public float OffsetX { get; set; }
+
+    /// <summary>
+    /// Float layout only: the space above this line box left by moving it below floats it did
+    /// not fit beside (CSS 2.1 9.5).
+    /// </summary>
+    public float GapBefore { get; set; }
+
     public void SetAlign(Align? align)
     {
         if (Align != align)
@@ -336,6 +437,22 @@ public sealed class BufferLine
     {
         _shape = null;
         _layout = null;
+        _sliceOf = null;
+    }
+
+    private (ShapeLine Whole, int Shift)? _sliceOf;
+
+    /// <summary>
+    /// This line's text is the run of whole words of <paramref name="whole"/> (one
+    /// left-to-right span without tabs) starting at <paramref name="shift"/>: shape it by
+    /// copying those words. See <see cref="TextShaper.ShapeParagraphSlice"/>.
+    /// </summary>
+    internal void ShapeAsSliceOf(ShapeLine whole, int shift)
+    {
+        if (_shape is null)
+        {
+            _sliceOf = (whole, shift);
+        }
     }
 
     public void ResetLayout() => _layout = null;
@@ -348,7 +465,10 @@ public sealed class BufferLine
     {
         if (_shape is null)
         {
-            _shape = shaper.ShapeParagraph(Text, AttrsList, tabWidth);
+            _shape = _sliceOf is { } slice
+                ? shaper.ShapeParagraphSlice(Text, AttrsList, tabWidth, _baseRtl, slice.Whole, slice.Shift)
+                : shaper.ShapeParagraph(Text, AttrsList, tabWidth, _baseRtl);
+            _sliceOf = null;
             _layout = null;
         }
 
@@ -366,7 +486,9 @@ public sealed class BufferLine
         if (_layout is null)
         {
             ShapeLine shape = Shape(shaper, tabWidth);
-            _layout = TextLayout.LayoutToBuffer(shape, fontSize, width, wrap, Align, matchMonoWidth);
+            _layout = shaper.Cache is { } cache
+                ? cache.Layout(shape, fontSize, width, wrap, Align, matchMonoWidth, _alignOptions)
+                : TextLayout.LayoutToBuffer(shape, fontSize, width, wrap, Align, matchMonoWidth, _alignOptions);
         }
 
         return _layout;
@@ -379,12 +501,16 @@ public sealed class BufferLine
         Text = Text[..index];
         AttrsList tailAttrs = AttrsList.SplitOff(index);
         ResetShaping();
-        return new BufferLine(tailText, tailAttrs) { Align = Align };
+        var tail = new BufferLine(tailText, tailAttrs) { Align = Align, _alignOptions = _alignOptions, _baseRtl = _baseRtl };
+
+        // The head now ends where the paragraph soft-wraps.
+        _alignOptions = _alignOptions with { SoftWrapEnd = true };
+        return tail;
     }
 
     public BufferLine Clone()
     {
-        var copy = new BufferLine(Text, AttrsList.Clone()) { Align = Align };
+        var copy = new BufferLine(Text, AttrsList.Clone()) { Align = Align, _alignOptions = _alignOptions, _baseRtl = _baseRtl };
         return copy;
     }
 }
@@ -460,7 +586,7 @@ public sealed class TextBuffer
     {
         foreach (BufferLine line in Lines)
         {
-            line.Layout(shaper, Metrics.FontSize, WidthOpt, Wrap, MonospaceWidth, TabWidth);
+            line.Layout(shaper, Metrics.FontSize, line.WidthOverride ?? WidthOpt, Wrap, MonospaceWidth, TabWidth);
         }
     }
 
@@ -535,24 +661,10 @@ public sealed class TextBuffer
                 yield break;
             }
 
+            lineTop += line.GapBefore;
             foreach (LayoutLine layoutLine in layout)
             {
-                // CSS 2.1 10.8.1: the line box is max(above) + max(below) over every inline
-                // box on it plus the block's strut, and the baseline sits at max(above).
-                // `Metrics` is the strut, which participates in every line box.
-                float above = F32.Max(Metrics.Above, layoutLine.MaxAbove);
-                float below = F32.Max(Metrics.Below, layoutLine.MaxBelow);
-                float lineHeight = above + below;
-                float relative = layoutLine.LineRelativeAbove + layoutLine.LineRelativeBelow;
-                if (float.IsFinite(relative) && relative > lineHeight)
-                {
-                    // A `vertical-align: top`/`bottom` box is out of the baseline set, so it
-                    // only ever grows the line - and when it does, Chromium puts the baseline
-                    // where that box's own ascent asks for it.
-                    above = F32.Max(above, layoutLine.LineRelativeAbove);
-                    lineHeight = relative;
-                }
-
+                (float above, float lineHeight) = LineBox(layoutLine);
                 float lineY = lineTop + above;
                 if (HeightOpt is { } height && lineY > height)
                 {
@@ -561,19 +673,58 @@ public sealed class TextBuffer
 
                 float currentTop = lineTop;
                 lineTop += lineHeight;
+                List<LayoutGlyph> glyphs = layoutLine.Glyphs;
+                float offsetX = line.OffsetX;
+                if (offsetX != 0f)
+                {
+                    glyphs = new List<LayoutGlyph>(layoutLine.Glyphs.Count);
+                    foreach (LayoutGlyph glyph in layoutLine.Glyphs)
+                    {
+                        LayoutGlyph shifted = glyph;
+                        shifted.X += offsetX;
+                        glyphs.Add(shifted);
+                    }
+                }
+
                 yield return new LayoutRun
                 {
                     LineIndex = lineIndex,
                     Text = line.Text,
                     Rtl = line.ShapeOpt?.Rtl ?? false,
-                    Glyphs = layoutLine.Glyphs,
+                    Glyphs = glyphs,
                     LineY = lineY,
                     LineTop = currentTop,
                     LineHeight = lineHeight,
                     LineW = layoutLine.W,
+                    X = offsetX,
+                    LineWidth = line.WidthOverride ?? WidthOpt ?? layoutLine.W,
                 };
             }
         }
+    }
+
+    /// <summary>
+    /// CSS 2.1 10.8.1: the line box is max(above) + max(below) over every inline box on it plus
+    /// the block's strut, and the baseline sits at max(above). <see cref="Metrics"/> is the
+    /// strut, which participates in every line box. Returns the baseline's distance from the
+    /// line top and the line box height.
+    /// </summary>
+    public (float Above, float Height) LineBox(LayoutLine layoutLine)
+    {
+        float above = F32.Max(Metrics.Above, layoutLine.MaxAbove);
+        float below = F32.Max(Metrics.Below, layoutLine.MaxBelow);
+        float lineHeight = above + below;
+        float relative = layoutLine.LineRelativeAbove + layoutLine.LineRelativeBelow;
+        if (float.IsFinite(relative) && relative > lineHeight)
+        {
+            // A `vertical-align: top`/`bottom` box is out of the baseline set, so it only ever
+            // grows the line - and when it does, Chromium puts the baseline where that box's
+            // own ascent asks for it.
+            above = F32.Max(above, layoutLine.LineRelativeAbove);
+            lineHeight = relative;
+        }
+
+        return (above, lineHeight);
     }
 
     public TextBuffer Clone()

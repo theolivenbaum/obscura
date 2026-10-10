@@ -12,13 +12,18 @@ namespace PocketCalculator.Js.Tests;
 
 public sealed class OpCancellationTests
 {
-    /// <summary>Nested floats: one layout of these takes well over a minute uncancelled.</summary>
-    private static string NestedFloats(int depth)
+    /// <summary>
+    /// A long page of paragraphs, each wrapping around a float of its own: one layout takes
+    /// seconds uncancelled. This used to be 300 nested floats, which took well over a minute
+    /// with floats laid out as flex rows and take milliseconds with real float layout.
+    /// </summary>
+    private static string FloatedParagraphs(int count)
     {
         var html = new StringBuilder("<!doctype html><html><body>");
-        for (int i = 0; i < depth; i++)
+        for (int i = 0; i < count; i++)
         {
-            html.Append(i == depth - 1 ? "<div id=deep " : "<div ").Append("style=\"float:left;padding:1px\">x");
+            html.Append(i == count - 1 ? "<p id=deep>" : "<p>")
+                .Append("text <span style=\"float:left;width:20px;height:30px\"></span>more words here</p>");
         }
 
         html.Append("</body></html>");
@@ -28,7 +33,7 @@ public sealed class OpCancellationTests
     [Fact]
     public void AWatchdogStopsALayoutOpInsideCSharp()
     {
-        using var fixture = RuntimeFixture.Setup(NestedFloats(300));
+        using var fixture = RuntimeFixture.Setup(FloatedParagraphs(8_000));
         var rt = fixture.Runtime;
         var watchdog = rt.ArmWatchdog(TimeSpan.FromMilliseconds(300));
         var clock = Stopwatch.StartNew();
@@ -55,7 +60,7 @@ public sealed class OpCancellationTests
     {
         // The watchdog's own interrupt is spent while the op is in C#, and the page catches
         // whatever the op does; the loop that follows must still be stopped.
-        using var fixture = RuntimeFixture.Setup(NestedFloats(300));
+        using var fixture = RuntimeFixture.Setup(FloatedParagraphs(8_000));
         var rt = fixture.Runtime;
         var watchdog = rt.ArmWatchdog(TimeSpan.FromMilliseconds(300));
         var clock = Stopwatch.StartNew();
@@ -75,7 +80,11 @@ public sealed class OpCancellationTests
         using var fixture = RuntimeFixture.Setup("<html><body><p id=p style='height:10px'>x</p></body></html>");
         var rt = fixture.Runtime;
         var watchdog = rt.ArmWatchdog(TimeSpan.FromMilliseconds(50));
-        Thread.Sleep(200);
+        // Wait for the firing itself rather than a fixed 200 ms: the watchdog thread can be
+        // scheduled late on a loaded host, and the test is about what follows a firing.
+        Assert.True(
+            SpinWait.SpinUntil(() => watchdog.HasFired, TimeSpan.FromSeconds(20)),
+            "the watchdog never fired");
         Assert.True(rt.DisarmWatchdog(watchdog));
 
         Assert.Equal(10.0, rt.Evaluate("document.getElementById('p').getBoundingClientRect().height")!.GetValue<double>());
@@ -98,6 +107,60 @@ public sealed class OpCancellationTests
     }
 
     [Fact]
+    public async Task AModuleTimeoutThatStopsAPageTaskInsideAnOpIsAnErrorNotACancellation()
+    {
+        // reddit.com: a module's top-level await kept the loop running the page's queued
+        // tasks, one of them an animation frame whose layout read overran the module's budget.
+        // The op that saw the watchdog's cancellation keeps the isolate interrupted until the
+        // watchdog is disarmed, so the bookkeeping after the timeout was interrupted too, and
+        // its ScriptInterruptedException (an OperationCanceledException) escaped: the page
+        // read it as its own navigation being cancelled and failed to load.
+        using var fixture = RuntimeFixture.Setup(FloatedParagraphs(8_000));
+        var rt = fixture.Runtime;
+        rt.Evaluate(
+            "(() => { setTimeout(() => { document.getElementById('deep').getBoundingClientRect(); }, 0);"
+            + " return 0; })()");
+
+        var clock = Stopwatch.StartNew();
+        var error = await Assert.ThrowsAsync<JsRuntimeException>(() =>
+            rt.LoadInlineModuleAsync(
+                "await new Promise(resolve => setTimeout(resolve, 10));",
+                "http://example.com/test",
+                300));
+
+        Assert.Contains("Inline module evaluation timed out after", error.Message, StringComparison.Ordinal);
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(15), $"the module ran {clock.Elapsed}");
+        Assert.Equal(2.0, rt.Evaluate("1 + 1")!.GetValue<double>());
+    }
+
+    [Fact]
+    public async Task AnInterruptedTimerLeavesTheRestOfItsBatchForTheNextTurn()
+    {
+        // reddit.com: an animation-frame timer forced a multi-second layout, the pump's
+        // watchdog interrupted it, and the zero-delay timers taken in the same batch (each
+        // the execution of a dynamic script) were dropped. Their scripts never ran, never
+        // fired load, and the document's load event waited out the script deadline.
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        var rt = fixture.Runtime;
+        rt.Evaluate(
+            "(() => { globalThis.__runs = []; "
+            + "setTimeout(() => { __runs.push('spin'); while (true) {} }, 0); "
+            + "setTimeout(() => { __runs.push('second'); }, 0); "
+            + "setTimeout(() => { __runs.push('third'); }, 0); return 0; })()");
+
+        using (var deadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(300)))
+        using (rt.InterruptOnCancellation(deadline.Token))
+        {
+            await rt.RunEventLoopBoundedAsync(10_000);
+        }
+
+        await rt.RunEventLoopBoundedAsync(500);
+
+        // The interrupted callback is not run again; the two after it run, in order.
+        Assert.Equal("""["spin","second","third"]""", rt.Evaluate("JSON.stringify(__runs)")!.GetValue<string>());
+    }
+
+    [Fact]
     public void ACallersTokenThatNeverFiresChangesNothing()
     {
         using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
@@ -115,7 +178,7 @@ public sealed class OpCancellationTests
     [Fact]
     public void TheCdpCommandWatchdogStopsACaptureOutsideAnyOp()
     {
-        using var fixture = RuntimeFixture.Setup(NestedFloats(300));
+        using var fixture = RuntimeFixture.Setup(FloatedParagraphs(8_000));
         var rt = fixture.Runtime;
         var armed = CdpWatchdog.Arm(rt.IsolateHandleForWatchdog, TimeSpan.FromMilliseconds(300));
         var clock = Stopwatch.StartNew();

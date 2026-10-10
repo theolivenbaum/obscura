@@ -74,8 +74,8 @@ public readonly record struct FontVariationSetting(string Tag, float Value);
 
 /// <summary><c>float: left|right</c>.</summary>
 /// <remarks>
-/// True CSS float needs per-line reflow around the float's shape, which taffy's block/flex/grid
-/// modes do not do; see the DOM float-zone grouping for the bounded approximation this drives.
+/// Laid out as a CSS float by the block formatting context, with line boxes shortened around
+/// it; see <c>DomBuild.BuildMixedBlock</c> and "Float layout (CSS 2.1 9.5)" in todo.md.
 /// </remarks>
 public enum Float
 {
@@ -259,6 +259,23 @@ public enum WhiteSpace
     PreWrap,
     PreLine,
     BreakSpaces,
+}
+
+/// <summary>
+/// The computed <c>text-align</c> / <c>text-align-last</c> keyword. Start and end stay logical
+/// until a block resolves them against its own <c>direction</c> (CSS Text 3 7.1), which is why
+/// the keyword, not a physical side, is what inherits.
+/// </summary>
+public enum TextAlignKeyword : byte
+{
+    /// <summary>The initial value.</summary>
+    Start = 0,
+
+    End,
+    Left,
+    Right,
+    Center,
+    Justify,
 }
 
 /// <summary>

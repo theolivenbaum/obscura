@@ -133,6 +133,23 @@ public interface ILayoutBlockContainer : ILayoutPartialTree
     /// <summary>Compute the specified node's size or full layout given the specified constraints.</summary>
     LayoutOutput ComputeBlockChildLayout(NodeId nodeId, LayoutInput inputs, BlockContext? blockCtx) =>
         ComputeChildLayout(nodeId, inputs);
+
+    /// <summary>Whether the tree has floats at all (see <c>TaffyTree.HasFloats</c>).</summary>
+    bool HasFloats => false;
+
+    /// <summary>
+    /// The floats anchored in inline formatting context leaf <paramref name="leaf"/> and the
+    /// text offset each sits at, or null.
+    /// </summary>
+    (NodeId Float, int Offset)[]? InlineFloatAnchors(NodeId leaf) => null;
+
+    /// <summary>
+    /// The line boxes holding the (ascending) text offsets <paramref name="offsets"/> in leaf
+    /// <paramref name="leaf"/>'s last layout, relative to its content box; see
+    /// <c>TextEngine.AnchorLines</c>.
+    /// </summary>
+    (float Top, float Height, float Width, float Used)?[] InlineAnchorLines(NodeId leaf, int[] offsets) =>
+        new (float Top, float Height, float Width, float Used)?[offsets.Length];
 }
 
 /// <summary>

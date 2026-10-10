@@ -474,7 +474,7 @@ public static partial class ComputedStyle
             return new BorderShorthand(BorderSides.MediumBorderWidth, BorderStyle.None, null);
         }
 
-        if (value.Trim().Length == 0 || lower == "inherit")
+        if (value.AsSpan().Trim().Length == 0 || lower == "inherit")
         {
             return null;
         }
@@ -940,7 +940,7 @@ public static partial class ComputedStyle
             return OutlineModel.Default;
         }
 
-        if (value.Trim().Length == 0 || lower == "inherit")
+        if (value.AsSpan().Trim().Length == 0 || lower == "inherit")
         {
             return null;
         }

@@ -19,15 +19,17 @@ public class RenderCancellationTests
     }
 
     /// <summary>
-    /// Nested floats: the flex-mapped float layout re-measures every level for every
-    /// ancestor, so 300 of them take well over a minute (SECURITY.md "Fix status").
+    /// A long page of paragraphs, each wrapping around a float of its own: seconds of layout.
+    /// This used to be 300 nested floats, which the flex-mapped float layout re-measured at
+    /// every level for every ancestor (well over a minute, SECURITY.md "Fix status"); real
+    /// float layout lays those out in a few milliseconds, so they no longer reach a deadline.
     /// </summary>
-    private static DomTree NestedFloats(int depth)
+    private static DomTree FloatedParagraphs(int count)
     {
         var html = new StringBuilder("<!doctype html><html><body>");
-        for (int i = 0; i < depth; i++)
+        for (int i = 0; i < count; i++)
         {
-            html.Append("<div style=\"float:left;padding:1px\">x");
+            html.Append("<p>text <span style=\"float:left;width:20px;height:30px\"></span>more words here</p>");
         }
 
         html.Append("</body></html>");
@@ -37,7 +39,10 @@ public class RenderCancellationTests
     [Fact]
     public void APathologicalLayoutStopsAtItsDeadline()
     {
-        DomTree tree = NestedFloats(300);
+        // 20,000 paragraphs, not 5,000: with real float layout and the layout caches, 5,000
+        // could finish within a few hundred ms, and on a loaded host the deadline's timer
+        // callback can fire after that, so the pass completed and nothing was thrown.
+        DomTree tree = FloatedParagraphs(20_000);
         using var deadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
         var clock = Stopwatch.StartNew();
 
@@ -53,7 +58,7 @@ public class RenderCancellationTests
                 new AnimationTimelineState(),
                 deadline.Token));
 
-        // Generous for a loaded machine; the uncancelled layout does not finish in a minute.
+        // Generous for a loaded machine; the uncancelled layout takes several seconds.
         Assert.True(clock.Elapsed < TimeSpan.FromSeconds(15), $"layout ran {clock.Elapsed} past its deadline");
     }
 

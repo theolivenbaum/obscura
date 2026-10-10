@@ -73,6 +73,12 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
     public IAsyncOpTracker? AsyncOps { get; set; }
 
     /// <summary>
+    /// Fetches a module graph ahead of its evaluation (<c>op_prefetch_module_graph</c>); set by
+    /// the runtime that owns the module loader. Null makes the op a no-op.
+    /// </summary>
+    public Func<string, Task>? ModuleGraphPrefetcher { get; set; }
+
+    /// <summary>
     /// Cancelled by the isolate's watchdogs alongside the V8 interrupt. Every sync op
     /// runs under its token (<see cref="PocketCalculator.Dom.WorkCancellation"/>), so
     /// C# work inside an op stops when the deadline passes (SECURITY.md H8).
@@ -243,10 +249,6 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             nid => CoreOps.OpScriptTryStart(Page, U32(nid))));
         Bind(ops, "op_run_classic_script", (Action<object?, object?>)(
             (source, url) => RunClassicScript(engine, S(source), S(url))));
-        Bind(ops, "op_shadow_attach", (Func<object?, object?, int>)(
-            (nid, mode) => CoreOps.OpShadowAttach(Page, U32(nid), S(mode))));
-        Bind(ops, "op_shadow_root_info", (Func<object?, string>)(
-            nid => CoreOps.OpShadowRootInfo(Page, U32(nid))));
         // Upstream 04418a5: host-held linked-sheet CSS and its origin-clean bit.
         Bind(ops, "op_external_stylesheet_set", (Func<object?, object?, object?, object?, object?, bool>)(
             (nid, css, responseUrl, originClean, frameId) => StylesheetOps.OpExternalStylesheetSet(
@@ -361,6 +363,14 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             nid => RenderOps.OpLoadImageMetadataAsync(Page, U32(nid))));
         Bind(ops, "op_layout_geometry", (Func<object?, string>)(
             nid => RenderOps.OpLayoutGeometry(Page, S(nid))));
+        Bind(ops, "op_layout_offset", (Func<object?, string>)(
+            nid => RenderOps.OpLayoutOffset(Page, S(nid))));
+        Bind(ops, "op_layout_offset_parent", (Func<object?, string>)(
+            nid => RenderOps.OpLayoutOffsetParent(Page, S(nid))));
+        Bind(ops, "op_hit_test", (Func<object?, object?, object?, object?, string>)(
+            (x, y, scope, all) => RenderOps.OpHitTest(Page, D(x), D(y), D(scope), B(all))));
+        Bind(ops, "op_range_rects", (Func<object?, object?, object?, object?, string>)(
+            (sc, so, ec, eo) => RenderOps.OpRangeRects(Page, D(sc), D(so), D(ec), D(eo))));
         Bind(ops, "op_resize_observer_measurements", (Func<object?, string>)(
             nids => RenderOps.OpResizeObserverMeasurements(Page, S(nids))));
         Bind(ops, "op_intersection_observer_measurements", (Func<object?, string>)(
@@ -373,6 +383,10 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         // is given a pseudo-element.
         Bind(ops, "op_computed_style_pseudo", (Func<object?, object?, string>)(
             (nid, pseudo) => RenderOps.OpComputedStylePseudo(Page, S(nid), S(pseudo))));
+        // Additive: the layout-independent part of the snapshot, answered before pending
+        // mutations are restyled when they cannot change it (RenderOps.OpComputedStyleStatic).
+        Bind(ops, "op_computed_style_static", (Func<object?, string>)(
+            nid => RenderOps.OpComputedStyleStatic(Page, S(nid))));
         // Additive as well: innerText for a whole subtree in one call (RenderOps.OpInnerText).
         Bind(ops, "op_inner_text", (Func<object?, string>)(
             nid => RenderOps.OpInnerText(Page, S(nid))));
@@ -452,8 +466,28 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
     /// </summary>
     private void BindDocumentOps(ScriptObject ops, PocketCalculatorState document)
     {
+        // Port addition: document.write() into the running parser at its insertion point.
+        // False when the document has no parser with an insertion point, and the shim falls
+        // back to its own input stream.
+        Bind(ops, "op_parser_write", (Func<object?, object?, bool>)(
+            (text, probe) => OpGuard.Run(
+                "op_parser_write",
+                () => document.ParserWriter is { } writer
+                    && (B(probe) ? writer.HasInsertionPoint : writer.TryWrite(S(text))),
+                false)));
         var engine = ops.Engine;
         BindFetch(ops, document);
+        Bind(ops, "op_storage", (Func<object?, object?, object?, object?, string>)(
+            (kind, cmd, key, value) => CoreOps.OpStorage(document, S(kind), S(cmd), S(key), S(value))));
+        // Port fix: the shadow ops act on the calling realm's document. They were bound to the
+        // page's state, so a child frame's attachShadow resolved the frame's node id in the
+        // page's arena: it failed for a node the page did not have (vkvideo.ru's player inside
+        // mail.ru threw NotSupportedError on a <div>) and could attach to the page's node
+        // that happened to share the id.
+        Bind(ops, "op_shadow_attach", (Func<object?, object?, int>)(
+            (nid, mode) => CoreOps.OpShadowAttach(document, U32(nid), S(mode))));
+        Bind(ops, "op_shadow_root_info", (Func<object?, string>)(
+            nid => CoreOps.OpShadowRootInfo(document, U32(nid))));
         BindPostFrameMessage(ops, document);
 
         // Port additions (SECURITY.md C2, C3): the consumers of an internal load's host-held
@@ -468,6 +502,33 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
                 Page, document, U32(nid), U64(width), U64(height), B(sandboxed))));
         Bind(ops, "op_load_stylesheet", (Func<object?, object?, Task<string>>)(
             (nid, url) => LinkedStylesheetLoader.OpLoadStylesheetAsync(RealmState(), document, U32(nid), S(url))));
+        // Port additions: importScripts and worker script globals (see WorkerOps), and the
+        // blob: module sources the loader reads (BlobScriptStore).
+        Bind(ops, "op_worker_import_script", (Func<object?, object?, object?, object?, string>)(
+            (url, workerUrl, scope, runner) => WorkerOps.ImportScript(
+                RealmState(), document, S(url), S(workerUrl), scope, runner)));
+        Bind(ops, "op_script_declarations", (Func<object?, string>)(
+            source => OpGuard.Run(
+                "op_script_declarations", () => ScriptDeclarations.ScanJson(S(source)), "{\"s\":false,\"v\":[],\"f\":[],\"l\":[]}")));
+        Bind(ops, "op_blob_script_register", (Action<object?, object?>)(
+            (url, source) => OpGuard.Run("op_blob_script_register", () => Page.BlobScripts.Register(S(url), S(source)))));
+        Bind(ops, "op_blob_script_revoke", (Action<object?>)(
+            url => OpGuard.Run("op_blob_script_revoke", () => Page.BlobScripts.Revoke(S(url)))));
+        // Port addition: a dynamic module script's graph is fetched before its import()
+        // evaluates it, off the page thread (PocketCalculatorModuleLoader.PrefetchGraphAsync).
+        Bind(ops, "op_prefetch_module_graph", (Func<object?, Task<bool>>)(
+            url => OpGuard.RunAsync(
+                "op_prefetch_module_graph",
+                async () =>
+                {
+                    if (ModuleGraphPrefetcher is { } prefetch)
+                    {
+                        await prefetch(S(url)).ConfigureAwait(false);
+                    }
+
+                    return true;
+                },
+                false)));
         Bind(ops, "op_frame_same_origin", (Func<object?, double>)(
             frameId => OpGuard.Run("op_frame_same_origin", () => FrameSameOrigin(document, U32(frameId)), -1d)));
         if (!ReferenceEquals(document, Page))
@@ -502,6 +563,14 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             nid => RenderOps.OpLoadImageMetadataAsync(document, U32(nid))));
         Bind(ops, "op_layout_geometry", (Func<object?, string>)(
             nid => RenderOps.OpLayoutGeometry(document, S(nid))));
+        Bind(ops, "op_layout_offset", (Func<object?, string>)(
+            nid => RenderOps.OpLayoutOffset(document, S(nid))));
+        Bind(ops, "op_layout_offset_parent", (Func<object?, string>)(
+            nid => RenderOps.OpLayoutOffsetParent(document, S(nid))));
+        Bind(ops, "op_hit_test", (Func<object?, object?, object?, object?, string>)(
+            (x, y, scope, all) => RenderOps.OpHitTest(document, D(x), D(y), D(scope), B(all))));
+        Bind(ops, "op_range_rects", (Func<object?, object?, object?, object?, string>)(
+            (sc, so, ec, eo) => RenderOps.OpRangeRects(document, D(sc), D(so), D(ec), D(eo))));
         Bind(ops, "op_resize_observer_measurements", (Func<object?, string>)(
             nids => RenderOps.OpResizeObserverMeasurements(document, S(nids))));
         Bind(ops, "op_intersection_observer_measurements", (Func<object?, string>)(
@@ -510,6 +579,8 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             nid => RenderOps.OpComputedStyle(document, S(nid))));
         Bind(ops, "op_computed_style_pseudo", (Func<object?, object?, string>)(
             (nid, pseudo) => RenderOps.OpComputedStylePseudo(document, S(nid), S(pseudo))));
+        Bind(ops, "op_computed_style_static", (Func<object?, string>)(
+            nid => RenderOps.OpComputedStyleStatic(document, S(nid))));
         Bind(ops, "op_inner_text", (Func<object?, string>)(
             nid => RenderOps.OpInnerText(document, S(nid))));
         Bind(ops, "op_layout_metrics", (Func<string>)(() => RenderOps.OpLayoutMetrics(document)));
@@ -628,7 +699,7 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         Bind(ops, "op_fetch_url", (Func<object?, object?, object?, object?, object?, object?, object?, object?, Task<string>>)(
             (url, method, headers, body, origin, mode, credentials, internalLoad) => FetchOps.OpFetchUrlAsync(
                 RealmState(), S(url), S(method), S(headers), Bytes(body), S(origin), S(mode), S(credentials),
-                B(internalLoad), document)));
+                B(internalLoad), document, tailOnPageLoop: true)));
 
     private void Bind(ScriptObject ops, string name, object function)
     {
@@ -660,12 +731,15 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
     /// bootstrap.js keeps in JavaScript (form values, focus, selection).</item>
     /// <item><c>op_binding_called</c> queues the call as the world's, so it is reported
     /// with the world's execution context.</item>
-    /// <item>Console calls are not reported: they would carry the page's context.</item>
+    /// <item>Console calls are reported with the world's execution context, as Chromium
+    /// reports them. Playwright's <c>setContent</c> waits for a <c>console.debug</c> its
+    /// utility world makes, and hung when worlds were silent.</item>
     /// </list>
     /// </remarks>
     internal void BindIsolatedWorldOverrides(
         ScriptObject ops,
         object world,
+        long worldKey,
         PocketCalculatorState document,
         Func<string, double, string, string> worldCall,
         Action<string, string> bindingCalled)
@@ -680,8 +754,11 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             (kind, nid, arg) => OpGuard.Run("op_world_call", () => worldCall(S(kind), D(nid), S(arg)), string.Empty)));
         Bind(ops, "op_binding_called", (Action<object?, object?>)(
             (name, payload) => OpGuard.Run("op_binding_called", () => bindingCalled(S(name), S(payload)))));
-        Bind(ops, "op_runtime_events_enabled", (Func<bool>)(() => false));
-        Bind(ops, "op_console_msg", (Action<object?, object?, object?>)((_, _, _) => { }));
+        // The page's state carries the event whatever document the world is over: that is
+        // the queue the CDP layer drains.
+        Bind(ops, "op_runtime_events_enabled", (Func<bool>)(() => CoreOps.OpRuntimeEventsEnabled(Page)));
+        Bind(ops, "op_console_msg", (Action<object?, object?, object?>)(
+            (level, msg, args) => CoreOps.OpConsoleMsg(Page, S(level), S(msg), S(args), worldKey)));
     }
 
     /// <summary>

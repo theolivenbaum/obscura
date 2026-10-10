@@ -111,6 +111,25 @@ internal static class RenderInvalidation
                     !string.Equals(old, value, StringComparison.Ordinal));
             }
 
+            // Port addition: an upgrade changes what :defined matches.
+            case "ce_state":
+            {
+                if (ParseNode(arg1) is not { } target || dom.GetNode(target)?.Data is not ElementData element)
+                {
+                    return RenderMutationImpact.None;
+                }
+
+                var wanted = arg2 switch
+                {
+                    "custom" => CustomElementState.Custom,
+                    "failed" => CustomElementState.Failed,
+                    _ => CustomElementState.Unknown,
+                };
+                return new RenderMutationImpact(
+                    StateHelpers.NodeIsConnected(dom, target),
+                    element.CustomElementState != wanted);
+            }
+
             case "remove_attribute":
             {
                 if (ParseNode(arg1) is not { } target)
@@ -234,6 +253,19 @@ internal static class RenderInvalidation
                 return new RenderMutationImpact(StateHelpers.NodeIsConnected(dom, target), changed);
             }
 
+            // Port addition: manual slot assignment (and switching a root to it) changes which
+            // light children the composed tree shows.
+            case "slot_assign":
+            case "shadow_root_options":
+            {
+                if (ParseNode(arg1) is not { } target || dom.GetNode(target) is null)
+                {
+                    return RenderMutationImpact.None;
+                }
+
+                return new RenderMutationImpact(StateHelpers.NodeIsConnected(dom, target), true);
+            }
+
             default:
                 return RenderMutationImpact.None;
         }
@@ -269,15 +301,10 @@ internal static class RenderInvalidation
             return null;
         }
 
-        // The retained planner and document stylesheet cache are intentionally
-        // light-tree scoped. A mutation inside a connected shadow tree must still
-        // invalidate rendering, but cannot be represented by that document-local
-        // dirty set until scoped stylesheet invalidation is retained separately.
-        if (dom.ContainingShadowRoot(node) is not null)
-        {
-            return null;
-        }
-
+        // A mutation inside a connected shadow tree is recorded like any other: the retained
+        // planner plans every shadow stylesheet as well, and restyles the document when one of
+        // them changed (RetainedStylePlanner.AddShadowDamage). It used to drop the prepared
+        // render, which on a web-component page was most mutations.
         switch (cmd)
         {
             case "set_attribute":
@@ -343,7 +370,14 @@ internal static class RenderInvalidation
                     return null;
                 }
 
-                return RetainedStyleMutation.From(new TreeStyleMutation.Remove(node, oldParent));
+                // Captured now, while the subtree is still in the document: what it held decides
+                // which :has() rules its removal can reach (RemovedSubtreeFeatures).
+                return RetainedStyleMutation.From(new TreeStyleMutation.Remove(node, oldParent)
+                {
+                    Features = RemovedSubtreeFeatures.Capture(dom, node),
+                    NextSiblingRecorded = true,
+                    OldNextSibling = dom.GetNode(node)?.NextSibling,
+                });
             }
 
             case "insert_before":
@@ -354,11 +388,6 @@ internal static class RenderInvalidation
                 }
 
                 if (dom.GetNode(reference)?.Parent is not { } newParent)
-                {
-                    return null;
-                }
-
-                if (dom.ContainingShadowRoot(newParent) is not null)
                 {
                     return null;
                 }

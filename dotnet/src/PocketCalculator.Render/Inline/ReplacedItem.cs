@@ -15,6 +15,17 @@ internal readonly struct ReplacedItem
 
     public float PreferredRatio { get; init; }
 
+    /// <summary>
+    /// Whether the box has a preferred aspect ratio at all: an authored <c>aspect-ratio</c>
+    /// or a natural one. An iframe, an embed, an object and a video without metadata have a
+    /// natural size (CSS Images' 300x150 default object size) but no natural ratio, so a
+    /// definite width leaves the height at its natural 150 rather than transferring.
+    /// </summary>
+    public bool HasRatio => !NoRatio;
+
+    /// <summary>The inverse of <see cref="HasRatio"/>, so a default item has a ratio.</summary>
+    public bool NoRatio { get; init; }
+
     public float? MinWidth { get; init; }
 
     public float? MinHeight { get; init; }
@@ -43,6 +54,27 @@ internal readonly struct ReplacedItem
     /// </summary>
     public bool ZeroInlineMinContent { get; init; }
 
+    /// <summary>Whether <paramref name="other"/> sizes exactly as this does, bit for bit.</summary>
+    internal bool SameSizing(in ReplacedItem other) =>
+        Same(IntrinsicWidth, other.IntrinsicWidth)
+        && Same(IntrinsicHeight, other.IntrinsicHeight)
+        && Same(PreferredWidth, other.PreferredWidth)
+        && Same(PreferredHeight, other.PreferredHeight)
+        && BitConverter.SingleToInt32Bits(PreferredRatio) == BitConverter.SingleToInt32Bits(other.PreferredRatio)
+        && NoRatio == other.NoRatio
+        && Same(MinWidth, other.MinWidth)
+        && Same(MinHeight, other.MinHeight)
+        && Same(MaxWidth, other.MaxWidth)
+        && Same(MaxHeight, other.MaxHeight)
+        && RatioOnly == other.RatioOnly
+        && Same(RatioOnlyAvailableWidth, other.RatioOnlyAvailableWidth)
+        && ZeroInlineMinContent == other.ZeroInlineMinContent;
+
+    private static bool Same(float? a, float? b) =>
+        a is { } x
+            ? b is { } y && BitConverter.SingleToInt32Bits(x) == BitConverter.SingleToInt32Bits(y)
+            : b is null;
+
     public static ReplacedItem FromStyle(float width, float height, LayoutStyle style) =>
         FromIntrinsic(ReplacedIntrinsic.FromDimensions(width, height), style);
 
@@ -58,6 +90,14 @@ internal readonly struct ReplacedItem
             ? authored
             : (intrinsic.Ratio is { } natural && float.IsFinite(natural) && natural > 0f ? natural : null);
 
+        // DEVIATION from crates/obscura-render (inline.rs), which derives a ratio from any
+        // natural size. A natural size without a natural ratio (ReplacedIntrinsic.Ratio null
+        // with both dimensions known: an iframe, embed, object, or a video without metadata)
+        // has none in Chromium: `width: 120px` on a video is 120x150, not 120x60.
+        bool noNaturalRatio = explicitRatio is null
+            && intrinsic.Ratio is null
+            && intrinsic.Width is { } naturalWidth && naturalWidth > 0f
+            && intrinsic.Height is { } naturalHeight && naturalHeight > 0f;
         float intrinsicRatio;
         if (intrinsic.Ratio is { } r && float.IsFinite(r) && r > 0f)
         {
@@ -81,6 +121,7 @@ internal readonly struct ReplacedItem
             PreferredWidth = Px(style.Width),
             PreferredHeight = Px(style.Height),
             PreferredRatio = explicitRatio ?? intrinsicRatio,
+            NoRatio = noNaturalRatio,
             MinWidth = Px(style.MinWidth),
             MinHeight = Px(style.MinHeight),
             MaxWidth = Px(style.MaxWidth),
@@ -169,6 +210,12 @@ internal readonly struct ReplacedItem
         return new Size<float>(width, height);
     }
 
+    /// <summary>The height a width transfers to: through the ratio, or the natural height.</summary>
+    private float HeightFor(float width) => HasRatio ? width / PreferredRatio : IntrinsicHeight ?? 150f;
+
+    /// <summary>The width a height transfers to: through the ratio, or the natural width.</summary>
+    private float WidthFor(float height) => HasRatio ? height * PreferredRatio : IntrinsicWidth ?? 300f;
+
     public Size<float> Size(Size<float?> known)
     {
         float width;
@@ -179,11 +226,11 @@ internal readonly struct ReplacedItem
         }
         else if (known.Width is { } onlyWidth)
         {
-            (width, height) = (onlyWidth, onlyWidth / PreferredRatio);
+            (width, height) = (onlyWidth, HeightFor(onlyWidth));
         }
         else if (known.Height is { } onlyHeight)
         {
-            (width, height) = (onlyHeight * PreferredRatio, onlyHeight);
+            (width, height) = (WidthFor(onlyHeight), onlyHeight);
         }
         else if (PreferredWidth is { } preferredWidth && PreferredHeight is { } preferredHeight)
         {
@@ -191,11 +238,11 @@ internal readonly struct ReplacedItem
         }
         else if (PreferredWidth is { } preferredOnlyWidth)
         {
-            (width, height) = (preferredOnlyWidth, preferredOnlyWidth / PreferredRatio);
+            (width, height) = (preferredOnlyWidth, HeightFor(preferredOnlyWidth));
         }
         else if (PreferredHeight is { } preferredOnlyHeight)
         {
-            (width, height) = (preferredOnlyHeight * PreferredRatio, preferredOnlyHeight);
+            (width, height) = (WidthFor(preferredOnlyHeight), preferredOnlyHeight);
         }
         else if (IntrinsicWidth is { } intrinsicWidth && IntrinsicHeight is { } intrinsicHeight)
         {
@@ -218,7 +265,8 @@ internal readonly struct ReplacedItem
         }
 
         var tentative = new Size<float>(width, height);
-        if (PreferredWidth is null && PreferredHeight is null
+        if (HasRatio
+            && PreferredWidth is null && PreferredHeight is null
             && (known.Width is null || known.Height is null))
         {
             return ConstrainAutoSize(tentative);

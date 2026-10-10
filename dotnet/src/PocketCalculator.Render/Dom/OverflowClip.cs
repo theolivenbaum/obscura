@@ -73,6 +73,44 @@ public sealed class OverflowClip
             (0f, 0f));
     }
 
+    /// <summary>
+    /// The <c>clip: rect(...)</c> of an absolutely positioned box: offsets from its border box's
+    /// top-left corner, an <c>auto</c> side being that border edge. A rect whose far side is
+    /// before its near side clips everything.
+    /// </summary>
+    internal static OverflowClip ForClipProperty(in Rect rect, ClipRect clip, float tx, float ty)
+    {
+        float x = rect.X + tx;
+        float y = rect.Y + ty;
+        float left = x + (clip.Left ?? 0f);
+        float top = y + (clip.Top ?? 0f);
+        float right = F32.Max(x + (clip.Right ?? rect.Width), left);
+        float bottom = F32.Max(y + (clip.Bottom ?? rect.Height), top);
+        return new OverflowClip((left, right), (top, bottom), null, (0f, 0f));
+    }
+
+    /// <summary>
+    /// <paramref name="inherited"/> narrowed by the box's own <c>clip</c> property, which
+    /// (unlike <c>overflow</c>) clips the box itself as well as its descendants. Returns
+    /// <paramref name="inherited"/> unchanged when the box has none or is not absolutely
+    /// positioned.
+    /// </summary>
+    internal static OverflowClip? WithClipProperty(
+        OverflowClip? inherited,
+        LayoutStyle? style,
+        in Rect rect,
+        float tx,
+        float ty)
+    {
+        if (style is not { Clip: { } clip, Position: Layout.Position.Absolute })
+        {
+            return inherited;
+        }
+
+        OverflowClip own = ForClipProperty(rect, clip, tx, ty);
+        return inherited is null ? own : inherited.Intersect(own);
+    }
+
     internal OverflowClip Clone() => new(_x, _y, _rounded, _roundedOffset);
 
     internal OverflowClip Intersect(OverflowClip other)
@@ -142,6 +180,14 @@ public sealed class OverflowClip
     internal RoundedOverflowClipChain? RoundedChain() => _rounded;
 
     internal (float X, float Y) RoundedOffset() => _roundedOffset;
+
+    /// <summary>
+    /// Whether a point is inside the clip on both axes (an unbounded axis holds every value).
+    /// Rounded corners are not applied: hit testing clips to the padding box's rectangle.
+    /// </summary>
+    internal bool ContainsPoint(float x, float y) =>
+        (_x is not { } xs || (x >= xs.Start && x < xs.End))
+        && (_y is not { } ys || (y >= ys.Start && y < ys.End));
 
     internal Rect ViewportRect((float Width, float Height) viewport)
     {

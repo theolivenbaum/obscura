@@ -28,13 +28,6 @@ internal readonly record struct StaticPositionCandidate(
     bool InlineAxis,
     bool BlockAxis);
 
-internal readonly record struct FloatBand(
-    float Top,
-    float Bottom,
-    float Left,
-    float Right,
-    Float Side);
-
 internal static class DomPasses
 {
     internal static void SyncResolvedPercentagePadding(
@@ -122,6 +115,7 @@ internal static class DomPasses
                 padding = padding with { Left = left * containingBlockWidth };
             }
 
+            RememberPaddingBeforeUsedSync(style);
             style.Padding = padding;
         }
     }
@@ -211,7 +205,7 @@ internal static class DomPasses
         bool hasPositionedPercentagePadding = false;
         foreach (LayoutStyle style in styles.Values)
         {
-            foreach (LayoutStyle? pseudo in new[] { style.BeforePseudo, style.AfterPseudo })
+            foreach (LayoutStyle? pseudo in (ReadOnlySpan<LayoutStyle?>)[style.BeforePseudo, style.AfterPseudo])
             {
                 if (pseudo is not null
                     && pseudo.Position == TaffyPosition.Absolute
@@ -242,7 +236,7 @@ internal static class DomPasses
 
             float containingBlockWidth =
                 F32.Max(rect.Width - style.Border.Left - style.Border.Right, 0f);
-            foreach (LayoutStyle? pseudo in new[] { style.BeforePseudo, style.AfterPseudo })
+            foreach (LayoutStyle? pseudo in (ReadOnlySpan<LayoutStyle?>)[style.BeforePseudo, style.AfterPseudo])
             {
                 if (pseudo is null || pseudo.Position != TaffyPosition.Absolute)
                 {
@@ -267,7 +261,102 @@ internal static class DomPasses
                     };
                 }
 
+                RememberPaddingBeforeUsedSync(pseudo);
                 pseudo.Padding = padding;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Keep the padding a style had before a post-layout pass wrote the used percentage padding
+    /// into it, so <see cref="RestorePaddingBeforeUsedSync"/> can undo the write.
+    /// </summary>
+    private static void RememberPaddingBeforeUsedSync(LayoutStyle style) =>
+        style.PaddingBeforeUsedSync ??= style.Padding;
+
+    /// <summary>
+    /// Undo the previous pass's used-padding writes on retained styles before this pass reads
+    /// them.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/dom.rs, where the same writes land on styles
+    /// that are discarded with the layout. The port carries computed styles over to the next
+    /// retained pass, which then laid out with the previous layout's used padding as if it were
+    /// the computed value: a table with <c>padding: 5%</c> came out 47px wider on a retained
+    /// pass that changed nothing. Same reason as <c>ResetScrollbarGutters</c>.
+    /// </remarks>
+    internal static void RestorePaddingBeforeUsedSync(Dictionary<NodeId, LayoutStyle> styles)
+    {
+        foreach (LayoutStyle style in styles.Values)
+        {
+            Restore(style);
+            if (style.BeforePseudo is { } before)
+            {
+                Restore(before);
+            }
+
+            if (style.AfterPseudo is { } after)
+            {
+                Restore(after);
+            }
+        }
+
+        static void Restore(LayoutStyle style)
+        {
+            if (style.PaddingBeforeUsedSync is { } saved)
+            {
+                style.PaddingUsedByPreviousLayout = style.Padding;
+                style.Padding = saved;
+                style.PaddingBeforeUsedSync = null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Put back what <see cref="RestorePaddingBeforeUsedSync"/> undid, for a pass that keeps the
+    /// previous layout instead of running one: its styles must describe that layout.
+    /// </summary>
+    internal static void ReapplyPaddingUsedByPreviousLayout(Dictionary<NodeId, LayoutStyle> styles)
+    {
+        foreach (LayoutStyle style in styles.Values)
+        {
+            Reapply(style);
+            if (style.BeforePseudo is { } before)
+            {
+                Reapply(before);
+            }
+
+            if (style.AfterPseudo is { } after)
+            {
+                Reapply(after);
+            }
+        }
+
+        static void Reapply(LayoutStyle style)
+        {
+            if (style.PaddingUsedByPreviousLayout is { } used)
+            {
+                style.PaddingBeforeUsedSync = style.Padding;
+                style.Padding = used;
+                style.PaddingUsedByPreviousLayout = null;
+            }
+        }
+    }
+
+    /// <summary>Forget the previous layout's used padding once this pass lays out afresh.</summary>
+    internal static void ForgetPaddingUsedByPreviousLayout(Dictionary<NodeId, LayoutStyle> styles)
+    {
+        foreach (LayoutStyle style in styles.Values)
+        {
+            style.PaddingUsedByPreviousLayout = null;
+            if (style.BeforePseudo is { } before)
+            {
+                before.PaddingUsedByPreviousLayout = null;
+            }
+
+            if (style.AfterPseudo is { } after)
+            {
+                after.PaddingUsedByPreviousLayout = null;
             }
         }
     }
@@ -283,7 +372,10 @@ internal static class DomPasses
         Dictionary<NodeId, List<(Rect Rect, string Text)>> textRuns,
         Dictionary<int, Rect> anonRects,
         IReadOnlyDictionary<TaffyNodeId, int> generatedNodes,
-        Rect?[] generatedRects)
+        Rect?[] generatedRects,
+        float preciseX,
+        float preciseY,
+        Dictionary<NodeId, SubpixelRect> subpixelRects)
     {
         if (!StackGuard.CanDescend())
         {
@@ -295,9 +387,26 @@ internal static class DomPasses
         float y = absY + layout.Location.Y;
         Rect rect = new(x, y, layout.Size.Width, layout.Size.Height);
 
+        // DEVIATION from crates/obscura-render/src/dom.rs, which keeps only the rounded taffy
+        // layout. Chromium lays out in LayoutUnits (1/64 px) and snaps only at paint, so
+        // getBoundingClientRect() reports the fractional box. The snapped rect stays the one
+        // paint uses; the unrounded one is kept beside it for geometry reporting.
+        TaffyLayout unrounded = taffyTree.GetUnroundedLayout(taffyId);
+        float px = preciseX + unrounded.Location.X;
+        float py = preciseY + unrounded.Location.Y;
+
         if (idMap.TryGetValue(taffyId, out NodeId domId))
         {
             rects[domId] = rect;
+            Rect precise = new(px, py, unrounded.Size.Width, unrounded.Size.Height);
+            if (precise != rect && SubpixelRect.IsSnapOf(rect, precise))
+            {
+                subpixelRects[domId] = new SubpixelRect(rect, precise);
+            }
+            else
+            {
+                subpixelRects.Remove(domId);
+            }
         }
         else if (taffyTree.TryGetNodeContext(taffyId, out int? item) && item is { } index)
         {
@@ -337,7 +446,10 @@ internal static class DomPasses
                 textRuns,
                 anonRects,
                 generatedNodes,
-                generatedRects);
+                generatedRects,
+                px,
+                py,
+                subpixelRects);
         }
     }
 
@@ -352,85 +464,110 @@ internal static class DomPasses
         IReadOnlyDictionary<TaffyNodeId, NodeId> idMap,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles)
     {
-        Dictionary<NodeId, TaffyNodeId> reverse = new(idMap.Count);
-        foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
+        // Indexed by DOM slot, holding a taffy key (0 for none; a live key never is 0): three
+        // maps over every node of the document were most of this pass's time and allocation.
+        int slots = Math.Max(tree.SlotCount, 1);
+        ulong[] reverse = System.Buffers.ArrayPool<ulong>.Shared.Rent(slots);
+        ulong[] nearestAbsCbForChildren = System.Buffers.ArrayPool<ulong>.Shared.Rent(slots);
+        ulong[] nearestFixedCbForChildren = System.Buffers.ArrayPool<ulong>.Shared.Rent(slots);
+        try
         {
-            reverse[domId] = taffyId;
+            Array.Clear(reverse, 0, slots);
+            Array.Clear(nearestAbsCbForChildren, 0, slots);
+            Array.Clear(nearestFixedCbForChildren, 0, slots);
+            return Reparent(reverse, nearestAbsCbForChildren, nearestFixedCbForChildren);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<ulong>.Shared.Return(reverse);
+            System.Buffers.ArrayPool<ulong>.Shared.Return(nearestAbsCbForChildren);
+            System.Buffers.ArrayPool<ulong>.Shared.Return(nearestFixedCbForChildren);
         }
 
-        Dictionary<NodeId, TaffyNodeId> nearestAbsCbForChildren = new(styles.Count);
-        Dictionary<NodeId, TaffyNodeId> nearestFixedCbForChildren = new(styles.Count);
-        List<StaticPositionCandidate> staticCandidates = [];
-
-        foreach (NodeId domId in DomTraversal.RenderedDescendants(tree, tree.Document))
+        List<StaticPositionCandidate> Reparent(
+            ulong[] reverse,
+            ulong[] nearestAbsCbForChildren,
+            ulong[] nearestFixedCbForChildren)
         {
-            if (!styles.TryGetValue(domId, out LayoutStyle? style))
+            foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
             {
-                continue;
-            }
-
-            NodeId? parent = DomTraversal.RenderedParent(tree, domId);
-            TaffyNodeId inheritedAbsCb = taffyRoot;
-            TaffyNodeId inheritedFixedCb = taffyRoot;
-            if (parent is { } parentId)
-            {
-                if (nearestAbsCbForChildren.TryGetValue(parentId, out TaffyNodeId abs))
+                if (domId.Index < slots)
                 {
-                    inheritedAbsCb = abs;
-                }
-
-                if (nearestFixedCbForChildren.TryGetValue(parentId, out TaffyNodeId fix))
-                {
-                    inheritedFixedCb = fix;
+                    reverse[domId.Index] = taffyId.Value;
                 }
             }
 
-            // Record this before any candidate early-exit so all descendants get O(1)
-            // nearest-containing-block lookups.
-            TaffyNodeId? ownBox = reverse.TryGetValue(domId, out TaffyNodeId own) ? own : null;
-            bool establishesCb = style.EstablishesPositioningContainingBlock();
-            TaffyNodeId absChildCb = style.Position is not null || establishesCb
-                ? ownBox ?? inheritedAbsCb
-                : inheritedAbsCb;
-            TaffyNodeId fixedChildCb = establishesCb ? ownBox ?? inheritedFixedCb : inheritedFixedCb;
-            nearestAbsCbForChildren[domId] = absChildCb;
-            nearestFixedCbForChildren[domId] = fixedChildCb;
-
-            if (style.Position != TaffyPosition.Absolute)
+            List<StaticPositionCandidate> staticCandidates = [];
+            foreach (NodeId domId in DomTraversal.RenderedDescendants(tree, tree.Document))
             {
-                continue;
+                if (!styles.TryGetValue(domId, out LayoutStyle? style))
+                {
+                    continue;
+                }
+
+                NodeId? parent = DomTraversal.RenderedParent(tree, domId);
+                TaffyNodeId inheritedAbsCb = taffyRoot;
+                TaffyNodeId inheritedFixedCb = taffyRoot;
+                if (parent is { } parentId && parentId.Index < slots)
+                {
+                    if (nearestAbsCbForChildren[parentId.Index] is not 0 and ulong abs)
+                    {
+                        inheritedAbsCb = new TaffyNodeId(abs);
+                    }
+
+                    if (nearestFixedCbForChildren[parentId.Index] is not 0 and ulong fix)
+                    {
+                        inheritedFixedCb = new TaffyNodeId(fix);
+                    }
+                }
+
+                // Record this before any candidate early-exit so all descendants get O(1)
+                // nearest-containing-block lookups.
+                TaffyNodeId? ownBox = reverse[domId.Index] is not 0 and ulong own ? new TaffyNodeId(own) : null;
+                bool establishesCb = style.EstablishesPositioningContainingBlock();
+                TaffyNodeId absChildCb = style.Position is not null || establishesCb
+                    ? ownBox ?? inheritedAbsCb
+                    : inheritedAbsCb;
+                TaffyNodeId fixedChildCb = establishesCb ? ownBox ?? inheritedFixedCb : inheritedFixedCb;
+                nearestAbsCbForChildren[domId.Index] = absChildCb.Value;
+                nearestFixedCbForChildren[domId.Index] = fixedChildCb.Value;
+
+                if (style.Position != TaffyPosition.Absolute)
+                {
+                    continue;
+                }
+
+                bool hasBlockInset = style.Inset[0] is not null || style.Inset[2] is not null;
+                bool hasInlineInset = style.Inset[1] is not null || style.Inset[3] is not null;
+                if (ownBox is not { } child)
+                {
+                    continue;
+                }
+
+                TaffyNodeId target = style.PositionFixed ? inheritedFixedCb : inheritedAbsCb;
+                if (taffyTree.Parent(child) is not { } current)
+                {
+                    continue;
+                }
+
+                if (current == target)
+                {
+                    continue;
+                }
+
+                if (!hasBlockInset || !hasInlineInset)
+                {
+                    staticCandidates.Add(new StaticPositionCandidate(
+                        child, target, !hasInlineInset, !hasBlockInset));
+                    continue;
+                }
+
+                taffyTree.RemoveChild(current, child);
+                taffyTree.AddChild(target, child);
             }
 
-            bool hasBlockInset = style.Inset[0] is not null || style.Inset[2] is not null;
-            bool hasInlineInset = style.Inset[1] is not null || style.Inset[3] is not null;
-            if (!reverse.TryGetValue(domId, out TaffyNodeId child))
-            {
-                continue;
-            }
-
-            TaffyNodeId target = style.PositionFixed ? inheritedFixedCb : inheritedAbsCb;
-            if (taffyTree.Parent(child) is not { } current)
-            {
-                continue;
-            }
-
-            if (current == target)
-            {
-                continue;
-            }
-
-            if (!hasBlockInset || !hasInlineInset)
-            {
-                staticCandidates.Add(new StaticPositionCandidate(
-                    child, target, !hasInlineInset, !hasBlockInset));
-                continue;
-            }
-
-            taffyTree.RemoveChild(current, child);
-            taffyTree.AddChild(target, child);
+            return staticCandidates;
         }
-
-        return staticCandidates;
     }
 
     internal static (float X, float Y)? TaffyGlobalOrigin(TaffyTree taffyTree, TaffyNodeId node)
@@ -447,310 +584,6 @@ internal static class DomPasses
         }
 
         return (x, y);
-    }
-
-    internal static void CollectTaffyGlobalRects(
-        TaffyTree taffyTree,
-        TaffyNodeId node,
-        float parentX,
-        float parentY,
-        Dictionary<TaffyNodeId, Rect> rects)
-    {
-        if (!StackGuard.CanDescend())
-        {
-            return;
-        }
-
-        TaffyLayout layout = taffyTree.GetLayout(node);
-        float x = parentX + layout.Location.X;
-        float y = parentY + layout.Location.Y;
-        rects[node] = new Rect(x, y, layout.Size.Width, layout.Size.Height);
-        foreach (TaffyNodeId child in taffyTree.Children(node))
-        {
-            CollectTaffyGlobalRects(taffyTree, child, x, y, rects);
-        }
-    }
-
-    private static bool NarrowNodeToFloatBand(
-        TaffyTree taffyTree,
-        TaffyNodeId node,
-        IReadOnlyDictionary<TaffyNodeId, Rect> preliminaryRects,
-        FloatBand band)
-    {
-        if (!preliminaryRects.TryGetValue(node, out Rect rect))
-        {
-            return false;
-        }
-
-        if (rect.Y >= band.Bottom || rect.Y + rect.Height <= band.Top || rect.Width <= 0f)
-        {
-            return false;
-        }
-
-        TaffyStyle current = taffyTree.GetStyle(node);
-        TaffyLayout layout = taffyTree.GetLayout(node);
-        TaffyStyle narrowed = current.Clone();
-        float available;
-        float leftShift;
-        if (band.Side == Float.Right)
-        {
-            if (band.Left >= rect.X + rect.Width)
-            {
-                return false;
-            }
-
-            available = F32.Max(band.Left - rect.X, 0f);
-            leftShift = 0f;
-        }
-        else
-        {
-            if (band.Right <= rect.X)
-            {
-                return false;
-            }
-
-            leftShift = F32.Max(band.Right - rect.X, 0f);
-            available = F32.Max(rect.Width - leftShift, 0f);
-        }
-
-        if (available >= rect.Width - 0.01f)
-        {
-            return false;
-        }
-
-        float specified = current.BoxSizing == TaffyBoxSizing.ContentBox
-            ? F32.Max(
-                available
-                - layout.Padding.Left
-                - layout.Padding.Right
-                - layout.Border.Left
-                - layout.Border.Right,
-                0f)
-            : available;
-        Layout.Size<TaffyDimension> size = narrowed.Size;
-        size.Width = TaffyDimension.FromLength(specified);
-        narrowed.Size = size;
-        Layout.Size<TaffyDimension> maxSize = narrowed.MaxSize;
-        maxSize.Width = TaffyDimension.FromLength(specified);
-        narrowed.MaxSize = maxSize;
-        if (leftShift > 0f)
-        {
-            Layout.Rect<TaffyLengthPercentageAuto> margin = narrowed.Margin;
-            margin.Left = TaffyLengthPercentageAuto.FromLength(layout.Margin.Left + leftShift);
-            narrowed.Margin = margin;
-        }
-
-        taffyTree.SetStyle(node, narrowed);
-        return true;
-    }
-
-    private static bool GrowBfcToFloatBottom(
-        TaffyTree taffyTree,
-        TaffyNodeId node,
-        IReadOnlyDictionary<TaffyNodeId, Rect> preliminaryRects,
-        float floatBottom)
-    {
-        if (!preliminaryRects.TryGetValue(node, out Rect rect))
-        {
-            return false;
-        }
-
-        float desiredBorderHeight = F32.Max(floatBottom - rect.Y, 0f);
-        if (desiredBorderHeight <= rect.Height + 0.01f)
-        {
-            return false;
-        }
-
-        TaffyStyle current = taffyTree.GetStyle(node);
-        TaffyLayout layout = taffyTree.GetLayout(node);
-        float specified = current.BoxSizing == TaffyBoxSizing.ContentBox
-            ? F32.Max(
-                desiredBorderHeight
-                - layout.Padding.Top
-                - layout.Padding.Bottom
-                - layout.Border.Top
-                - layout.Border.Bottom,
-                0f)
-            : desiredBorderHeight;
-        TaffyStyle grown = current.Clone();
-        Layout.Size<TaffyDimension> minSize = grown.MinSize;
-        minSize.Height = TaffyDimension.FromLength(specified);
-        grown.MinSize = minSize;
-        taffyTree.SetStyle(node, grown);
-        return true;
-    }
-
-    private static bool NarrowIntersectingDescendants(
-        DomTree tree,
-        NodeId id,
-        TaffyTree taffyTree,
-        IReadOnlyDictionary<NodeId, TaffyNodeId> reverse,
-        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
-        IfcRegistry ifc,
-        IReadOnlyDictionary<TaffyNodeId, Rect> preliminaryRects,
-        FloatBand band)
-    {
-        if (!StackGuard.CanDescend())
-        {
-            return false;
-        }
-
-        if (!reverse.TryGetValue(id, out TaffyNodeId node))
-        {
-            return false;
-        }
-
-        if (!preliminaryRects.TryGetValue(node, out Rect rect))
-        {
-            return false;
-        }
-
-        if (rect.Y >= band.Bottom || rect.Y + rect.Height <= band.Top)
-        {
-            return false;
-        }
-
-        if (!styles.TryGetValue(id, out LayoutStyle? style))
-        {
-            return false;
-        }
-
-        if (style.Display == Display.None
-            || style.Float is not null
-            || style.Position == TaffyPosition.Absolute)
-        {
-            return false;
-        }
-
-        // Float-avoiding formatting contexts move as one box.
-        List<NodeId> inFlowElementChildren = [];
-        foreach (NodeId child in tree.Children(id))
-        {
-            if (styles.TryGetValue(child, out LayoutStyle? childStyle)
-                && childStyle.Display != Display.None
-                && childStyle.Float is null
-                && childStyle.Position != TaffyPosition.Absolute)
-            {
-                inFlowElementChildren.Add(child);
-            }
-        }
-
-        if (DomStyleFixups.EstablishesBlockFormattingContext(style)
-            || ifc.Whole.ContainsKey(id)
-            || inFlowElementChildren.Count == 0)
-        {
-            return NarrowNodeToFloatBand(taffyTree, node, preliminaryRects, band);
-        }
-
-        bool changed = false;
-        foreach (NodeId child in inFlowElementChildren)
-        {
-            changed |= NarrowIntersectingDescendants(
-                tree, child, taffyTree, reverse, styles, ifc, preliminaryRects, band);
-        }
-
-        return changed;
-    }
-
-    internal static bool ApplyFloatContinuations(
-        DomTree tree,
-        TaffyTree taffyTree,
-        IReadOnlyDictionary<TaffyNodeId, NodeId> idMap,
-        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
-        IfcRegistry ifc)
-    {
-        if (ifc.FloatContinuations.Count == 0)
-        {
-            return false;
-        }
-
-        Dictionary<NodeId, TaffyNodeId> reverse = new(idMap.Count);
-        TaffyNodeId? root = null;
-        foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
-        {
-            reverse[domId] = taffyId;
-            if (taffyTree.Parent(taffyId) is null)
-            {
-                root ??= taffyId;
-            }
-        }
-
-        if (root is not { } rootNode)
-        {
-            return false;
-        }
-
-        Dictionary<TaffyNodeId, Rect> preliminaryRects = new(idMap.Count);
-        CollectTaffyGlobalRects(taffyTree, rootNode, 0f, 0f, preliminaryRects);
-        bool changed = false;
-        foreach (FloatContinuation continuation in ifc.FloatContinuations)
-        {
-            if (!preliminaryRects.TryGetValue(continuation.Float, out Rect floatRect))
-            {
-                continue;
-            }
-
-            TaffyLayout floatLayout = taffyTree.GetLayout(continuation.Float);
-            if (!preliminaryRects.TryGetValue(continuation.Flow, out Rect flowRect))
-            {
-                continue;
-            }
-
-            FloatBand band = new(
-                floatRect.Y - floatLayout.Margin.Top,
-                floatRect.Y + floatRect.Height + floatLayout.Margin.Bottom,
-                floatRect.X - floatLayout.Margin.Left,
-                floatRect.X + floatRect.Width + floatLayout.Margin.Right,
-                continuation.Side);
-            if (band.Bottom <= flowRect.Y + flowRect.Height + 0.01f)
-            {
-                continue;
-            }
-
-            // A non-BFC wrapper is transparent to the BFC's float manager.
-            NodeId current = continuation.Owner;
-            while (DomTraversal.RenderedParent(tree, current) is { } parent)
-            {
-                List<NodeId> siblings = DomTraversal.RenderedChildren(tree, parent);
-                int index = siblings.IndexOf(current);
-                if (index < 0)
-                {
-                    break;
-                }
-
-                for (int sibling = index + 1; sibling < siblings.Count; sibling++)
-                {
-                    changed |= NarrowIntersectingDescendants(
-                        tree,
-                        siblings[sibling],
-                        taffyTree,
-                        reverse,
-                        styles,
-                        ifc,
-                        preliminaryRects,
-                        band);
-                }
-
-                bool reachedBfc = styles.TryGetValue(parent, out LayoutStyle? parentStyle)
-                    && DomStyleFixups.EstablishesBlockFormattingContext(parentStyle);
-                if (reachedBfc)
-                {
-                    if (parentStyle is not null
-                        && parentStyle.Height.IsAuto
-                        && reverse.TryGetValue(parent, out TaffyNodeId bfcNode))
-                    {
-                        changed |= GrowBfcToFloatBottom(
-                            taffyTree, bfcNode, preliminaryRects, band.Bottom);
-                    }
-
-                    break;
-                }
-
-                current = parent;
-            }
-        }
-
-        return changed;
     }
 
     /// <summary>

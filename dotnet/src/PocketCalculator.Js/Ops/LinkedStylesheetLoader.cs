@@ -69,7 +69,12 @@ internal static partial class LinkedStylesheetLoader
             var referrer = policy is null ? null : FetchReferrer.Client with { Policy = policy };
             var loaded = await LoadAsync(transport, document, url, 0, new HashSet<string>(StringComparer.Ordinal), referrer)
                 .ConfigureAwait(false);
-            if (!StylesheetOps.SetLoadedExternalStylesheet(document, ownerNid, loaded.Css, loaded.OriginClean))
+            // Installing the sheet writes the document and invalidates its retained render, so it
+            // runs on the page's own loop between tasks (IsolateLock.RunOnPageAsync), as the
+            // reference's op does, not on whichever thread completed the load.
+            if (!await document.IsolateLock.RunOnPageAsync(
+                    () => StylesheetOps.SetLoadedExternalStylesheet(document, ownerNid, loaded.Css, loaded.OriginClean))
+                .ConfigureAwait(false))
             {
                 return """{"ok":false}""";
             }
@@ -99,6 +104,9 @@ internal static partial class LinkedStylesheetLoader
             return new LoadedSheet(string.Empty, url, true);
         }
 
+        // The fetch's own tail is not moved to the page loop (tailOnPageLoop): a sheet's @imports
+        // are found from its body, and their requests must not wait for the page's next turn.
+        // Only installing the sheet does (OpLoadStylesheetAsync).
         var raw = await FetchOps.FetchUrlAsync(
                 transport, document, url, "GET", "{}", [], "no-cors", "same-origin",
                 internalLoad: true, hostConsumesBody: true, referrer: referrer)

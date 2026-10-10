@@ -111,7 +111,10 @@ public sealed partial class PocketCalculatorJsRuntime
     void IPostedTaskSpawner.Spawn(Action<double> deliver)
     {
         ArgumentNullException.ThrowIfNull(deliver);
-        _postedTasks.Enqueue(deliver);
+        lock (_postedTasks)
+        {
+            _postedTasks.Enqueue(deliver);
+        }
     }
 
     partial void BeginAnimationTask() => RenderState.BeginAnimationTask(State);
@@ -136,6 +139,16 @@ public sealed partial class PocketCalculatorJsRuntime
     // ---------------------------------------------------------------- page state
 
     public void SetCookieJar(CookieJar jar) => State.CookieJar = jar;
+
+    /// <summary>
+    /// Gives the page's documents host-held Web Storage: the context's <c>localStorage</c>
+    /// and the page's <c>sessionStorage</c>, which outlive a navigation.
+    /// </summary>
+    public void SetWebStorage(WebStorage local, WebStorage session)
+    {
+        State.LocalStorage = local;
+        State.SessionStorage = session;
+    }
 
     public void SetHttpClient(PocketCalculatorHttpClient client)
     {
@@ -520,6 +533,17 @@ public sealed partial class PocketCalculatorJsRuntime
     /// Page moves these into its own network events so the CDP layer emits
     /// Network events for them (#406).
     /// </summary>
+    /// <summary>
+    /// Drain the count of document loads <c>document.open()</c>/<c>close()</c> caused on
+    /// the page's document (see <see cref="PocketCalculatorState.ScriptDocumentLoads"/>).
+    /// </summary>
+    public int TakeScriptDocumentLoads()
+    {
+        var loads = State.ScriptDocumentLoads;
+        State.ScriptDocumentLoads = 0;
+        return loads;
+    }
+
     public IReadOnlyList<JsNetworkEvent> TakeJsNetworkEvents()
     {
         var events = State.JsNetworkEvents.ToArray();
@@ -646,6 +670,8 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         ArgumentNullException.ThrowIfNull(frame);
         frame.CookieJar = State.CookieJar;
+        frame.LocalStorage = State.LocalStorage;
+        frame.SessionStorage = State.SessionStorage;
         frame.HttpClient = State.HttpClient;
         frame.Callbacks = State.Callbacks;
         frame.Encoding = State.Encoding;
@@ -653,6 +679,7 @@ public sealed partial class PocketCalculatorJsRuntime
         frame.BlockedUrls.AddRange(State.BlockedUrls);
         frame.InterceptEnabled = State.InterceptEnabled;
         frame.PageInFlight = State.PageInFlight;
+        frame.IsolateLock = State.IsolateLock;
         frame.StealthClient = State.StealthClient;
         // A frame realm shares the page transport, so its renderer cache must not open
         // synchronous requests either (upstream 97ff86d). Frame geometry resolves

@@ -864,6 +864,15 @@ internal static class ImageAgent
     /// Fetch with a bounded timeout, retrying on rate-limit / transient errors with backoff.
     /// A URL the SSRF guard refuses is not retried.
     /// </summary>
+    /// <remarks>
+    /// Synchronous by contract (<see cref="IRenderResourceLoader"/> serves synchronous layout
+    /// and paint), so it blocks its caller on the network, sleeps between retries, and holds
+    /// whatever its caller holds. It is off the page path: a page with a transport (every
+    /// <c>Page</c>, and any runtime given an HTTP client) makes its cache cache-only
+    /// (<see cref="RenderResourceCache.SetSyncLoadingEnabled"/>) and loads resources through
+    /// the transport asynchronously. Only a standalone renderer, or a bare runtime with no
+    /// client, reaches it.
+    /// </remarks>
     internal static byte[]? Get(string url)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? target))

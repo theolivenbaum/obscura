@@ -62,7 +62,7 @@ public static partial class ComputedStyle
             case "display":
                 return lower is "none" or "flex" or "inline-flex" or "inline" or "inline-block" or "grid"
                     or "inline-grid" or "block" or "flow-root" or "table" or "inline-table"
-                    or "-webkit-box" or "-webkit-inline-box" or "contents";
+                    or "-webkit-box" or "-webkit-inline-box" or "contents" or "list-item";
             case "direction":
                 return lower is "ltr" or "rtl";
             case "position":
@@ -1304,11 +1304,13 @@ public static partial class ComputedStyle
             case "font-weight":
                 return SpecifiedFontWeight(value) is not null;
             case "font-family":
-                return value.Trim().Length != 0;
+                return value.AsSpan().Trim().Length != 0;
             case "font-style":
                 return lower is "normal" or "italic" || lower.StartsWith("oblique", StringComparison.Ordinal);
             case "text-align":
                 return lower is "left" or "right" or "start" or "end" or "center" or "justify";
+            case "text-align-last":
+                return lower is "auto" or "left" or "right" or "start" or "end" or "center" or "justify";
             case "text-transform":
                 return lower is "none" or "uppercase" or "lowercase" or "capitalize";
             case "text-decoration":
@@ -1344,11 +1346,15 @@ public static partial class ComputedStyle
                 return ParseCounterDirectives(value, 0) is not null;
             case "list-style-type":
                 return ListStyleKeyword(value.Trim()) is not null;
+            case "list-style-position":
+                return lower is "inside" or "outside";
             case "list-style":
             {
                 foreach (string token in SplitWhitespace(value))
                 {
-                    if (ListStyleKeyword(token) is not null)
+                    if (ListStyleKeyword(token) is not null
+                        || CssText.EqualsAscii(token, "inside")
+                        || CssText.EqualsAscii(token, "outside"))
                     {
                         return true;
                     }
@@ -1359,7 +1365,7 @@ public static partial class ComputedStyle
 
             case "animation":
             case "animation-name":
-                return value.Trim().Length != 0;
+                return value.AsSpan().Trim().Length != 0;
             case "background":
             case "font":
             case "grid-template":
@@ -1444,7 +1450,7 @@ public static partial class ComputedStyle
         "stroke-width", "text-anchor", "border-color", "outline", "outline-width", "outline-style", "outline-color",
         "outline-offset", "color-scheme", "font-size", "letter-spacing", "font", "font-weight",
         "font-family", "font-style", "font-optical-sizing", "font-variation-settings", "text-align",
-        "text-indent", "text-transform", "text-decoration", "text-decoration-line", "line-height",
+        "text-align-last", "text-indent", "text-transform", "text-decoration", "text-decoration-line", "line-height",
         "white-space", "text-overflow", "-webkit-line-clamp", "-webkit-box-orient", "overflow-wrap",
         "word-wrap", "word-break", "text-wrap", "text-wrap-style", "align-items", "justify-items",
         "place-items", "align-self", "justify-self", "place-self", "align-content",

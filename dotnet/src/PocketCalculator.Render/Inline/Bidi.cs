@@ -9,11 +9,11 @@ namespace PocketCalculator.Render;
 /// </summary>
 /// <remarks>
 /// PORT NOTE. The Rust engine uses the <c>unicode-bidi</c> crate, a full UAX#9 implementation.
-/// This is a reduced resolver: paragraph level from the first strong character (P2/P3), strong
-/// L/R/AL to their own levels, European and Arabic numbers one level above an RTL context
-/// (W2/W7 approximated), neutrals to the paragraph level, the L1 whitespace reset, and the L2
-/// reordering. It does <em>not</em> implement explicit embedding controls (RLE/LRE/PDF),
-/// isolates (LRI/RLI/FSI/PDI), or the N1/N2 neutral resolution from surrounding strong types.
+/// This is a reduced resolver: paragraph level from CSS <c>direction</c> (HL1) or else the first
+/// strong character (P2/P3), strong L/R/AL to their own levels, European and Arabic numbers one
+/// level above an RTL context (W2/W7 approximated), neutrals by N1/N2, the L1 whitespace reset,
+/// and the L2 reordering. It does <em>not</em> implement explicit embedding controls
+/// (RLE/LRE/PDF) or isolates (LRI/RLI/FSI/PDI).
 /// Purely left-to-right text - which takes an explicit fast path here - is exact; mixed-
 /// direction paragraphs can order differently from the Rust engine, and that is the first
 /// thing to check if bidi text drifts.
@@ -54,12 +54,16 @@ internal static class Bidi
         return false;
     }
 
-    public static List<(int Start, int End, byte Level)> LevelRuns(string line, out bool rtl)
+    /// <param name="baseRtl">
+    /// The paragraph level from CSS <c>direction</c> (HL1), or <c>null</c> for the first strong
+    /// character's (P2/P3).
+    /// </param>
+    public static List<(int Start, int End, byte Level)> LevelRuns(string line, out bool rtl, bool? baseRtl = null)
     {
-        rtl = false;
+        rtl = baseRtl == true;
         if (line.Length == 0)
         {
-            return [(0, 0, 0)];
+            return [(0, 0, (byte)(rtl ? 1 : 0))];
         }
 
         var classes = new Strong[line.Length];
@@ -82,15 +86,24 @@ internal static class Bidi
             position += consumed;
         }
 
-        if (!anyRtl)
+        if (!anyRtl && baseRtl != true)
         {
             // Fast path: no right-to-left character anywhere, so the whole line is one LTR run.
             return [(0, line.Length, 0)];
         }
 
-        byte paragraph = 0;
+        // DEVIATION from crates/obscura-render/src/inline.rs (cosmic-text), whose paragraph
+        // level always comes from the first strong character. HTML's dir and CSS direction set
+        // it (UAX#9 HL1, CSS Writing Modes 2.4): Chromium 141 starts a dir=rtl paragraph of
+        // Latin text at the right, and an LTR paragraph that opens with Hebrew at the left.
+        byte paragraph = (byte)(baseRtl == true ? 1 : 0);
         foreach (Strong strong in classes)
         {
+            if (baseRtl is not null)
+            {
+                break;
+            }
+
             if (strong == Strong.LeftToRight)
             {
                 paragraph = 0;
@@ -116,6 +129,8 @@ internal static class Bidi
                 _ => paragraph,
             };
         }
+
+        ResolveNeutrals(classes, levels, paragraph);
 
         // L1: reset trailing whitespace and separators to the paragraph level.
         int? resetFrom = 0;
@@ -172,6 +187,60 @@ internal static class Bidi
         runs.Add((start, line.Length, runLevel));
         return runs;
     }
+
+    /// <summary>
+    /// UAX#9 N1/N2: a run of neutrals between strong text of one direction takes that
+    /// direction (numbers count as right to left, except where this resolver already treats
+    /// them as left to right: in a left-to-right paragraph); any other run takes the paragraph's.
+    /// </summary>
+    /// <remarks>
+    /// Without it every neutral sat at the paragraph level, so the space between two words of
+    /// the other direction split them into two runs that reordering then put in logical order:
+    /// "hello world" in a dir=rtl paragraph read "world hello", which Chromium 141 does not.
+    /// </remarks>
+    private static void ResolveNeutrals(Strong[] classes, byte[] levels, byte paragraph)
+    {
+        bool paragraphRtl = paragraph == 1;
+        int i = 0;
+        while (i < classes.Length)
+        {
+            if (!IsNeutral(classes[i]))
+            {
+                i++;
+                continue;
+            }
+
+            int end = i;
+            while (end < classes.Length && IsNeutral(classes[end]))
+            {
+                end++;
+            }
+
+            bool before = i == 0 ? paragraphRtl : IsRtlForNeutrals(classes[i - 1], paragraphRtl);
+            bool after = end == classes.Length ? paragraphRtl : IsRtlForNeutrals(classes[end], paragraphRtl);
+            if (before == after && before != paragraphRtl)
+            {
+                // Left to right inside a right-to-left paragraph sits at 2, right to left
+                // inside a left-to-right one at 1.
+                byte level = (byte)(paragraphRtl ? 2 : 1);
+                for (int j = i; j < end; j++)
+                {
+                    levels[j] = level;
+                }
+            }
+
+            i = end;
+        }
+    }
+
+    private static bool IsNeutral(Strong strong) => strong is Strong.Neutral or Strong.Whitespace or Strong.Separator;
+
+    private static bool IsRtlForNeutrals(Strong strong, bool paragraphRtl) => strong switch
+    {
+        Strong.RightToLeft or Strong.ArabicLetter or Strong.ArabicNumber => true,
+        Strong.EuropeanNumber => paragraphRtl,
+        _ => false,
+    };
 
     /// <summary>UAX#9 L2 reordering of the level runs that make up one visual line.</summary>
     public static List<(int Start, int End)> Reorder(

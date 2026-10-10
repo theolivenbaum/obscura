@@ -171,6 +171,66 @@ set_text_content                tag_name                        template_content
 text_content
 ```
 
+Port addition: `document_close` (no arguments, answers `"true"`). The C# shim's
+`document.close()` sends it when it ends a parser `document.open()` started on a loaded
+document; the host counts it so the CDP layer reports the reload's lifecycle events
+(`Dispatcher.DrainDocumentLoads`). The Rust shim's `close()` does nothing and never sends it.
+
+Port addition: `ce_define` (arg1 a custom element name, answers `"true"`).
+`customElements.define()` sends it so the host knows the names defined in the realm: the
+document's parser (`DocumentParser`) stops after inserting such an element, and the realm
+upgrades it before its children are parsed.
+
+Port additions for documents without a browsing context (`DomTree.Documents.cs`,
+bootstrap.js `_parsedDocs`): createHTMLDocument, createDocument, DOMParser, `new Document()`,
+Document.cloneNode and XHR's responseXML each make a document node in the same arena, never
+connected to the page. The Rust shim stands them in as plain objects over a detached element
+and sends none of these.
+
+- `create_document` (arg1 content type, default `application/xml`): a new empty document's id.
+- `parse_document` (arg1 content type, arg2 markup): a new document holding arg2 parsed as a
+  whole document, HTML for `text/html` (declarative shadow roots left as templates, scripts
+  already started), XML otherwise (`XmlParsing.cs`; malformed input carries Chromium's
+  `<parsererror>`). Answers its id; `quota-exceeded` like `set_inner_html` when it cannot fit.
+- `document_info` (arg1 node): `{"contentType":...,"quirks":bool}` for such a document, else
+  `"null"`.
+- `owner_document` (arg1 node): the node document's id when it is such a document, `-1` when
+  it is the page's, `-2` when arg1 is itself a document.
+- `adopt_node` (arg1 node, arg2 document id or empty for the page's): makes arg2 the node
+  document of arg1's shadow-including subtree; `"true"`. The shim detaches the node first.
+  Inserting a node under another document's node (`append_child`, `insert_before`) adopts it
+  as well, natively.
+- `outer_xml` (arg1 node): DOM Parsing's XML serialization (`XMLSerializer`). `inner_html` and
+  `outer_html` answer it too for a node of an XML document.
+- `doctype_system_id` (arg1 doctype node), and `create_doctype` accepts arg2 as
+  `public_id\0system_id`.
+- `document_element`, `document_doctype` and `document_title` take an optional document id in
+  arg1, and `get_element_by_id` one in arg2; empty (as the Rust shim sends) is the page's. A
+  secondary document's document element is its first element child whatever its name.
+
+Port additions for shadow roots and slots (bootstrap.js `_shadowRootFromNid`, `HTMLSlotElement`,
+`assignedSlot`, `slotchange`; the Rust shim has none of them):
+
+- `shadow_root_host` (arg1 a shadow root's node): `"host\0mode\0flags"`, flags being four
+  `0`/`1` characters for delegatesFocus, clonable, serializable and manual slot assignment, or
+  `""` when arg1 is no shadow root. `node_type` reports a root's backing node as 9.
+- `shadow_root_options` (arg1 root, arg2 the four flags): records attachShadow's options;
+  `"true"` when arg1 is a shadow root.
+- `slot_assigned_nodes` (arg1 slot): JSON array of the slot's assigned nodes, or `"null"` when
+  arg1 is not a slot in a shadow tree.
+- `assigned_slot` (arg1 node): the slot it is assigned to, or `-1`.
+- `slot_assign` (arg1 slot, arg2 JSON array of node ids): `assign(...nodes)`; `"true"` when arg1
+  is a slot.
+- `slot_changes` (no arguments): JSON array of the slots whose assigned nodes changed since the
+  last call (the host marks the shadow trees a mutation can affect before it runs).
+- `event_path` (arg1 node; port addition for event dispatch): `1` when the tree has any shadow
+  root, else `0`, then DOM's "get the parent" chain from arg1 to its root, comma-separated node
+  ids with arg1 left out. A node assigned to a slot steps to the slot (that id is prefixed `s`),
+  a shadow root to its host, anything else to its parent; only the flag when arg1 is no node.
+  bootstrap.js decides where a non-composed event stops at a shadow root and adds the window
+  after the document; while the tree has no shadow root it walks the parents its wrappers
+  cache and asks again only after a tree mutation.
+
 The three `op_external_stylesheet_*` ops (upstream 04418a5) hold a linked sheet's
 fetched CSS beside its `<link>` (or an `@import`'s beside its `<style>`) in the
 `DomTree`, with an origin-clean bit. `set` accepts only a `link` or `style` owner
@@ -313,9 +373,16 @@ so these are called unguarded:
 | `op_frame_document_from_load` | fast | `body_token: f64, viewport_width: u64, viewport_height: u64, sandboxed: bool` | `u32` frame id, 0 when refused |
 | `op_frame_document_srcdoc` | fast | `iframe_nid: u32, viewport_width: u64, viewport_height: u64, sandboxed: bool` | `u32` frame id, 0 when refused |
 | `op_load_stylesheet` | async | `owner_nid: u32, url: String` | `String`: `{"ok":true,"responseUrl":...}` or `{"ok":false}` |
+| `op_storage` | fast | `kind: "local"\|"session", cmd: "load"\|"get"\|"key"\|"length"\|"set"\|"remove"\|"clear", key: String, value: String` | `String`: `"none"` when the calling document has no host-held area (opaque origin, no store), else `load` a JSON array of `[key, value]`, `get`/`key` a JSON string or `null`, `length` a number, `set` `"quota"` when refused, `""` |
 | `op_frame_same_origin` | fast | `frame_id: u32` | `f64`: 1 same-origin, 0 cross-origin, -1 unknown |
 | `op_history_url` | fast | `url: String, frame_id: u32` | `bool`: false, and nothing kept, when the document may not be rewritten to `url`; `""` clears it |
 | `op_wasm_memory_admit` | fast | `held_bytes: f64, delta_bytes: f64` | `bool`: whether the isolate's WebAssembly memory budget allows `delta_bytes` more |
+| `op_worker_import_script` | sync | `url: String, worker_url: String, scope: Object, runner: Function` | `String`: `""` once `runner(scope, source, final_url, muted)` has run, `"network"` on a network error (blocks on the fetch) |
+| `op_script_declarations` | fast | `source: String` | `String`: `{"s":strict,"v":[vars],"f":[functions],"l":[lexicals]}`, the script's top-level names |
+| `op_blob_script_register` | fast | `blob_url: String, source: String` | `(void)`; a JavaScript Blob's text, for `blob:` module imports |
+| `op_blob_script_revoke` | fast | `blob_url: String` | `(void)` |
+| `op_prefetch_module_graph` | async | `url: String` | `bool`: true once the module graph at `url` is in the loader's cache or failed (a dynamic module script, before its `import()`) |
+| `op_parser_write` | sync | `text: String, probe: bool` | `bool`: with `probe`, whether the document's parser has an insertion point (a parser-inserted script is running); otherwise whether the parser took `text` at its insertion point (and parsed what it could of it, running a written inline script) |
 
 `op_get_cookies` and `op_set_cookie` answer a document with an opaque origin (a frame
 sandboxed without `allow-same-origin`) with the string `"\u0000sandboxed"`, on which

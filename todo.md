@@ -303,8 +303,8 @@ Decisions:
 
 Found during the review, not from upstream:
 
-- [ ] Left, right, left floats: the third float lands below the first (`BlockLayout.cs`
-      caller, around line 796); repro in the review document
+- [x] Left, right, left floats: the third float lands below the first (`BlockLayout.cs`
+      caller, around line 796); repro in the review document. Floats are CSS floats now
 - [ ] An inline `<span>` reports width 0 from `getBoundingClientRect()`; an `inline-block`
       reports its real width (seen writing the font-directory CDP test)
 - [ ] Render loads on CDP pages other than the first produce no Network events:
@@ -358,11 +358,11 @@ Found during the review, not from upstream:
     by coordinates hit inline links), RTL and wrapped fragments match Chromium, nested
     padded spans wrap as Chromium does; `visibility` inherits; closed `<details>` and
     `dialog:not([open])` are hidden; left/right/left floats place natively
-  - [ ] layout, found on the way: a float after inline text starts a new line where
-    Chromium keeps it on the line; `dir=rtl` text does not start at the right;
+  - [ ] layout, found on the way: ~~a float after inline text starts a new line where
+    Chromium keeps it on the line~~ (fixed: anchored floats); `dir=rtl` text does not start at the right;
     `<summary>` reports `block` (Chromium `list-item`); centred and justified lines
-    count the trailing space; a block with an explicit width beside a float is
-    narrowed
+    count the trailing space; ~~a block with an explicit width beside a float is
+    narrowed~~ (fixed: it moves below the float, as in Chromium)
   - [x] HTML tree construction is the port's own (`HtmlTreeBuilder`) over AngleSharp's
     tokenizer (M11): 50k nested divs 20 s to 0.14 s, a 50k-sibling fragment 91 s to
     0.13 s; html5lib tree-construction 1756/1765
@@ -455,6 +455,80 @@ Found during the review, not from upstream:
   tree so a restyled out-of-flow box re-runs layout for its formatting context
   rather than the document. Raising the watchdog budget only moves the
   threshold.
+
+  Measured again on nvidia.com (live, 4.7k elements, October 2026): reads with
+  no write in between already reuse the retained layout (1000 `offsetHeight`
+  reads 10ms on a 2000-item page), so the cost is entirely write-then-read
+  cycles - 75 `offsetParent`/`offsetWidth` reads after AEM image components
+  swap a placeholder `src` and insert an `<img>`, each a whole-document
+  relayout. Three of those relayouts' costs were spurious and are fixed (see
+  "An `<img>` source swap restyles the image", "Line layouts are kept with the
+  shaped paragraph" and the font-set note under "Shaped paragraphs are carried
+  across render passes"); `op_layout_offset` is now a geometry consumer like
+  `op_layout_geometry`. Interleaved through CDP, three runs each: goto 34.6s ->
+  27.4s (Chromium 2.5s), 75 `offsetParent` reads 16.5s -> 9.3s (Chromium 32ms),
+  peak RSS 4.1GB -> 3.0GB; on a 2000-item local page a class write + `offsetWidth`
+  read 255ms -> 200ms, a style write + `getBoundingClientRect` 187ms -> 139ms
+  (Chromium 2.3ms and 1.3ms). What is left is the relayout itself (120-250ms a
+  pass on nvidia.com: taffy with text measurement a third, the top-down style
+  pass a fifth, the box-tree build a seventh, `@font-face` collection and the
+  per-pass `TextEngine` font database 6% each), which needs the retained box
+  tree above.
+
+  Partly done (October 2026): a retained pass now carries the previous pass's
+  layout results over to every unchanged subtree and takes over unchanged inline
+  items (see "A relayout carries the previous pass's layout results over" under
+  Known deviations). Interleaved A/B against c77530b, same build settings, three
+  runs, CLI `fetch --eval` on a local page of 2000 grid items: class write +
+  `offsetWidth` 889-983ms -> 127-184ms, style write + `getBoundingClientRect`
+  759-853ms -> 106-115ms, 50 interleaved class toggles + reads 47.5-48.6s ->
+  7.8-8.1s, 1000 reads without writes 3-6ms both; peak RSS 961-1006MB ->
+  924-930MB. On 2000 block list items the gain is smaller (50 toggles 8.1-8.8s
+  -> 6.4-6.7s), since layout was not the cost there. nvidia.com (live, CDP,
+  three runs): goto 30.0-30.4s -> 29.3-30.4s, 75 `offsetParent` reads
+  11.2-12.0s -> 10.3-11.2s, peak RSS 1465-1559MB -> 1505-1660MB. What is left
+  per forced read on nvidia.com (~165ms) is no longer one cost: with floats
+  on the page the root formatting context is laid out uncached (~50ms: the
+  float rewrite computes same-BFC layout without the cache, so only float-free
+  formatting contexts carry over), the box-tree build 23ms, `@font-face`
+  collection 9ms, cascade and top-down 17ms, derived scroll/sticky geometry
+  17ms, and a dozen smaller whole-document walks. Each is O(document); making
+  them proportional to the change needs the box tree itself retained (patched
+  in place rather than rebuilt and paired), and the style and derived-geometry
+  walks skipped for clean subtrees. `POCKETCALCULATOR_LAYOUT_PROFILE=1` prints
+  the per-phase split of every prepare.
+
+  Phase 2 (October 2026): float-heavy formatting contexts carry over, the cascade
+  and top-down pass walk only the paths to fresh styles, the whole-document
+  walks around a pass are shared or memoized, a pass allocates about a quarter
+  less, a consumed box tree is emptied so the GC stops promoting it, and a
+  removal restyles only what it can reach (see the matching Known deviations
+  sections). Interleaved against 1001c70, same build settings, three runs each:
+  nvidia.com (live, CDP) goto 30.2-30.4s -> 20.2-30.2s (the cap is hit in the
+  page variant whose removals restyle the document), forced reads 21.1-22.0s
+  for ~117 -> 12.4-14.4s for ~175, 75 `offsetParent` reads 4.2-4.8s (base
+  reached only 30-31 of them in 10.1-10.4s), `clientWidth` 31-33 reads in
+  3.7-3.8s -> 41-55 in 3.8-4.4s, 20 `offsetHeight` 2.6-3.0s -> 1.4-2.6s,
+  `getBoundingClientRect` 3.3-3.6s -> 1.8-2.4s, peak RSS 1.30-1.85GB ->
+  0.90-1.21GB; reddit.com goto 16.5-30.3s -> 15.4-17.4s, peak RSS 0.76-1.03GB
+  -> 0.82-1.23GB. 2,000 grid items: 50 toggles 8.0-9.1s -> 4.1-4.4s; 2,000
+  list items 6.6-7.3s -> 3.1-3.7s; float article, top paragraph growing
+  134-172ms -> 51-68ms. Render layout performance classes: LargeTree 19-20s ->
+  14.5-15.7s, the others within noise.
+
+  Not done: patching the retained box tree in place (step 3). `LayoutStyle`s
+  are written in place by the top-down pass, the fixups and the repairs, so
+  "this subtree's inputs did not change" has no sound signal short of
+  comparing outputs, which is what `RetainedTaffyLayout.Transplant` already
+  does; the build was made cheaper instead. Scoped layout (step 5) is not
+  started. The early passes of a page are dominated by JIT warmup (bin builds
+  run tier-0 code): `DOTNET_TC_CallCountingDelayMs=0` cut the first 30 passes
+  on the nvidia.com snapshot 5.4s -> 3.1s, and a ReadyToRun publish removes most
+  of it. The CLI now ships `System.Runtime.TieredCompilation.CallCountingDelayMs=20`
+  in its runtimeconfig (PocketCalculator.Cli.csproj): on a ReadyToRun publish, 0 ms
+  cut a 2,000-item benchmark 16% but added ~70ms (11%) to cold start on a trivial
+  page, 20 ms cut it 9% with no cold-start cost. Library consumers set it in their
+  own host's runtimeconfig if they want it.
 
 - **`#/view/Masonry` on the Tesserae sample app still never lays out**, and F39
   attributes it to the wrong cost. Instrumented per prepare (`PREP #n`), the
@@ -777,6 +851,90 @@ Found during the review, not from upstream:
   reader goes away. 10 of 10 under a 10-burner stress that previously failed about
   one run in six. The cap assertion itself is unchanged.
 
+## Float layout (CSS 2.1 9.5)
+
+Floats used to be built as flex rows (`DomBuildFloats.cs`, a port of Rust's
+`build_children_with_float_zone`): a float and the siblings after it became one row, so text
+never wrapped around a float, nothing below it reflowed, and wikipedia.org's footer wrapped.
+They are now CSS floats, laid out by the block formatting context, measured against
+Chromium 141 on the pages in `render-repros/floats/` (`scripts/float-conformance.mjs`).
+
+Design:
+
+- **Build** (`DomBuild.BuildMixedBlock`, `floatFlow`). Only when the document has a float
+  (`BuildContext.HasFloats`; a float-free document builds and lays out exactly as before). A
+  block container, table cell or inline-block with floated children is a taffy `Block`:
+  in-flow blocks and floats are its children, and each inline run is an inline formatting
+  context leaf (`Display.Block`, so it is in the same BFC). A float inside a run that folds to
+  one shaped context stays in it as an *anchor* (text offset, `IfcRegistry.FloatAnchors`) and
+  its box is a sibling after the leaf; a run that does not fold is split at its floats. After
+  the build every box that establishes a BFC (flow-root, overflow, inline-block, flex/grid,
+  abs, table, cell) or is replaced gets `Style.EstablishesBfc`, and every element its
+  `float`/`clear` (`MarkBlockFormattingContextRoots`). Logical `inline-start`/`inline-end`
+  map by direction (`ResolveLogicalFloatClear`).
+- **Block layout** (`Layout/BlockLayout.cs`, taffy's float context). Floats are shrink-to-fit
+  (`min(max(min-content, available), max-content)`), never collapse margins, and are placed by
+  the nine rules at the pending margin's edge (Chromium's `NextBorderEdge`). A same-BFC child's
+  sub-context sits at its real border-top (margins collapsed with its first descendants'),
+  `clear` gives clearance only when the hypothetical position is above the floats, a box that
+  avoids floats moves down until its margin box fits beside them (`PlaceFloatAvoidingItem`),
+  a BFC root's height includes its floats' margin boxes plus its bottom padding, and a block
+  holding only floats is empty for margin collapsing. Anchored floats are placed from the line
+  holding their offset: on it when they fit in what is left, below it otherwise, with the
+  context laid out again after each (32 times at most, then the rest from one layout).
+  Intrinsic widths add floats to the in-flow content after them, and anchored floats to their
+  line.
+- **Exclusion space** (`FloatContext.Bands`, `FloatBands`). A same-BFC inline leaf is measured
+  through `TaffyTree.ExclusionMeasure` with the floats' segments relative to its content box.
+  The cache is bypassed for same-BFC layout when the tree has floats (the float context is
+  state the key cannot see), and `MarkDirty` then walks to the root.
+- **Line breaking** (`TextEngine.ShapeAroundFloats`). Each line box takes the floats over its
+  height: it is laid out at `width - left - right`, split off into its own buffer line, aligned
+  in that width and drawn from `left` (`BufferLine.OffsetX/WidthOverride/GapBefore`,
+  `LayoutRun.X`). A line whose first word does not fit beside the floats moves down to the next
+  float edge; a line taller than the strut is re-measured over its own height. Final layout
+  records the bands on the item and `Finalize` repeats the same breaks.
+- **Paint, hit testing, geometry**: floats are ordinary boxes in the tree; paint already put
+  them after in-flow block backgrounds and before inline content (`IsEffectiveFloat`). Inline
+  fragments and line rects come from `LayoutRuns`, so they carry the line offsets.
+
+Performance (interleaved base/new, same Release build mode, 6 rounds, median of 9 layouts):
+a float-free 40-section article 289.9 -> 285.6 ms layout (noise), the same article with float
+thumbnails, a sidebar and float columns 406.9 -> 347.3 ms; screenshots of the 57 float-free
+`render-repros/` and bench pages are byte-identical except the two whose animation makes the
+base build differ from itself. A paragraph of 2,000 anchored floats lays out in about a second.
+
+Status: 61 of 61 conformance pages match Chromium (60 before floats split inline fragments; element boxes within 1px, inline line
+fragments within 2px; 56 before line alignment was fixed, see "Line alignment follows
+text-align, white-space and direction" under Known deviations), and 7 of the 8 older float pages at the top of `render-repros/` (the
+eighth, `opposing-header-floats`, reports an inline wrapper around a float at the float's box
+where Chromium gives an empty box after it, as before). Open:
+
+- [x] `elementFromPoint` was the shim's nid-order heuristic in `bootstrap.js`, so a point inside
+      a float returned the later in-flow block instead of the float (174 of 272 hit checks
+      matched); it is the renderer's hit test now and all 272 match (see "Hit testing is the
+      renderer's, in Chromium's paint order" under Known deviations)
+- [x] `Range.getClientRects()` was a stub returning the element's box; it is measured from the
+      line fragments now (see "Range rects come from the line fragments" under Known
+      deviations)
+- [x] an inline box split by a float inside it reported one fragment where Chromium reports
+      two (`float-in-inline`): a culled inline box (no inline border, padding or margin, no
+      background, not positioned) is split where a float is anchored strictly inside it on a
+      line, a decorated one keeps one fragment (`InlineOwnerLineFragments(culled)`); a float
+      inside an inline box the run keeps (one with a border or padding) is anchored too, where
+      the run used to become a flex row holding the float; and a float after the space a line
+      wraps at is on that line, which the space does not count against (Chromium 141 keeps a
+      20px float beside "Before long words " in 150px). `FloatInInlineTests`; 61 of 61 pages
+- [x] right-to-left paragraphs started at the left, and centred/right-aligned lines counted
+      their trailing space (the `rtl`/`text-align-*`/`control-no-float` pages); fixed with line
+      alignment
+- [x] a run that does not fold (atomic inlines) was one float-avoiding block, not line by line;
+      a run holding inline-blocks, images or controls now folds, and its lines are narrowed
+      beside the floats one by one ("Atomic inlines are laid out in their lines";
+      `ib-float-narrow`, `ib-float-nav`, `ib-percent-beside-float`). A run that still does not
+      fold (a block-level child) keeps the old behaviour
+- [ ] floats inside multi-column containers lay out in the first column only
+
 ## 9. Validation
 
 - [x] `PocketCalculator.Parity.Tests` harness: runs a case through both binaries and diffs
@@ -976,6 +1134,11 @@ DEVIATION comment at the C# code that differs.
   and it is not this change: its `tss-pivot-line` tab underline lays out 0px wide in both
   builds, and the after capture happened to have four of them on screen instead of two.
 
+  **Superseded for runs that now fold** ("Atomic inlines are laid out in their lines"): an
+  atomic in a shaped line is aligned on its own baseline and the strut is always present. What
+  follows is left for the flex-row stand-in, which still lays out a run beside a block-level
+  child.
+
   **Still open, and it is only about boxes the flex-row stand-in lays out.** A block whose
   inline content is all text folds to one shaped buffer and never reaches taffy
   (`TextEngine.TryBuild` / `TryBuildRun`); the CSS 2.1 10.8.1 model for those landed in the
@@ -1074,9 +1237,10 @@ DEVIATION comment at the C# code that differs.
   so a bare `<sup>` still sits on the baseline. The machinery it needs now exists, but
   `font-size: smaller` has to be measured first.
 
-  A third, unchased: Blink accumulates fallback-font metrics into a `line-height: normal` line
-  where the port uses the span's primary font only. Nothing in the corpus moved on it, so it is
-  recorded rather than fixed.
+  A third, since fixed: Blink accumulates fallback-font metrics into a `line-height: normal`
+  line where the port used the span's primary font only. Nothing in the corpus moved on it
+  until the embedded CJK face made every Chinese line 24px instead of 18px; see "The embedded
+  CJK face, and how Chromium treats a fallback face" below.
 
   Covered by `LineBoxFontMetricsTests` (11 facts, 10 of which fail at the parent commit -
   verified here by reverting the sources; the eleventh is the control that must not move).
@@ -1319,7 +1483,265 @@ DEVIATION comment at the C# code that differs.
 
 ## Known deviations
 
+### Line alignment follows text-align, white-space and direction
+
+Rust (cosmic-text's `layout_to_buffer`, `inline.rs`) aligns only `center` and `right`/`end`, to
+the right whatever the direction; `justify`, `text-align-last` and `direction` are ignored; a
+line is aligned with all of its advance, trailing white space included; and a paragraph takes
+its direction from its first strong character. Measured against Chromium 141 on the pages in
+`render-repros/text-align/` (`scripts/text-align-conformance`, 23 pages scored at 0.5px, all
+passing), the port now:
+
+- keeps the `text-align` keyword (`TextAlignKeyword`, inherited) and resolves start/end against
+  each block's own direction; `left`/`right` are physical. The flex stand-ins (inline-run rows,
+  aligned-block columns) read `LayoutStyle.TextAlign`, now resolved against the box's
+  direction, so `text-align: left` in a `dir=rtl` block is flex-end. `getComputedStyle` reports
+  the keyword (`left`, `right`, `justify`), and `text-align-last` (Rust: neither).
+- leaves a line's trailing white space out of its alignment (CSS Text 3 4.1.3): removed for
+  normal/nowrap/pre-line (at a soft wrap and before a `<br>`), hanging at a soft wrap for
+  pre-wrap (reported as a fragment of its own past the content, as Chromium does), counted for
+  pre/break-spaces (`TextLayout`, `LineAlignOptions`). A span whose only text on a line is a
+  removed space has no fragment there, and fragments end at the content.
+- justifies (`text-align: justify`): inner spaces widen, trailing ones do not, the last line and
+  a line before `<br>` take `text-align-last` (start by default), a justified line is laid out
+  in the width its indent and its inline boxes' margins, borders and padding leave.
+- takes the paragraph direction from `direction`/`dir` (`BufferLine.BaseRtl`, part of the
+  shaping cache key) and adds UAX#9 N1/N2 to the reduced bidi resolver, so Latin text in a
+  `dir=rtl` paragraph keeps its word order and Hebrew in an LTR one reads right to left; a
+  bidi run's first word that does not fit wraps where cosmic-text let the line overflow.
+- lays a right-to-left line from the right: text-indent is on the right, inline-box edges sit
+  where their text is (`InlineGeometry.VisualEdgeShifts`), a span gets one fragment per bidi
+  run, and list markers are drawn right of the content box.
+- lays a first line with a negative text-indent out in the width the indent gives it (it
+  wrapped again in the box's width).
+
+Left-aligned left-to-right text is laid out as before (screenshots of the render-repros pages
+are byte-identical; see the commit). Still open:
+
+- [x] a row of atomic inlines in a `dir=rtl` block was ordered right to left item by item, a
+      space between a text item and an atomic was dropped, a removed space after an atomic at a
+      line end took room (4.45px): the atomics are now object replacement characters in the
+      shaped line (neutral for bidi, so UAX#9 N1 orders them with the Latin around them) and the
+      white space around them collapses as text does (`ib-rtl`, `ib-rtl-center`,
+      `ib-trailing-space`, `ib-center` within 0.05px)
+- [ ] bidi stays reduced: no explicit embeddings or isolates, so an inline `dir` attribute
+      does not isolate its text; an ordered list's marker is not reordered right to left
+
 Recorded as they are decided. Each entry needs a reason and a tracking note.
+
+### Hit testing is the renderer's, in Chromium's paint order
+
+DEVIATION from `crates/obscura-js/js/bootstrap.js`, whose `document.elementFromPoint` returns the
+element with the highest node id whose bounding rect holds the point (`elementsFromPoint` is
+that element alone, a shadow root's asks the document), and from `crates/obscura-cdp`, whose
+mouse events go to that element and are not composed. A point inside a float hit the paragraph
+after it, a later block's background beat the text painted over it, z-index, transforms,
+`pointer-events` and `visibility` were ignored, and a CDP click on shadow content went to the
+host. Now `PreparedRender.HitTest` (`Paint/HitTest.cs`) walks the flat tree in reverse paint
+order as Blink's `NodeAtPoint` does: per stacking context its positive and zero layers
+(positioned boxes and stacking contexts, highest z and latest first), its own content, its
+negative layers, then its own background; own content in three phases, foreground (inline boxes'
+fragments, the content of line boxes from first to last glyph, which hits their block, and
+atomic inlines and flex/grid items as units), floats (as units), block backgrounds (latest
+first); the root element for any point in the viewport, after everything. A text hit is its
+flat-tree parent; table rows and row groups are not hit. Points are mapped through each box's
+scroll movement and the inverse of its accumulated transform, and must be inside the box's
+inherited overflow clip. `op_hit_test(x, y, scope, all)` (additive) returns node ids; the shim
+retargets nothing itself: with the document's or a shadow root's node id as scope the op
+retargets each hit against it and drops duplicates, and the host's
+`__obscura_host.dom.elementFromPoint` (CDP Input, frame descent) and `nodeIdAtPoint`
+(`DOM.getNodeForLocation`, a port addition) pass -1 for the deepest element. Mouse and wheel
+events from `Input.dispatchMouseEvent` are composed. Without layout the old heuristic remains
+the fallback.
+
+Measured against Chromium 141 (`scripts/float-conformance/conformance.mjs --grid 10` on the ten
+pages of `render-repros/hit-test/`, generated by `scripts/hit-test-conformance/gen-pages.mjs`,
+28,800 sample points): `elementFromPoint` 12,354 -> 28,631 match, `elementsFromPoint` 0 -> 28,635
+(the heuristic listed one element), a shadow root's own `elementFromPoint` 220/480 -> 466/480;
+the float pages' per-element checks (`--hit`) 172/272 -> 272/272, text-align 274/274. What still
+differs:
+
+- [x] a row of inline-blocks or images was laid out as a flex row (`inline-blocks`, 145
+      points): with atomic inlines in their lines `elementFromPoint` is 28,774/28,800 and
+      `elementsFromPoint` 28,778/28,800; what is left on that page is a text field 8px narrower
+      than Chromium's (the control's intrinsic width, not its placement)
+- [ ] an inline element slotted into a shadow tree has no fragments, so its text hits the
+      slot's block (`shadow`, 14 points)
+- [ ] the edge of an inline box is hit to its unrounded end, Chromium's to a pixel-snapped one
+      (2 points each on `float-text` and `inline-content`); a rotated box's edge differs by
+      under a pixel (`transforms`, 6 points). Text is hit on its pixel-snapped rect, as
+      `HitTestTextItem` does (a span whose font box starts at y 2.23 is hit at y 2), for text
+      runs and for an inline box with text of its own
+- [ ] hit areas are border boxes: no border-radius, clip-path or SVG geometry (SVG shapes hit by
+      their bounding box, an inline `<svg>` atomic included); flex and grid items are hit in tree order, not order-modified
+      document order; generated content and list markers hit their element's box
+- [ ] Playwright's headless Chromium hides scrollbars, so the `clip-scroll` page's scroller sets
+      `scrollbar-width: none` to compare like with like
+
+### List markers are placed and drawn as Blink does
+
+DEVIATION from `crates/obscura-render/src/paint.rs`, which draws "•", "◦", "▪" or "1." with the
+static face 6px left of the item's padding edge at its content box's top, and has no
+`list-style-position`. Chromium 141 draws disc, circle and square as shapes sized from the
+font's rounded ascent `a`: a square of side `(a*2/3+1)/2`, 1px into a box two wider, at
+`3*(a - a*2/3)/2` below the baseline less the ascent; an outside symbol box starts
+`a*2/3 + 8` before the content edge, on the right in a right-to-left item; marker text ("1. ",
+suffix space included) ends at the content edge, shaped in the item's font and direction; an
+inside marker is the start of the first line and indents it like `text-indent` (a symbol by its
+box less 1px plus 1em, text by its width); the marker sits on the first line's baseline.
+`Paint/ListMarkers.cs`, `InlineItem.MarkerIndent`; `list-style-position` (inherited) and the
+`list-style` shorthand's position are parsed; a list's UA `padding-inline-start` moves to the
+right in a `dir=rtl` list (`LayoutStyle.UaListPadding`; author logical padding still maps to
+the left, as before); `<ol start>` and `<li value>` number the items. Measured by the ink of the
+markers in `render-repros/list-markers.html` at 16 and 32px: every marker within 1px of
+Chromium (outside disc 11px right and 5px down before, inside markers drawn outside, a
+right-to-left marker 40px outside the list), and the inside items' text at Chromium's x
+(`ListMarkerTests`). Open:
+
+- [ ] string markers (`list-style-type: '- '`), `::marker` styles, `list-style-image` and the
+      other counter styles still draw a disc or nothing
+- [ ] an inside marker indents only the item's own first line; when the item starts with a
+      block, Chromium puts the marker in that block's first line
+
+### Range rects come from the line fragments
+
+DEVIATION from `crates/obscura-js/js/bootstrap.js`, whose `Range.getClientRects()` is the common
+ancestor element's box (empty for a collapsed range) and `getBoundingClientRect()` that box.
+`op_range_rects(startNid, startOffset, endNid, endOffset)` (additive) answers with
+`PreparedRender.RangeClientRects`, CSSOM View's definition: the `getClientRects()` of every
+element the range contains whose parent it does not, and for every text node it contains or
+partly contains one rect per line of the selected text, in tree order; the bounding rect is the
+union of the rects with both a width and a height, else the first. A text rect runs from the
+first selected glyph to the last on its line (inline-box edges, alignment and relative offsets
+applied; white space removed at a line end excluded), as tall as the text's font box on its own
+baseline; a collapsed range in a text node is a zero-wide caret rect; a preserved newline is a
+zero-wide rect at its line's end. Each shaped item records where its text nodes' collapsed text
+starts (`TextNodeChunk`: offset, white-space state, transform), and a DOM offset is mapped by
+replaying the collapse (`Inline.CollectedOffset`). Measured against Chromium 141 on a page of
+partial words, a span with padding across a wrap, a centred paragraph, an element boundary, a
+collapsed range and a `pre` newline: every rect within 0.03px (`RangeClientRectsTests`). Open:
+
+- [ ] text laid out outside a shaped context (the word-split fallback, a run with a block-level
+      child) reports whole words; a run of atomic inlines is shaped now
+- [ ] right-to-left text: the rect is the visual extent of the selected glyphs on each line,
+      where Chromium gives one rect per bidi run
+
+### Atomic inlines are laid out in their lines
+
+DEVIATION from `crates/obscura-render/src/dom.rs`, which folds a block's inline content into one
+shaped buffer only when it is all text, and lays a run holding an inline-block, an image or a
+control out as a wrapping flex row of word boxes (the "flex-row stand-in" of the strut entries
+above): every item hung from its line's top, a right-to-left row was ordered item by item, a
+space next to an atomic was dropped, and the row avoided a float as one block. The port shapes
+such a run as one inline formatting context (`TextEngine.TryBuild(..., allowAtomics: true)`):
+
+- each atomic inline (inline-block, inline-flex, inline-grid, `<img>` and the other replaced
+  elements, form controls, inline `<svg>`) is an object replacement character in the collected
+  text, with its index in `TextAttrs.Atomic`; shaping gives it one synthetic glyph as wide as
+  its margin box (`InlineGeometry.MetaAtomic`), and line breaking takes a break before and
+  after it, as Chromium does even after a no-break space or an opening parenthesis;
+- its box is a child of the context's taffy node, laid out by `TaffyTree.ComputeInlineAtomicLayout`
+  (`Layout/TaffyTreeInline.cs`): the children are sized first (shrink-to-fit for an auto
+  width), handed to the text engine (`TextEngine.SetAtomic`) with their baselines
+  (`InlineAtomicHost`: an inline-block's last line box, its bottom margin edge with no line box
+  or with `overflow` other than `visible`; an inline-flex or inline-grid box's first baseline;
+  a replaced element's bottom margin edge; a text field or select centred on its text; a
+  button on its label's baseline or, empty, its content-box bottom), and placed where the
+  shaped lines put their glyphs (`TextEngine.AtomicPosition`);
+- an atomic contributes its margin box to its line box through `vertical-align` (baseline,
+  middle, top/bottom, text-top/bottom, sub/super, lengths and percentages;
+  `TextEngine.AtomicLineMetrics`), so it grows the line as CSS 2.1 10.8.1 says; text-align,
+  justification, white space, bidi order and float narrowing then apply to it as to a word;
+- an inline-block's content is shrink-wrapped at LayoutUnit precision (an inline-block holding
+  "About us" is 75.16px, not 76; `InlineItem.LayoutUnitWidth`), and its lines are broken at
+  that unrounded width (`LayoutDomOnce.FinalizeShapedItems`), not the snapped box's;
+- a retained relayout that carries such a context over gives its atomics the boxes the previous
+  pass gave them (`TextEngine.CarryAtomics`), since it does not lay them out again.
+
+A run whose content is all text is shaped exactly as before: screenshots of the 106
+deterministic render-repros and test-html-files pages without an atomic inline are
+byte-identical before and after (`animation-fill-forwards` differs between two runs of either
+build), and a 1,500-paragraph text page relayouts as fast (15 width changes: median 22.9s ->
+19.8s on a loaded machine, interleaved; min 17.6 -> 17.0), while the same page with an
+inline-block and an image per paragraph went 19.7s -> 7.9s (no word boxes any more).
+
+Measured against Chromium 141 with `scripts/float-conformance/conformance.mjs
+render-repros/inline-atomic --tol 0.5` (29 pages from `scripts/inline-atomic-conformance/gen-pages.mjs`):
+pages 0/29 -> 27/29, elements 91/202 -> 196/202, text runs 5/76 -> 75/76, hit points 170/201 ->
+200/201. `InlineAtomicTests`, `LineBoxStrutTests`, and differential coverage in
+`IncrementalLayoutDifferentialTests` (an atomic fixture and the 29 pages under random mutation).
+Open:
+
+- [ ] form controls keep their own intrinsic widths, which differ from Chromium's: a `size=8`
+      text field is 81px against 89, a select 43.91 against 45, a button 34 against 33.78
+      (`form-controls`); their placement in the line is right
+- [ ] only inline-blocks shrink-wrap at LayoutUnit precision; a float, a table cell or an
+      absolutely positioned box still rounds its content's width up to a whole pixel (Rust's
+      measure), so a cell holding "cell" and a 70px box is 101px against 100.47
+      (`ib-shrink-to-fit`) and three float pages are within 1px but not 0.5
+      (`blockify-span`, `nav-bar`, `wikipedia-thumb`). Changing it moves every shrink-to-fit
+      box on text-only pages, so it wants its own survey
+- [ ] a run with a block-level child (a mixed block) still lays its atomics out in the
+      flex-row stand-in between the blocks; quirks mode's line-height rules are not modelled
+      (Chromium gives a line holding only an atomic no strut in quirks mode)
+
+### Floats are CSS floats, not flex rows
+
+DEVIATION from `crates/obscura-render/src/dom.rs` (`build_children_with_float_zone`) and
+`vendor/taffy/src/compute/{block,float}.rs`. Rust lays a float and the siblings that follow it
+out as a flex row (a float, and a flow column of the next siblings up to an estimate of the
+float's height), so text never wraps around a float and the blocks after it keep its row's
+height. C# lays floats out with the float context of the block formatting context and shortens
+each line box around them; see "Float layout (CSS 2.1 9.5)" above for the design. The taffy
+changes, each commented at the site:
+
+- a float is shrink-to-fit in its containing block and its margins do not collapse (taffy:
+  max-content, collapsible);
+- a float is placed after the pending margin (Chromium's `NextBorderEdge`), a same-BFC child's
+  sub-context sits at its collapsed border-top, and clearance applies only when the
+  hypothetical position is above the floats (taffy added the margin after clearing);
+- a float whose bottom lands exactly on a segment boundary by rounding is placed in the segment
+  that holds its bottom (taffy subdivided the next segment at its start and threw, failing the
+  whole layout: the fitter sums the free height in double, the bottom is one float sum);
+  pinned by `FloatContextTests.AFloatWhoseBottomLandsOnASegmentBoundaryByRoundingIsPlaced`,
+  found by the incremental-layout differential test on `wiki-footer`;
+- a float taller than every earlier one extends the segments (taffy left the part below the
+  last segment excluding nothing);
+- a float-avoiding box moves down until it fits (taffy took the first slot at any width);
+- a BFC root's float height includes its bottom padding; a block holding only floats can be
+  collapsed through; a definite-width intrinsic pass counts floats (taffy: 0);
+- same-BFC layout is uncached in a tree with floats, and `MarkDirty` walks to the root then;
+- an anonymous inline-run flex wrapper resolves its items' percentages against its own
+  percentage basis, not its float-narrowed width (`PercentBasisFromContainingBlock`; taffy's
+  flexbox has no such notion).
+
+Parity with the Rust binary is the wrong assertion for any page with a float; the
+`render-repros/floats/` pages and `FloatLayoutTests` assert Chromium's boxes instead.
+`NestedShrinkToFitLayoutTests.NestedFloatsKeepChromiumInlineGeometry` now holds through the
+anchored float; `DomLayoutTests.ConsecutivePercentageFloatsCollectAgainstTheFullBandWidth`
+asserts Chromium's 0 height for a non-BFC container (the flex row gave it 150), and the two
+cancellation tests that used 300 nested floats as a minute-long layout use a page of floated
+paragraphs, since nested floats now lay out in milliseconds.
+
+### V8 grows its heap limit instead of aborting when the heap cap's sample is late
+
+Rust caps the heap with a near-heap-limit callback at V8's own limit, which terminates
+the script and raises the limit by a fixed headroom. ClearScript exposes no such hook, so
+the port's cap (`SetHeapLimit`) is ClearScript's sampled `MaxRuntimeHeapSize`: a
+`System.Threading.Timer` (50 ms at the shortest) whose callback needs a .NET thread-pool
+thread, the same pool ClearScript gives V8's background GC and compile work. On a busy or
+memory-starved host the sample came late, V8 reached its own limit first (1400 MB with no
+`--max-old-space-size`, below the 4 GiB default cap; equal to the cap with the CLI's 4096
+MB), and V8 aborted the process: `Fatal JavaScript out of memory: Reached heap limit`,
+exit 134. That was the intermittent "Test process crashed with exit code 134" of the Js
+test host (in `HeapLimitTerminatesScriptAndRuntimeRecovers`), and it is a process-wide
+denial of service for a CDP or MCP server under load. Every runtime is now created with
+`V8RuntimeConstraints.HeapExpansionMultiplier` = 2
+(`PocketCalculatorJsRuntime.HeapCapExpansionMultiplier`), so ClearScript's near-heap-limit
+callback raises V8's limit and the late sample still terminates the script as before. The
+cost is memory for as long as the sample is late, bounded by the allocation rate times the
+delay rather than by a fixed headroom. Pinned by `HeapCapStarvationTests`, which starves the
+pool for a second under a 64 MB V8 limit; without the multiplier the test host aborts.
 
 ### Security review fixes (September 2026)
 
@@ -1353,10 +1775,10 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
 - **Visibility inherits:** `getComputedStyle().visibility` and `innerText` read the inherited computed value (`ComputedVisibilityHidden`); Rust reported only an element's own declaration.
 - **Closed `<details>` in innerText:** only the summary is collected (Chromium); Rust's walk read every DOM child.
 - **`dialog:not([open]) { display: none }`:** a UA rule Rust lacks; without it a closed dialog laid out, painted and appeared in innerText.
-- **Floats on both sides:** a block whose in-flow content is only left and right floats takes the native float context; Rust's float-zone row put a third float below the first (Chromium: beside it).
+- **Floats on both sides:** superseded by "Floats are CSS floats, not flex rows"; every float now takes the native float context.
 - **Table width pass:** size-only intrinsic measurements and memoized depth and cyclic-item walks, where Rust does full layouts and repeated ancestor walks. Output is identical.
 - **Allocation trims:** no shadow-scope builders outside shadow trees, no WAAPI iterator per element, lazy sort delegates, lists shared between `Inherited` clones, pre-sized per-element maps and taffy tree. Output is identical.
-- **Global prototype chain (I10):** `window -> Window.prototype -> WindowProperties -> EventTarget.prototype`, as in Chromium; EventTarget is Node's parent, not Node, and addEventListener/removeEventListener/dispatchEvent exist only on `EventTarget.prototype`, picking the window, element, document or plain-target implementation by receiver. Window throws Illegal constructor; `Window.prototype` has TEMPORARY and PERSISTENT. Rust: an Object.prototype-based global, an own `constructor`, a `Symbol.hasInstance` override and `EventTarget = Node`. V8 still lets the global's prototype be replaced, where Chromium's is immutable.
+- **Global prototype chain (I10):** `window -> Window.prototype -> WindowProperties -> EventTarget.prototype`, as in Chromium; EventTarget is Node's parent, not Node, and addEventListener/removeEventListener/dispatchEvent exist only on `EventTarget.prototype`, one implementation for every target (see "DOM event dispatch"). Window throws Illegal constructor; `Window.prototype` has TEMPORARY and PERSISTENT. Rust: an Object.prototype-based global, an own `constructor`, a `Symbol.hasInstance` override and `EventTarget = Node`. V8 still lets the global's prototype be replaced, where Chromium's is immutable.
 - **Frame indices:** `window[i]` exists only for existing iframes, as an accessor (Chromium: a data property), re-synced on iframe insertion and removal, on `length`, on global reflection and on a stale read. Rust: 50 index getters always.
 - **Named access:** element ids and frame names resolve on WindowProperties, not as own properties of window; reflection on it lists no names, an assignment creates an own property, and an id never shadows an EventTarget.prototype or Object.prototype member. Rust: own, enumerable, getter-only properties on the global.
 - **Global enumerability and tags:** uppercase own globals are non-enumerable, `history` is enumerable, and shim interface prototypes have a Symbol.toStringTag. Rust: interface objects enumerable and untagged.
@@ -1394,7 +1816,7 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
 - **Child-frame execution contexts (M6):** each child frame gets a default context (its own realm) and a realm per isolated-world name over its document, announced with `executionContextCreated` and routed by object id; also `DOM.getFrameOwner`, `Node.frameId` on iframes, frame node boxes in page coordinates, input routed into the frame under the point, and key input to the last-focused realm. Rust announces frames with no contexts and runs everything in the page realm.
 - **Frame render ops:** they read the frame's own document and viewport (the iframe's content box; Rust passes the border box). Rust reads the page's state, so a frame's geometry described the page node that shared its node id.
 - **`Promise.prototype.then` captured at boot:** frame timers and async-op accounting use it; Rust calls the page's `then`.
-- **Cross-world event dispatch:** a document realm's dispatch runs isolated-world listeners interleaved by registration stamp, with world-side wrappers and `isTrusted`/`preventDefault`/stop flags carried both ways. World window listeners run around the node dispatch (capturing before, others after), because the engine's event model has no node capture phase and does not reach the window.
+- **Cross-world event dispatch:** a document realm's dispatch runs isolated-world listeners interleaved by registration stamp, with world-side wrappers and `isTrusted`/`preventDefault`/stop flags carried both ways. World listeners (nodes and the window) run at the matching capture, at-target or bubble step of the path (see "DOM event dispatch").
 - **File input selection:** held by the host per document (`op_dom` `set_input_files`/`input_files_version`/`get_input_files`, plus `note_focus`). Rust keeps it on the calling realm's wrapper.
 - **Grid occupancy:** taffy stores one state per cell in a dense `rows x columns` matrix. The port keeps the placed areas: a byte per cell up to 1,024 cells, a segment tree of interval sets beyond that. Only occupied/free is kept; answers are cell for cell the same (`CellOccupancyMatrixTests`).
 - **Grid coordinates are 32-bit:** taffy's lines are i16 and counts u16. `DetailedGridTracksInfo`/`DetailedGridItemsInfo` fields are `int`.
@@ -1719,6 +2141,140 @@ This relaxes "the engine never uses host fonts" only on request: with nothing co
 no file is read and output is byte-identical to before. Faces still load with
 `SKTypeface.FromData`, never `FromFamilyName`, and no fontconfig is involved.
 
+### Global interface objects for the objects the shim already hands out
+
+`crates/obscura-js/js/bootstrap.js` leaves some 460 of Chromium 141's 713 global constructors
+undefined, including the interfaces of objects it does hand out, and pages test for them:
+icloud.com sends a Chrome UA without `window.MathMLElement` to `/unsupported_browser/`, TikTok's
+SDK throws `Navigator is not defined`, grammarly.com and mozilla.org `DOMImplementation is not
+defined`.
+
+DEVIATION from crates/obscura-js/js/bootstrap.js. The block "Global interface objects" near the
+end of the port's `bootstrap.js` defines them as the real prototypes of those objects, measured
+against Chromium 141 (typeof, name, length, parent interface, `new`/call errors, toStringTag,
+`instanceof` of the existing instance): Navigator, Location, Performance (+PerformanceTiming,
+PerformanceNavigation), DOMImplementation (now one object per document), HTMLDocument and
+XMLDocument (the realm's document), MutationRecord, NodeIterator, TreeWalker, PluginArray, Plugin,
+MimeTypeArray, MimeType, Permissions, PermissionStatus, Geolocation*, NavigatorUAData,
+MediaCapabilities, Screen, ScreenOrientation, VisualViewport, XMLHttpRequestUpload, External and
+`window.external`, BarProp and the six bar properties, AbstractRange, XPathResult, XPathEvaluator,
+XPathExpression, TextMetrics, FileList, DOMStringList (`location.ancestorOrigins`), the IndexedDB
+interfaces and IDBKeyRange, MediaQueryList, StyleSheet, MediaList, the CSS rule interfaces,
+DOMRectReadOnly/DOMRect, DOMPointReadOnly/DOMPoint, DOMMatrixReadOnly/DOMMatrix (+WebKitCSSMatrix),
+DOMQuad, MathMLElement, Option, WebKitMutationObserver, CloseEvent, PageTransitionEvent,
+BeforeUnloadEvent, DragEvent, FormDataEvent, MediaQueryListEvent, IDBVersionChangeEvent,
+TextEvent, Touch, TouchList, TouchEvent, DataTransfer (+Item, ItemList), the two queuing
+strategies, the stream reader/writer/controller interfaces, IdleDeadline and CustomStateSet.
+Interfaces Chromium does not let script construct throw its "Illegal constructor"; members sit
+on the prototypes as brand-checked accessors ("Illegal invocation" off an instance), so
+navigator, performance, screen and the rest have no own properties. All are non-enumerable on
+the window. Behaviour changes that come with them:
+
+- Element rects (`getBoundingClientRect`, `getClientRects`) are DOMRects, not plain objects with
+  an own `toJSON` and an `__obscuraViewportFixed` property (now a private WeakSet).
+- DOMRect normalises a negative size in top/right/bottom/left; DOMMatrix does real matrix
+  arithmetic and parses CSS transform lists (upstream's answered the identity for every
+  operation). Angles that are multiples of 90 degrees are exact, as in Chromium; other angles
+  can differ from Chromium in the last bit (V8's fdlibm sin against the C library's).
+- A stylesheet's at-rules are CSSMediaRule, CSSSupportsRule, CSSContainerRule, CSSLayerBlockRule,
+  CSSLayerStatementRule, CSSStartingStyleRule, CSSScopeRule, CSSPageRule, CSSFontFaceRule,
+  CSSKeyframesRule/CSSKeyframeRule, CSSImportRule, CSSNamespaceRule and CSSPropertyRule with
+  Chromium's cssText, instead of opaque CSSRules of type 0. @counter-style,
+  @font-feature-values, @view-transition and unknown at-rules stay opaque CSSRules (Chromium drops
+  the unknown ones). `sheet.title` is null without a title attribute, as in Chromium.
+- navigator gains appName, appCodeName and vendorSub; the PDF plugins list their two MIME types,
+  whose enabledPlugin is the plugin.
+- `performance.timeOrigin` and `performance.memory` are written through `_ifaceSet` at page init,
+  since they are read-only accessors now.
+
+Left out on purpose: interfaces that would only be feature-detection stubs (Web Audio nodes,
+WebRTC, Gamepad, MediaSource, Web Speech, WebGL object types, Push, Background Fetch, typed CSS
+OM, TrustedTypes, Navigation API, ...), CompressionStream/DecompressionStream (no deflate in the
+shim), TaskController/TaskSignal (postTask has no priority change), the HTML collections, and the
+members Chromium has only in secure contexts. The IndexedDB objects keep their members as own
+properties (the shim's request records assign to themselves). DOMParser and createHTMLDocument
+documents are HTMLDocuments/XMLDocuments now (see "Documents without a browsing context").
+Pinned by `GlobalInterfaceObjects`.
+
+### Live-site boot blockers (October 2026)
+
+Fixes from loading vk.com, duolingo.com, mail.ru, weather.com and steamcommunity.com in the
+port and in Chromium 141 and chasing the first thing that stopped each app from booting.
+Values measured in Chromium 141 (headless, Playwright); facts in
+`PocketCalculator.Js.Tests/LiveSiteInterfaceTests.cs` and the Browser tests named below.
+
+- **IntersectionObserverEntry is an interface.** DEVIATION from
+  crates/obscura-js/js/bootstrap.js, whose entries are plain objects and whose
+  `IntersectionObserverEntry` is an empty class. duolingo.com's inline browser check needs
+  `"isIntersecting" in IntersectionObserverEntry.prototype` and sent the port to
+  /errors/not-supported.html (then /errors/404.html: 19 elements against 4288). Entries are
+  now instances with Chromium's eight enumerable prototype accessors (`isVisible` is false:
+  IntersectionObserver v2 is not implemented), `new` throws "Illegal constructor", and the
+  three rectangles, like a ResizeObserverEntry's `contentRect`, are DOMRectReadOnly.
+- **Reflected content attributes.** DEVIATION from crates/obscura-js/js/bootstrap.js, which has
+  none of them: `source.srcset` was undefined and mail.ru's Svelte hydration
+  (`e.srcset.split(",")`) threw before the page rendered its content. The block
+  `_reflectContentAttributes` adds about 150 plain reflections (string, boolean, long,
+  unsigned long, non-negative long, URL, enumerated and CORS-settings kinds) on the interfaces
+  Chromium defines them on: source srcset/media/width/height, input
+  defaultValue/defaultChecked/maxLength/minLength/size/readOnly/required/multiple/pattern,
+  script/link crossOrigin/integrity/fetchPriority, link `as`, form enctype/encoding, the table
+  and legacy presentational attributes, template shadowRoot*, media autoplay/loop/controls, and
+  so on. `_addMissingMembers` adds CharacterData next/previousElementSibling,
+  DocumentFragment.childElementCount, Element.hasAttributeNS and webkitMatchesSelector,
+  HTMLSelectElement length/item/namedItem/selectedOptions, HTMLOptionElement index/label and
+  HTMLTextAreaElement defaultValue/textLength. Still missing: script `async` (its force-async
+  flag), input/button form* overrides and `list`, the HTMLTableElement row/section API,
+  `autocomplete`, meter low/high/optimum, media preload/playbackRate and friends.
+- **Shadow ops act on the calling realm.** Port fix (the reference runs frames in the page
+  realm, so it has no such binding): `op_shadow_attach` and `op_shadow_root_info` were bound to
+  the page's state, so `attachShadow` in a child frame resolved the frame's node id in the
+  page's arena. vkvideo.ru's player inside mail.ru threw NotSupportedError on a `<div>`, and
+  an id the page also had got its shadow root on the page's node. They are now bound per realm
+  with the other document ops (`FrameShadowRootTests`).
+- **IDBIndex getKey/getAllKeys/openKeyCursor** answer empty like the rest of the in-memory
+  IndexedDB shim; mail.ru's api-cache GC called `index(...).getAllKeys`.
+- **Web Storage outlives the document.** DEVIATION from crates/obscura-js/js/bootstrap.js,
+  whose areas lived in the realm, so every navigation (a reload included) started
+  localStorage and sessionStorage empty. The areas are now host-held (`WebStorage`, through
+  the new `op_storage`): localStorage per browser context, sessionStorage per page, keyed by
+  origin, and for a frame with a cross-site ancestor also by the top-level origin (Chromium
+  partitions by top-level site). Chromium's 5 MiB-of-UTF-16 quota throws QuotaExceededError.
+  An opaque origin keeps the realm-local map. Neither area is written to `--storage-dir`, and
+  no `storage` event reaches other documents yet. Key order is insertion order; Chromium's is
+  unspecified (neither insertion nor sorted). `WebStorageTests`.
+- **reportError reports the exception.** DEVIATION: the shim's `reportError` only logged;
+  it now dispatches the cancelable, trusted ErrorEvent (window.onerror, `error` listeners)
+  that `_reportException` builds for uncaught errors.
+- **XMLHttpRequest uses the shim's fetch.** DEVIATION: XHR called the page-replaceable global
+  `fetch`, so a page's fetch wrapper saw every XHR (weather.com's and our own probes did).
+- **fetch and XHR answer data: and blob: URLs.** DEVIATION: both went to the network op and
+  failed with net::ERR_FAILED. They now follow Fetch's scheme fetch: the data: URL processor
+  (percent-decoding, forgiving base64, MIME serialization, `text/plain;charset=US-ASCII`
+  default) and the blob URL store (`URL.createObjectURL` keeps the Blob), with Chromium's 200
+  `OK` basic response and "Failed to fetch" for a bad or revoked URL.
+- **`<link rel=preload>` and `rel=modulepreload` load.** DEVIATION from
+  crates/obscura-js/js/bootstrap.js and crates/obscura-browser, which ignore both rels, so
+  their `load`/`error` never fired: the loadCSS pattern (`onload="this.rel='stylesheet'"`,
+  vk.com's clone-and-insert) never applied its sheets and vk.com painted a blank page (its
+  VKUI layout had no CSS). Parsed links are loaded by the host once the document is parsed
+  (`__obscura_host.loadDocumentPreloads`, and at frame-realm start), inserted ones on
+  insertion; a link with no valid `as` fetches nothing. Gaps: no preload cache (the real load
+  fetches again), and a cross-origin no-cors preload is opaque, so a 404 there fires `load`
+  where Chromium fires `error`. A parser-inserted `rel=stylesheet` whose fetch fails still
+  fires no `error` (Chromium does). `LinkPreloadTests`.
+- **The autonomous CDP pump backs off instead of stopping.** DEVIATION from
+  crates/obscura-cdp/src/server.rs, which disarms a connection's page pump after the fourth
+  consecutive turn that overruns the task budget, until the next inbound frame. weather.com's
+  ad scripts poll `getComputedStyle` while the page mutates, each call a full restyle of
+  about a second, so four timer tasks overran 5.5 s and the page then froze between client
+  commands: the Amplitude experiment script never ran and the forecast was never fetched
+  (998 elements against Chromium's 2115; 1302 after). The pump now stands down for 1 s and
+  resumes (`ServerTests.AutonomousPumpResumesAfterRepeatedOverrunningTasks`). The restyle
+  cost itself was the open problem: `op_computed_style` spent 7 s over 1,100 calls there. Most
+  of those calls are now answered without a restyle (see "getComputedStyle answers what layout
+  cannot change before the pending mutations are restyled").
+
 ### A linked stylesheet leaves no element in the DOM
 
 `crates/obscura-browser` materializes a fetched `<link rel=stylesheet>` as a synthetic
@@ -1918,6 +2474,56 @@ them there. Measured: 6 of 12 runs of
 `ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop` before, 13 of 14 and
 then 12 of 12 after.
 
+Since "Op promises settle on the page's event loop" (below), the tail itself runs on the page's
+loop (`IsolateLock.RunOnPageAsync`), as the reference's reaction does, and so do
+`op_load_stylesheet`'s and `op_fetch_url`'s. The gate and the cache lock stay (the renderer
+cache is still seeded from transport threads by host loads), now uncontended by the op tails.
+
+### A dynamic script load is restarted after a watchdog termination
+
+DEVIATION from `crates/obscura-js` and its `bootstrap.js`, which lose the load the same way and
+never recover it. When a watchdog terminates a turn that ran past its budget, V8 discards every
+queued microtask, and ClearScript delivers an async op's result inside whatever script is
+running (its call-with-lock queue is serviced from a V8 interrupt), so a termination can also
+cut the delivery itself short and leave the op's promise unsettled. A dynamic script whose next
+step was in the queue never ran again, and one that delays the load event held navigation until
+its deadline. nvidia.com: a page task of forced layout reads runs past the 5.5 s task budget
+while OneTrust's `otBannerSdk.js` arrives (fetched in 85 ms), and one goto in two to seven took
+the full 30 s cap; the loss showed up both as an op promise that never settled and as a settled
+one whose reactions were gone. Chromium never terminates a task. Now
+`PocketCalculatorJsRuntime.CancelTermination` marks the runtime, the next JavaScript task posts a
+task that calls `__obscura_redriveDynamicScripts` in each realm (posted, so the restarted
+continuations, load handlers among them, run in a turn under the task watchdog; run directly they
+re-ran the terminated page work with no deadline, and weather.com hung), and `POCKETCALCULATOR_NO_SCRIPT_REDRIVE=1`
+turns it off. bootstrap.js starts every unfinished dynamic
+script task again under a new generation: a stale runner stops at its next await without
+firing events or releasing counters, the fetch result is read again from the settled op, or
+raced against a fresh request when the op is not known to have settled, the in-order queue is
+restarted at its head, and the script still runs once (`task.executed`). nvidia.com: 18 of 18
+gotos 13.5-16.6 s (one extra `otBannerSdk.js` request when the op had not settled). Pinned by
+`ADynamicScriptLoadSurvivesATerminatedMicrotaskCheckpoint` (Browser; async and in-order, both
+stranded without the redrive). Page promise chains lost to the same termination are not
+recovered, and an op whose delivery was cut short stays counted in the async-op tracker, so a
+settle waits out its budget after one; what makes the page task run 5 s at all is the forced
+layout cost (`clientWidth` ~55 ms a read on nvidia.com), which is the open layout work.
+
+Op results are no longer delivered inside whatever script is running: they are queued for the
+event loop and run as tasks of their own, and not while a termination is pending (see "Op
+promises settle on the page's event loop"). A delivery can still be cut short by a watchdog that
+fires during it, so the redrive stays.
+
+### A frame realm's script runs under the task watchdog
+
+DEVIATION from `crates/obscura-js/src/frame.rs`, which runs a frame's scripts (its document
+scripts, load handlers, host scripts and evaluations) with no deadline of their own. The microtask
+checkpoint that ends one is the isolate's, so it also drains whatever the page realm has queued,
+and nothing was armed: a page task that the watchdog stops everywhere else ran unbounded there
+(weather.com: CDP stopped answering for good with the isolate held inside a frame's
+`RunDocumentScripts`, one run in three with the dynamic script redrive and a 20 s stall without
+it). `FrameRealm.Run` now arms the page runtime's watchdog for the task budget
+(`SynchronousTaskFloorMs` plus the scheduling margin); the isolate is shared, so it ends the frame's
+script as well.
+
 ### An idle verdict during an explicit settle is confirmed against the page
 
 `PocketCalculatorJsRuntime.RunEventLoopUntilQuiescentAsync` no longer stops the moment `PumpTick`
@@ -1967,6 +2573,80 @@ tracker disabled, 5 of 5 pass with it. A `fetch()`-shaped test is deliberately n
 because that window is between `PageInFlight.Decrement()` and ClearScript resolving the promise
 and reaching it would need a widening hook in production code; `fetch()` and XHR are covered by
 the same binding.
+
+### A Web Animation's start time is the first frame after `animate()`, not the call
+
+`op_waapi_create` in Rust takes the document timeline's wall clock at the moment of the call as
+the effect's start time. Chromium 141 leaves a new animation pending (`startTime` null,
+`currentTime` 0) and resolves its start time to the timeline time of the first frame rendered
+after it: with a 300 ms busy wait after `animate()`, `startTime` was that later frame's time,
+not the call's. The port marks a new effect `StartPending` (`WaapiAnimation`, Render/Core/Animation.cs)
+and `RenderState.EnsurePreparedRender` resolves it to the document-time sample of the next style
+flush; until then its local time is 0. A `play()` of a pending effect leaves it pending.
+
+Under the Rust rule `ForwardWaapiSampleUpdatesRetainedStyleAndPaint` measured however long the
+first capture took (0 to 0.45 opacity where 0.5 was expected); it fails on every run before the
+change. `WaapiStartTimeIsTheFirstFrameAfterAnimateNotTheCallTime` pins Chromium's rule with the
+wall clock 400 ms ahead of the host's frame. CSS animations still start at their mutation's
+wall-clock time (the scoped "birth epochs" in `DomOps`), as in Rust.
+
+### A navigation waits for frame documents still loading when it builds the frames
+
+`build_document_frames` in `page.rs` pumps 50 ms rounds and stops at the first round in which
+no frame moved. A frame document that took longer than one round to answer (any server slower
+than 50 ms, or a loaded host) then never got its realm during the navigation, and its scripts
+were not requested until something else pumped the page:
+`FrameDocumentReferrerPolicyHeaderGovernsItsRequests` timed out under load that way. Chromium's
+load event waits for the frame. The port counts frame document loads in flight
+(`PocketCalculatorState.FrameDocumentLoadsInFlight`, kept by `FetchOps.OpFetchUrlAsync` for
+internal `navigate` loads) and `Page.BuildDocumentFramesAsync` keeps pumping while one is in
+flight, plus one round after the last answers; those rounds do not count against the eight, and
+a 5 s grace bounds the wait so a hanging frame server cannot hold the navigation.
+`AFrameDocumentSlowerThanOneRoundStillLoadsDuringNavigation` (Browser) serves the frame 400 ms
+late.
+
+### A bounded event-loop wait pumps once after a park, even past its deadline
+
+`run_event_loop_bounded` in Rust is `tokio::time::timeout(budget, run_event_loop())`; tokio polls
+the inner future before the timer, so work that came due while the loop was parked still runs on
+the wake that finds the budget spent. `RunEventLoopBoundedAsync` checked the deadline first, and
+when a park overshot it (a loaded host) returned without running that work: a 40 ms wait over a
+0 ms interval ran no tick (`FixedDurationEventLoopYieldsFromContinuouslyReadyTasks`). One pump now
+follows every park. The difference from Rust is the loop's shape, not its result.
+
+### The document timeline reads a replaceable clock
+
+`PocketCalculatorState.AnimationClock` (a `TimeProvider`, the system clock by default) is what
+`AnimationTimelineElapsedMilliseconds` reads, and `Page.AnimationClock` hands one to every new
+document's runtime. Rust reads `Instant::now()` directly. Nothing in the engine sets it; tests
+install a manual clock (`RenderCaptureSupport.FreezeAnimationTimeline`, `ManualAnimationClock`)
+so CSS animation births and screencast frames land at exact times on a loaded host.
+
+### Timing-sensitive tests wait on the engine, not the wall clock
+
+Not a behavioural deviation; recorded so the next port of a Rust test does not reintroduce the
+pattern. Many Rust tests pump the loop for a fixed 40-300 ms and then assert what happened, or
+resolve a promise from a `setTimeout` racing the work. The port's first layout in a process
+takes a few hundred ms (JIT, font setup), and a host shared with other builds stretches every
+step, so those failed intermittently under load and some (`IntersectionObserverCanBeReusedAfterDisconnect`)
+deterministically when run alone. The C# tests now:
+
+- drive the loop until it is idle (`EventLoopWait.UntilIdleAsync`, a 20 s deadline that returns
+  as soon as nothing is pending) or until a page condition holds (`EventLoopWait.UntilAsync`);
+- in page script, take the next step (a scroll, the resolve) from the previous observation
+  rather than from a timer, and keep a short tail after the last expected record so a spurious
+  extra one still shows;
+- measure complexity bounds in the test thread's CPU time (`ThreadCpuTime`), not wall time;
+- keep the settle-policy bounds (`QuiescentEventLoop*`) but widen the gap between "bounded" and
+  "consumed the budget" (larger budgets and intervals) instead of tightening on wall time;
+- poll CDP frame state against a 20 s deadline rather than a count of 50 ms sleeps.
+
+With IntersectionObserver checkpoints disabled and the rAF cadence removed, the 15 converted
+IntersectionObserver and animation-frame tests fail rather than hang; the new WAAPI and frame
+tests fail with their fixes taken out.
+`PublicSuffixList.TryGetRegistrableDomain` no longer calls `ContainsAnyInRange('A', 'Z')`,
+whose ReadyToRun body allocates 96 bytes a call until tiered compilation replaces it:
+`LookupDoesNotAllocate` failed every time alone and whenever the background compiler was slow.
 
 ### Collapsing table borders are resolved per edge and split between the two boxes
 
@@ -2554,6 +3234,549 @@ work below; the live set is untouched.
 
 Correctness: 40 fixture pages dumped every element's `getBoundingClientRect` with the cache on
 and off, all 40 byte-identical. `OBSCURA_DISABLE_SHAPE_CACHE=1` is the switch that A/B ran on.
+
+**The font-set match was by reference, which no page with a web font ever passed.**
+`MatchesFontSet` compared `WebFont` objects with `ReferenceEquals` on the belief that one is
+produced per decoded resource, but `PaintFonts.CollectWebFonts` builds new ones on every pass. So
+on any page with an `@font-face` the cache was discarded on every relayout (nvidia.com: 16 faces,
+~1250 paragraphs reshaped per forced read). Faces now match by the identity of their decoded bytes
+(the memoized decode in `RenderResourceCache`, the same array for an unchanged resource) and their
+descriptors, in order. Adoption also requires the same emoji-face choice: the emoji face loads
+between the directory faces and the web fonts, so loading it renumbers every web font's `FontId`,
+which keys a shaped paragraph. Pinned by `ShapeCacheAdoptionTests` (Render).
+
+### A retained restyle walks only the paths to its fresh styles
+
+DEVIATION from `crates/obscura-render`, which reuses retained styles but still walks the whole
+document on every pass: the cascade visits every node (pushing each onto the selector
+matcher's ancestor filter), the counter walk renders every pseudo's generated content, the
+top-down pass recomputes every element's inherited context, and a few fixups walk the document
+to find tables, rows and grids. Each is now proportional to the change:
+
+- the cascade descends only into nodes on a path to a fresh style (`DomCascade.StylePaths`:
+  each fresh node and everything above it in the DOM and the flat tree). A fresh set already
+  holds every style a mutation reaches (descendants, following siblings, `:has()` anchors,
+  structural pseudo-classes; `RetainedStylePlanner.Plan`), and `PrepareRetainedStyles` adds
+  any connected element that has no retained style;
+- the counter walk is skipped when no `::before`/`::after` content holds `counter()` or
+  `counters()`: it would render each pseudo's text as the zero-counter text the cascade gave it;
+- the top-down pass skips an element, and everything below it, when nothing below it is fresh
+  and it receives the very inherited context it received the last time it was visited
+  (`TopDownMemo`, compared field by field, `Inherited.SameAs`). That visit's writes onto the
+  retained styles below are what this one would write, given the same viewport, root font size
+  and fonts, which the memo also requires; the definite heights it found are carried. Styles
+  that were fresh in the previous pass are visited again, since the passes after the top-down
+  one write onto a fresh style before the next pass reads it retained; after a full pass every
+  element is. The memo is taken by the next layout, so a pass that throws leaves none;
+- table spacing, trailing-cell growth and grid-area resolution find their tables, rows and
+  grids among the styles instead of walking the document (each writes only its own boxes, so
+  order does not matter), and the quirks-mode doctype check reads the document's children.
+
+Measured on the nvidia.com snapshot (median retained pass, same build settings): cascade 3.7 ->
+0.8ms, counters 1.7 -> under 0.5ms, top-down 4.9 -> under 0.5ms (31 elements visited of
+4,060 boxes), fixups 3.5 -> under 0.8ms; a pass ~91 -> ~80ms. Pinned by
+`ARetainedRestyleVisitsOnlyThePathToTheChange` (Render); the differential test now also mutates
+under sibling-combinator, `:has()`, `:nth-child`, `:empty`, attribute selectors, nested
+`counters()` and `::before`/`::after` content, and display/float toggles, at 12 seeds per
+fixture and 4 per float page without a divergence. `POCKETCALCULATOR_FULL_RELAYOUT=1` turns the
+cascade and top-down skipping off.
+
+### A removal restyles only what the removed subtree and its old position can reach
+
+DEVIATION from `crates/obscura-render/src/dom.rs`, whose removal records keep no sibling
+pointer and no picture of what left. On nvidia.com (one of the page's variants) a scrollbar
+probe added to and removed from `<body>` before forced reads, and each removal re-cascaded the
+whole document (12,760 fresh styles a pass) through three conservative scopes:
+
+- every `:has()` rule whose anchor may match an ancestor (`body:has(.modal-open)`) was reached
+  by any removal. `remove_child` now captures `RemovedSubtreeFeatures` while the subtree is
+  still attached (element keys and whether it held text, at most 512 elements, else nothing
+  is recorded and the old path applies), and a removal reaches a rule only when that subtree
+  holds an element its relative keys may match, or the rule has an unkeyed subject or a
+  sibling, structural or text side effect: the test an insertion already makes of what it
+  inserts;
+- a structural pseudo with a Conservative reach (`:nth-child(3) ~ * .a`, a structural pseudo
+  under `:is()` with another combinator) re-cascaded the whole parent subtree. It now takes the
+  candidate's subtree and its following siblings' subtrees: every combinator from the
+  candidate leads down or to later siblings, `:has()` is excluded and handled as a relational
+  rule, and the parent chain is re-cascaded through the style context chain anyway;
+- with sibling combinators in the sheet, every child of the old parent was re-cascaded, and
+  every sibling was a candidate for `:nth-child`, `:nth-last-child` and their `-of-type`
+  forms. `remove_child` now also records the old next sibling (`OldNextSibling`; a recorded
+  null means the node was last). While that node is still a child of the old parent, sibling
+  combinators re-cascade from it onward, `nth-child`/`nth-of-type` candidates are the siblings
+  from it onward and `nth-last-*` candidates the ones before it; otherwise the old scopes
+  apply.
+
+Pinned by `ARemovalReachesOnlyTheHasRulesItsSubtreeCanMatch` (Render). The differential test
+records the features and the next sibling three removals in four, and its sheet gained
+`body:has()`, `ul:has(li .hl)`, `:nth-child(3) ~ * .a` and
+`:is(li:last-child + *, ul > :first-of-type) b`; 24 seeds per fixture and 6 per float page ran
+without a divergence.
+
+### The whole-document work around a layout pass is shared, skipped or memoized
+
+DEVIATION from `crates/obscura-render`, which repeats all of it on every pass. Measured with an
+allocation trace and a sampled CPU trace of 400 forced reads on the nvidia.com snapshot, a pass
+allocated about 25 MB and spent a fifth of its time in garbage collection; most of the
+whole-document walks around the layout were allocation, not work:
+
+- the document's flat tree is walked once per prepare and the list shared by every walk that
+  reads it (images, fonts, the retained-style plan, fixed and sticky boxes, the scroll tree):
+  `DomTraversal.ShareDocumentWalk` (the DOM does not change while a prepare runs);
+- the walks that recurse per node (scroll owners, scrolling overflow, the clip walk) read a
+  node's children off the sibling chain (`DomTraversal.EachRenderedChild`) instead of
+  allocating a list per node; the clip walk shares one `OverflowClip` between the boxes under
+  it instead of copying it twice per node (nothing moves a stored clip in place: painters
+  clone first), and sizes its map to the tree;
+- shadow stylesheets are not looked for in a document without a shadow root, fixed-position
+  and sticky geometry are not walked without a fixed or sticky element, sticky geometry keeps
+  its per-node state in slot-indexed arrays, and `html` is found among the document's children
+  rather than by matching a selector against every element;
+- the font database and the families resolved from it are taken over from the previous pass's
+  engine when the font set is the same (`TextEngine.ForPass`; the same test that already lets a
+  pass take over shaped paragraphs; each engine keeps its own shaper and glyph caches), and a
+  `DomLayout` no longer builds a throwaway engine (and so a font database) in its initializer;
+- the per-word fallback's Skia advances are memoized by face and word (`DomTextMeasure`, bounded
+  at 65,536 words; the width is the same function of the memoized sum), and a word leaf is
+  shaped with `white-space: pre` handed to `TextEngine.PushGeneratedText` on its own rather
+  than in a copy of its style (first a copy per word, then one per text node: shaping only
+  reads the style, and the copies were a fifth of a retained build);
+- a carried box no longer gets a fresh empty cache left behind in the consumed tree;
+- selector matching no longer allocates a closure on every simple-selector test (the C#
+  compiler hoisted the lambdas of the nested cases to the method's entry).
+
+Measured on the nvidia.com snapshot, the same loop of a `margin-left` write and a read: 424
+passes in 45s before, 611 after; allocation ~25 -> ~19 MB a pass; median retained pass ~80 ->
+~70ms (the scroll tree 4.7 -> 3.1ms, clips 3.9 -> 2.8ms, engine 4.4 -> under 0.8ms, fixed
+nodes and sticky under 0.8ms). Results are unchanged by construction; the Render, Dom and Js
+suites pin them.
+
+### Work a retained pass repeats for unchanged text is skipped
+
+DEVIATION from `crates/obscura-render`, which lays every paragraph out again at its final width
+and resolves a span's font family list from its text on every use:
+
+- an inline item remembers the width and wrap its buffer was last laid out at without floats
+  (`InlineItem.ShapedFor`), and `TextEngine.ShapeWithTextIndent` asked for that same layout
+  again keeps it. Only that method and `ShapeAroundFloats` lay a buffer out, and the layout is
+  a function of the item (fixed once built), the width and the wrap; a layout beside floats
+  clears the record. A taken-over item whose box was carried over is finalized at the width the
+  previous pass left it at, so its final layout is now free, where an item with a text indent
+  or inline box edges copied its whole source buffer for it. 2,000-item grid: the `finalize`
+  phase 13 -> under 1ms a pass. Pinned by `ATakenOverItemKeepsTheLayoutItWasFinalizedAt`;
+- `FontResolution.ResolveLoadedFont` memoizes its answer per loaded-family dictionary (a text
+  engine fills it in its constructor and never changes it; engines sharing a font database
+  share it), bounded at 4,096 requests: the shaping of every span, every inline box fragment
+  and every font-relative unit split, trimmed and lower-cased the family list again.
+
+### A layout pass allocates less
+
+DEVIATION from `crates/obscura-render` (and vendor/taffy), whose equivalents allocate as they
+go. A forced read after a small mutation on nvidia.com spends a fifth to a third of its time in
+garbage collection (non-concurrent workstation GC, a ~1 GB heap): every pass builds a new box
+tree and new whole-document maps that survive to the next pass. What no longer allocates:
+
+- a taffy `Style` allocates its seven grid lists on first read, and equality, cloning, the grid
+  container view and `RetainedTaffyLayout.HasCalc` read an absent one as empty (the empty lists
+  were a third of a box tree's allocation);
+- `RetainedTaffyLayout.Transplant` pairs boxes with arrays indexed by taffy and DOM slot,
+  rented from the shared pools, instead of five dictionaries and sets over every box;
+- `DomPasses.ReparentInsetPositionedNodes` and the connected-node test of the retained-style
+  plan use slot-indexed pooled arrays instead of maps over every node;
+- `DomTraversal.IsAnyLocal` takes a `params ReadOnlySpan`, and the per-style loops over a
+  style's two pseudos iterate a stack span instead of a new array per style.
+- the box-tree build reads children off the sibling chain (`DomTraversal.EachRenderedChild`)
+  where it only looks at them, tests text for white space on a span (`AsSpan().Trim()`, here
+  and throughout the render library, instead of a trimmed copy), and sorts flex and grid items
+  by `order` only when some item has one (`DomBuild.StableOrderBy`, the same stable order the
+  LINQ sort gave);
+- the table pass's floor of definite content widths (`DomTableSupport.DefiniteContentWidthIndex`)
+  walks only the subtrees of the tables it is asked about, memoized per node, instead of the
+  whole document on the first question (nvidia.com asks about 16 small anonymous tables on
+  every pass; its `tables` phase went 12.4 -> 9.0ms a pass, live). Pinned by
+  `DefiniteContentWidthIndexTests`.
+
+The consumed box tree is emptied as soon as its layouts are carried over (`TaffyTree.Clear` in
+`LayoutDomOnce`, after `RetainedTaffyLayout.Transplant`). Its slot arrays are large objects,
+which a young-generation collection treats as live, so every box tree built since the last
+full collection kept its boxes, styles and child lists alive through every young collection
+until the next full one: on the nvidia.com snapshot each gen0 collection promoted ~50 MB (a
+dozen trees) and paused ~170ms. Emptied, it promotes ~5 MB and pauses ~55ms; GC pause over a
+20s write/read loop 2.5 -> 1.4s, 90th-percentile pass 170 -> 110ms. Pinned by
+`AConsumedBoxTreeLetsGoOfItsBoxes`.
+
+`POCKETCALCULATOR_LAYOUT_PROFILE=1` now also prints, per pass, the collections and GC pause it
+saw, what it allocated, why a retained restyle fell back to a full one, and the table passes.
+Measured on the nvidia.com snapshot (20s loop of a `margin-left` write and a read, interleaved
+with the previous commit): 250 -> 273-291 passes, allocation 17.5 -> 14.0 MB a pass, median
+pass 49.6 -> 42-45ms. Results are unchanged by construction.
+
+### The font work of a pass is memoized by the text it reads
+
+DEVIATION from `crates/obscura-render`, which on every pass parses the `@font-face` rules out of
+every sheet's text (`collect_web_fonts`) and scans every text node of the document for code
+points the optional emoji and CJK faces exist for. Both read text that rarely changes between
+passes, and on nvidia.com that was 2 MB of CSS lower-cased and searched, and the same 2 MB
+scanned again as the `<style>` element's text node, on every forced read. `PaintFonts.FontFacesOf`
+keeps the usable rules of each sheet text and `FontAssets.TextMayNeedOptionalFaces` the answer
+for each text of 256 characters or more, both in a `ConditionalWeakTable` keyed by the string
+instance: an unchanged `<style>`, fetched sheet or text node hands every pass the same string,
+an edit makes a new one, and the answer is a function of the text alone (the base URL is
+applied to the memoized sources per pass). The preload `<link>` walk shares the sheets' walk,
+and the two scans test for ASCII first (no code point below U+00A9 asks for either face).
+Measured on the nvidia.com snapshot (median retained pass): `@font-face` collection 7.4 ->
+0.8ms, the optional-face scan 7 -> under 0.5ms. Pinned by `PassFontWorkTests` (Render).
+
+### Line layouts are kept with the shaped paragraph
+
+DEVIATION from `crates/obscura-render`, which lays every paragraph out again on every pass, as the
+port did. A forced relayout re-measures each text leaf at the widths it had in the previous pass,
+and `TextLayout.LayoutToBuffer` was a third of what such a pass allocated (its `LayoutGlyph` arrays
+alone a fifth). `ShapeCache.Layout` keeps up to four layouts per shaped paragraph, keyed on the
+exact arguments (floats by bit pattern), under a global budget of 2^18 glyphs (~25MB); past it,
+lines are laid out per call as before. Sound for the same reason the shape cache is: the paragraph
+is never mutated after shaping, and nothing mutates a returned `LayoutLine` or its glyph list.
+Measured on a 2000-item page, interleaved: class write + `offsetWidth` read 255ms -> 200ms, style
+write + `getBoundingClientRect` 187ms -> 139ms; peak RSS unchanged. Pinned by
+`LineLayoutMemoTests` (Render). `POCKETCALCULATOR_DISABLE_SHAPE_CACHE=1` turns this off with the
+shape cache.
+
+### The retained planner adds a subtree to a dirty set once
+
+DEVIATION from `crates/obscura-render/src/dom.rs`, which walks a subtree and its ancestors on every
+`AddStyleSubtree`. A `:has()` rule anchored high sends every child-list mutation to the same anchor,
+and each call walked the whole document again: steamcommunity.com's app hub (`/app/730`) planned 38
+mutations in 1.0-2.6s and 336MB. `RetainedStylePlanner.AddStyleSubtree` remembers, per dirty set,
+the roots it added whole, and a root inside one adds nothing. Same plans, now 40-53ms for that
+batch; `fetch --eval` element count 568 -> 985 (Chromium 1302). Correctness is the differential
+suite's (unchanged plans).
+
+Open: weather.com's passes are not planner-bound. Many retained passes fall back to a whole-
+document restyle on `restyleAnimationWide` (animation damage reaching half the style graph), and
+every retained pass re-cascades each element a container-query rule selects
+(`AddContainerQueryResetScopes`, about half the document there) and re-runs the container-query
+iterations without carrying layout over, 100-300ms of cascade and 50-300ms of taffy each.
+`getComputedStyle` of a layout-independent property no longer forces one (see the next section).
+
+### getComputedStyle answers what layout cannot change before the pending mutations are restyled
+
+DEVIATION from `crates/obscura-js` and `crates/obscura-render`, whose `getComputedStyle()` prepares
+the whole render (restyle and layout of every pending mutation) for its snapshot. A computed
+style is a function of the rules that match the element and of its parent's computed style, so
+when the retained planner's own invalidation (`RetainedStylePlanner.OwnStyleDamage`, without the
+context chains it re-cascades) reaches neither the element nor any ancestor, the next restyle
+gives the element the style the prepared render already has. `PreparedRender.TryRetainedComputedStyle`
+answers the snapshot from there, without the used values (`width`, `height`, the insets, margins,
+padding, `transform`, `transform-origin`, and a grid container's track lists), and the new
+`op_computed_style_static` hands bootstrap.js that partial snapshot with the names it left out;
+reading one of those (or `length`/`item()`) takes `op_computed_style` as before, and the names
+are remembered so a later read of one goes there directly. It fails closed for container-query
+rules matching on the chain, table parts (collapsed borders and cell growth come from
+neighbours), shadow hosts or shadow trees on the chain, and pending resource loads (font metrics
+resolve `ch`/`ex`). A document timeline that moved on since the render was sampled is answered
+only for an element whose chain has no running CSS animation or Web Animation; a current render
+needs no shortcut. The planner result is memoized per pending batch (`ActivityGeneration` and the
+pending count). Ad scripts poll `display`/`position` of their slots while the page mutates:
+weather.com made ~1,300 such reads during load, each a full restyle and layout before.
+`POCKETCALCULATOR_NO_RETAINED_READS=1` turns it off with the `offsetParent` shortcut.
+`IncrementalLayoutDifferentialTests` checks every answer the previous render gives, at every
+step, against the full snapshot after a full layout (every answered value equal, the omitted
+names exactly the rest), on the eight fixtures and a new container-query fixture (soaked at 40
+seeds); `AComputedStyleReadIsAnsweredWithoutARestyleWhenNothingOnItsChainChanges` (Render) and
+`LayoutReadCacheTests.ComputedStyleReadsAfterMutationsElsewhereAreAnsweredBeforeTheRestyle` (Js,
+values from Chromium 141) pin it.
+
+It also fails closed when a pending mutation inserts, removes, edits or re-attributes a
+`<style>` or `<link>`, or moves an element carrying fetched CSS (`TouchesStylesheets`). The
+planner never needs that test, because the restyle collects the sheets again and a changed
+source list misses the stylesheet cache, but a read answered before the restyle has no such
+backstop: removing a script-inserted `<link>` left its rules in the answer
+(`AScriptInsertedStylesheetLinkAppliesAndItsRemovalRevokesTheRules`, Browser).
+
+### The retained planner learns a batch's sibling lists once
+
+DEVIATION from `crates/obscura-render/src/dom.rs`, which, for every insertion in a batch, lists
+the parent's element children, finds the node among them, counts the batch's insertions into
+that parent, and filters the stylesheet's structural invalidations for each state and each
+candidate sibling; and which counts every child of a parent for `:empty` before looking whether
+any `:empty` rule can match it. Appending 200 items one by one to a 2,000-item list, each
+followed by a read, planned in O(batch x list) per plan: 30 ms an append. One `Plan` now lists
+each parent's children and their positions once (`StructuralPlanScratch`), the boundary states
+(`first-child` and the like) are scoped once per parent that gained more than one element, the
+structural invalidations are grouped by state once per stylesheet
+(`InvalidationMap.OwnStructuralInvalidations`), and `:empty` looks at the rules before the
+children. Same plans. Pinned by `PlanningAppendsToALongListDoesNotRevisitTheList`.
+
+### `:has()` anchors and structural subjects are keyed by their context
+
+DEVIATION from `crates/obscura-render` (`RelationalAnchorKey` of the compound alone, and every
+candidate tried for every `:has()` rule), which over-invalidated in three ways that together made
+every insertion on weather.com restyle the whole document:
+
+- A `:has()` or structural pseudo-class inside `:not()`, `:is()` or `:where()` lost the key of the
+  compound holding it: `.hide-empty:not(:has(> *))` was an unkeyed anchor with an unkeyed
+  subject, so any insertion anywhere restyled the subtree of each ancestor. The argument's
+  subject compound is the element the enclosing compound matches, so it carries that key too.
+- A `:has()` argument without `+` or `~` looks only below its anchor, so only ancestors of the
+  change are anchor candidates for it; the previous siblings along the way are kept for
+  arguments with a sibling combinator (`RelationalInvalidation.SiblingRelative`).
+- A structural pseudo-class in a compound that a child or descendant combinator joins to a keyed
+  compound (`.list > :last-child`) can only match below an element with that key
+  (`StructuralInvalidation.AncestorKey`); an `<iframe>` appended to `<html>` restyled `<body>`
+  and everything in it for tailwind's `[&>*:last-child]` rules.
+
+Pinned by `AnInsertionReachesOnlyTheStructuralAndHasRulesWhoseKeysItCanMeet`; correctness is the
+differential suite's.
+
+
+### A document with shadow roots keeps its retained styles
+
+DEVIATION from `crates/obscura-render/src/dom.rs`, which restyles the whole document on any
+mutation once a shadow root carries a stylesheet (and so carries no layout over either), as the
+port did. Web-component pages pay a whole-document cascade and layout for every forced read
+(reddit.com: ~170 shadow roots). `RetainedStylePlanner.AddShadowDamage` plans every shadow
+sheet against the mutations as the document's is planned, covers what the planner cannot key
+structurally (an attribute change on a host restyles its shadow tree, for `:host(...)` and
+`::part`; `part`, `exportparts` and `slot` restyle the element's subtree; a slot inserted,
+removed or renamed restyles its host and the host's light children; an insertion or removal of
+a host's light child restyles the host), fails closed on `:host-context()`, and closes the
+damage over the flat tree (a damaged host's shadow tree and a damaged slot's assigned nodes,
+plus flat-tree context chains). The sheets must be the very ones the retained styles were
+cascaded with, root for root (`RetainedStyleMaps.ShadowSheets`); any other shadow sheet set
+restyles the document as before. The retained pass's set of styled nodes is now every
+shadow-including descendant when there are shadow roots, as the full cascade styles them (a
+slot's fallback content and a host's unassigned children are not in the flat tree; the walk over
+the flat tree dropped their styles). Each shadow sheet is planned only against the mutations that
+touch its tree, its host or the host's light children, since its rules match nothing else. The
+JS ops now record a mutation inside a shadow tree as a retained mutation (crates/obscura-js
+drops the prepared render for it; `OpsTests.Connected_shadow_nodes_invalidate_without_entering_light_tree_retention`
+says so at the deviation): on reddit.com that turned 7 of 16 passes from full into retained.
+Interleaved on one binary
+(`POCKETCALCULATOR_NO_SHADOW_RETAINED=1` restores the old path), 400 web components each with a
+shadow stylesheet, 30 class toggles each followed by a read, three runs: allocation 1377MB ->
+340MB, layout CPU 7.0-7.4s -> 4.7-4.9s, same answers. Pinned by the shadow fixture of
+`IncrementalLayoutDifferentialTests` (shared shadow sheet, `:host`, `::slotted`, named slots,
+`::part`, inherited custom properties, a nested host; 60 seeds clean) and
+`AShadowRootPageRestylesOnlyWhatAMutationReaches`.
+
+### A shadow root's sheet is found by its sources' identity
+
+DEVIATION from `crates/obscura-render` (which parses every shadow root's sheet on every pass) and
+from the port's own content-keyed cache before it: every pass joined each root's sources into one
+key string and hashed it, so on reddit.com's ~170 roots a pass copied and hashed every component's
+whole stylesheet again, 13-37ms of each forced read (a third of a retained pass there).
+`StylesheetCache.GetOrParseShadow` now remembers, per root, the source strings it was given and
+their entry; a root whose sources are the very same strings (a `<style>` with one text child hands
+its text node's string out unchanged) gets its sheet without the join. Anything else takes the
+content key as before, so roots sharing sources still share a sheet, and the per-root records of
+roots a pass did not see are dropped with it. reddit.com (`fetch`, layout profile, two runs each):
+the `sheets` phase of a retained pass 12-47ms -> ~1ms; summed over the load, 1.75-2.05s
+(4eedc89) -> 1.21-1.31s, the rest being the cold parses of new sheets.
+
+### An inline context keeps the sizes it has measured
+
+DEVIATION from `crates/obscura-render/src/inline.rs`, which lays a paragraph out again for every
+measurement. Grid, flex and table sizing ask one inline context for its min-content, max-content
+and final sizes over and over, and an item kept only the last layout (`ShapedFor`), so alternating
+questions laid it out every time. `TextEngine.MeasureTextWithWrap` keeps the last six answers per
+item (`InlineItem.MeasuredSizes`, keyed by the width's bits and the wrap); `ForgetLayout` drops
+them wherever the item's content changes (an atomic inline's size, a list marker's indent), and a
+carried-over item keeps them into the next pass. Items with atomic inlines or anchored floats are
+measured every time, since their placement reads the buffer the last measurement left. Exact:
+`MeasureMemoTests` lays the line-carry pages and two intrinsic-sizing pages out with and without
+it, fresh and retained. `POCKETCALCULATOR_NO_MEASURE_MEMO=1` turns it off. 2,000 grid items, cold
+layout, interleaved on one binary, two runs: taffy 1017-1125ms -> 941-1021ms.
+
+Not done: the min-content size of a paragraph still comes from a line layout at width 0 (one word
+a line). A measurement returns the height as well, and taffy caches the pair, so the width cannot
+come from the shaped words alone unless the height of those lines does too; on the 2,000-item
+page that layout is 80% of the cold pass, most of it allocating the `LayoutGlyph`s of lines that
+are measured and dropped.
+
+### A container-query pass keeps the previous pass's styles and layout
+
+DEVIATION from `crates/obscura-render`, which cascades and lays the whole document out from
+scratch on every container-query pass after the first, retained prepare or not. Between two
+passes of one prepare only the answers of container-query rules can change, so pass k now takes
+pass k-1's style maps, restyles what a container-query rule selects inside a query container
+(`RetainedStylePlanner.AddContainerQueryResetScopes`, the scopes a retained pass resets) and
+carries pass k-1's layout over to the rest (`RetainedTaffyLayout`, with no mutations and those
+scopes as the dirty set). A pass that ends on equal adjacent signatures returns its own layout
+rather than the previous candidate's, whose styles it took: it applied the same decisions to the
+same tree. The rules of shadow trees are outside those scopes, so a page whose shadow sheets or
+`::part` rules have container queries passes from scratch as before.
+`POCKETCALCULATOR_NO_RETAINED_CONTAINER_PASSES=1` restores the old passes.
+
+Tried and dropped: starting a retained prepare from the container sizes the previous one
+converged on, which would skip the container-query-less first pass and the reset. When the sizes
+come out the same it is a fixed point of the iteration, but not always the one the iteration from
+no sizes reaches: the differential suite's container-query fixture found three seeds (of 60)
+where the two disagree, so the iteration still starts from no sizes.
+
+Found by the same soak and fixed: a light child that changed slots (its `slot` attribute, a
+slot's `name`, a slot or a host child inserted or removed) left the slot it was assigned to before
+out of the layout's dirty closure, since that slot is above nothing in the tree as it is now; the
+slot's box and its inline context, still holding the moved text, were carried over
+(`RandomMutationSequencesMatchAFullRelayout(7, 57)`, present at 2158322: the page 19px taller).
+`RetainedTaffyLayout.DirtyClosure` now seeds every slot of the shadow tree such a mutation can
+reassign.
+
+Found, not fixed (present at 2158322): `RandomMutationSequencesMatchAFullRelayout(5, 77)` diverges
+at step 4, an `<img>` inside a `<button>` getting a new `src`: the retained button keeps the width
+its control sizing took from the old image (102px against 192px). The source swap restyles the
+image's subtree only (see "An `<img>` source swap restyles the image"), and the button's
+control-sized width is written into its retained style.
+
+### A split paragraph's lines are taken from the line they were cut from
+
+DEVIATION from `crates/obscura-render/src/inline.rs` (`shape_with_text_indent`), which shapes and
+wraps every split-off tail afresh to find its first visual line, and shapes every line the
+paragraph ends up split into again. A paragraph of n lines was shaped n times, and a min-content
+measurement (width 0, one word a line) was quadratic in its word count: a 2,000-item grid spent
+1.9s of a 3.9s cold layout re-shaping remainders. Two exact shortcuts in
+`TextEngine.ShapeWithTextIndent`, for left-to-right lines without tabs short enough to be laid out
+whole (`ProbeWindowMinLine`):
+
+- `LineCarry`: a tail's first visual line is the whole line's next one when the tail starts
+  where that line starts, at a word boundary, and is asked for at the same available width
+  (wrapping is greedy and shaping is per word). Any retry for inline box edges, an emergency
+  break inside a word, or a different width lays the tail out as before.
+- `TextShaper.ShapeParagraphSlice`: a line cut at word boundaries out of a shaped paragraph is
+  shaped by copying those words, moved to the line's offsets (each word is shaped from its own
+  text and attributes and keeps its break opportunities as glyph indices). It still goes
+  through the shape cache.
+
+Interleaved on one binary (`POCKETCALCULATOR_NO_LINE_CARRY=1` restores the old path), 2,000
+grid items, cold layout, four runs: taffy 1.50-1.68s -> 1.18-1.25s, the pass 2.40-2.66s ->
+2.08-2.19s, allocation 385MB -> 271MB. Retained passes unchanged (19MB each either way).
+`POCKETCALCULATOR_VERIFY_LINE_CARRY=1` shapes every slice as well and reports any difference;
+none on the render repros, the snapshots or six live sites. Pinned by `LineCarryTests` (Render),
+which lays ten pages out both ways and compares the whole render.
+
+### `offsetParent`, and the offsets of a box-less element, are read before pending mutations are laid out
+
+DEVIATION from `crates/obscura-render` and `crates/obscura-js`, which lay the document out before
+answering any layout read (and have no `offsetParent`). Whether an element generates a box, and
+its `offsetParent`, are functions of the computed styles of the element and its ancestors and of
+the ancestor chain, never of geometry. `PreparedRender.TryRetainedOffsetParent` answers them from
+the prepared render while mutations are pending when the retained planner's own invalidation,
+without the context chains it re-cascades (`RetainedStylePlanner.OwnStyleDamage`), cannot reach
+the element or any ancestor and the chain is still connected: an element below a `display: none`
+ancestor that this render left out has no box whatever happens below that ancestor, and a
+block-level element that had one keeps it and its offset parent. Shadow trees, container queries
+and animation damage fail closed. The new `op_layout_offset_parent` answers `offsetParent` alone;
+`op_layout_offset` answers a box-less element's zeros the same way. AEM's lazy image component
+inserts an image and reads the component's `offsetParent` to skip hidden ones (nvidia.com: 75
+reads, each a whole relayout). Interleaved on one binary
+(`POCKETCALCULATOR_NO_RETAINED_READS=1` restores the old path), nvidia.com through CDP, three runs:
+the 75 `offsetParent` reads 3.8-7.3s -> 0.7-1.0s, all forced reads 16.0-20.1s -> 11.3-12.5s,
+goto 25.8-31.4s -> 19.2-25.2s (load average 10-13); 100 components on a local repro 2.7-5.9s ->
+1.4-1.7s (Chromium 2ms), same answers as Chromium. `IncrementalLayoutDifferentialTests` checks
+every answer the previous render gives against a full layout at every step, and
+`LayoutReadCacheTests.OffsetParentReadsAfterInsertionsAreAnsweredBeforeTheLayout` (Js) pins the
+values against Chromium 141.
+
+Found on the way, not fixed: a `display: none` table row is still laid out (offsetHeight 20,
+offsetParent the table) where Chromium gives it no box; the shortcut does not treat such a row as
+hidden.
+
+### An `<img>` source swap restyles the image, not the document
+
+DEVIATION from `crates/obscura-render/src/dom.rs` (`retained_attribute_mutation_kind`), which
+classifies `src`, `srcset` and `sizes` on an `<img>` as Full, discarding every retained style.
+`RetainedStylePlanner.RetainedAttributeMutationKindOf` classifies them Subtree: every prepare,
+retained or not, rebuilds image intrinsics from the tree (`PaintImages.CollectImageIntrinsics`),
+so the only thing a retained pass lacks is a fresh style for the `<img>`, whose `LayoutStyle` the
+previous pass wrote the old image's natural size and ratio into. `<source>`, `<picture>` and the
+other resource attributes stay Full. Lazy loaders swap a placeholder and read the geometry right
+away (nvidia.com: 49-75 swaps, each a whole-document cascade). The Rust selector-matrix case
+"image resource mutation" now expects Incremental in `DomLayoutTests`; pinned by
+`RetainedImageSourceSwapMatchesForcedFull` (Render, against a forced full layout, including a
+source that has no intrinsic size yet) and `LayoutReadCacheTests` (Js, against Chromium 141).
+
+### A relayout carries the previous pass's layout results over to unchanged subtrees
+
+DEVIATION from `crates/obscura-render`, which builds a fresh taffy tree and lays the whole
+document out on every pass, as the port did. A forced read after a small mutation cost a
+whole-document layout. The box tree is still rebuilt each pass, but `RetainedTaffyLayout`
+(kept on `DomLayout.RetainedBoxes`, one per prepared render, consumed by the next retained
+pass) pairs each new box with the previous pass's box for the same content and, when the
+whole subtree is provably unchanged, moves the previous box's taffy cache and stored layouts
+over (`TaffyTree.TransplantFrom`). taffy's own cache then answers clean subtrees whose
+constraints are unchanged and re-runs layout only along the dirty path. It fails closed: a box
+is carried only when it maps to the same DOM node (or the same anonymous position), nothing it
+was built from is in the pass's dirty closure (restyled nodes, tree/text/attribute mutation
+targets and parents, changed image intrinsics, changed generated/counter text, closed upward),
+its taffy style is equal and holds no `calc()` handle, its measure context matches (replaced
+sizing bit for bit), its children pair one for one, and the previous pass did not lay it out
+reading the floats of its formatting context. Two departures from vendor/taffy back it: a
+carried cache asked for in a different block-context mode is dropped (`ComputeChildLayoutInner`),
+and a cache entry keeps the block-context float contribution its computation left behind
+(`Cache.GetCarried`), handed back the first time a carried entry answers, since taffy's cache
+otherwise drops that side channel and the root's height came out differently. Nothing is
+carried across a pass that gained or lost its floats (the box tree is built differently).
+
+**Float-blind layouts are cached in a block formatting context with floats** (October 2026).
+The float rewrite computed every box laid out in its parent's BFC uncached as soon as the tree
+had one float anywhere, so nvidia.com's single float in its navigation (`navglobicon`) made the
+whole document's block flow and its line breaking run on every pass, and its inline items were
+never taken over. Now every such layout records what it asked the BFC's float context
+(`FloatDependencies`, through the `BlockContext` methods): the lowest block offset it asked
+about, the sides a `clear` in it asked about, and whether any answer was one only a float
+gives (a float placed, a slot or line band beside one, a cleared float bottom). A layout that
+saw no float is *float-blind*: its result depends on its `LayoutInput` alone wherever the
+floats give it the same answers, which holds when the lowest float edge is above the lowest
+offset it asked about (with a margin of 1px + 1e-5 of the offset for the rounding of sub-context
+offsets) and the sides it cleared have no float. Such layouts go to a second cache per node
+(`NodeData.BlockCache`; the same node probed as its own formatting context answers the same
+inputs differently), recorded relative to the box's border-top, so a box below every float
+keeps its cached layout when a mutation above moves it, and its float contribution is handed
+back on every hit (the uncached path always contributed it). A layout that saw a float is
+computed as before and drops its final-layout entry, and any final layout drops the other
+cache's final entry, so a final-layout hit always describes the stored layouts below it. A leaf
+holding anchored floats is never answered from the cache (its caller reads that layout's lines).
+This is the part of Chromium's `MaySkipLayoutWithinBlockFormattingContext` that needs no exact
+match of the exclusion space; a box beside a float is laid out again on every pass, as before.
+`POCKETCALCULATOR_FULL_RELAYOUT=1` turns it off (`TaffyTree.FloatBlindCache`), so the
+differential test's reference is the uncached float path.
+
+Unchanged whole-container inline items are taken over by the next pass's engine
+(`TextEngine.AdoptInlineItems`) instead of being collected and shaped again, on float pages too
+(the exclusions of an item's last final layout are reset on adoption: a carried final layout of
+its box exists only for a float-blind layout, and any other sets them before `Finalize` reads
+them). The previous engine is released once the box tree is built (a fact pins that the first
+pass's engine is collectable).
+
+Measured on a local snapshot of nvidia.com (Chromium-serialized DOM and CSS, 4,060 boxes, one
+float), CLI `fetch --eval`, a one-element `margin-left` write and a read of another element,
+median of the last 30 retained passes, against 1001c70: a pass 158ms -> 100ms (taffy 11.4 ->
+2.5ms, the repair relayouts 14.9 -> 3.4ms, box-tree build 19.4 -> 11.1ms with 1,029 inline items
+taken over, boxes carried 1,815 -> 3,613). On a 40-section float article (thumbnails, a
+sidebar and float columns in one BFC) 93-116ms -> 81-86ms (build 19-24 -> 4-5ms, taffy 15 ->
+6-7ms). Soaked at 10 seeds per fixture and 8 per float page (558 runs, none diverging); pinned
+by `AFloatPageCarriesOverBlocksBelowItsFloats`.
+
+`POCKETCALCULATOR_FULL_RELAYOUT=1` turns both off (`RetainedTaffyLayout.ForceFullRelayout` per
+execution context, for tests). `POCKETCALCULATOR_LAYOUT_PROFILE=1` prints per-phase timings of
+every prepare to stderr. Pinned by `IncrementalLayoutDifferentialTests` (Render): random
+sequences of class, style, text, insert, remove, move, `<img>` src and attribute mutations on
+six fixtures and the 61 float conformance pages, each step compared with a from-scratch full
+layout in every computed style, every rect (snapped and LayoutUnit), inline fragment, text run,
+generated box and the painted pixels; soaked at 40 seeds per fixture and 6 per float page (615 runs, none diverging).
+A cancelled incremental pass leaves no retained state (RenderState drops the previous render
+when a prepare throws) and the next pass is exact (`ACancelledPassLeavesTheNextPassExact`).
+Read-after-write timing and carry-over pinned in `LayoutReadCacheTests` (Js).
+
+Found by the same test, fixed: `GrowTrailingAutoCells` took its own flex-grow from the previous
+pass for an authored one; the used percentage padding written after layout
+(`SyncResolvedPercentagePadding`) was read back as computed padding by the next retained pass
+(undone before the pass, restored when the reuse gate keeps the layout); the reuse gate kept the
+previous layout for attributes the box build reads directly (`colspan`, `size`, ...).
+
+Also: `DomTree.Children` allocates its list at the final size, `DomTree.TextContent` of an
+element with one text child returns that child's string, and the second clip walk after inline
+owner fragments is skipped when no replaced owner rect feeds it.
 
 ### The CDP watchdog scans its slots in a separate frame
 
@@ -3931,7 +5154,10 @@ fonts, which is a deliberate policy, so paint work cannot close it.
   OOM still aborts the process. The violation policy is also load-bearing:
   `Exception` raises an ordinary script error that page JS can simply catch,
   defeating the cap, so the port uses the uncatchable `Interrupt` plus a
-  raise-collect-restore recovery.
+  raise-collect-restore recovery. (Since superseded: every runtime gets a default
+  cap (M7), and V8 grows its own limit rather than aborting before the cap's late
+  sample lands; see "V8 grows its heap limit instead of aborting" under Known
+  deviations.)
 - **The CLI exited on a signal after succeeding, and now does not.** About one
   run in ten exited 139 (SIGSEGV) having produced complete, byte-identical
   output: the crash lands in native shutdown after `main` returns and after
@@ -4628,3 +5854,1079 @@ Pinned by `DomLayoutTests.PercentageWidthTableIsFlooredByItsMinContentWidth`,
 `PercentageWidthTableThatFitsKeepsItsContainingBlockWidth`,
 `DefiniteWidthInlineBlockDoesNotShrinkItsBlockChildren` and
 `TableInAScrollableBoxTakesItsContentWidth`.
+
+### The embedded CJK face, and how Chromium treats a fallback face
+
+**Decision.** The engine embeds one CJK face, Noto Sans CJK SC Regular 2.004 (SIL OFL 1.1,
+`notofonts/noto-cjk`, 16,437,364 bytes; URL, commit and SHA-256 in
+`dotnet/src/PocketCalculator.Render/Assets/FONT-PROVENANCE.md`). Before it, every Chinese,
+Japanese and Korean character was a missing glyph (live survey: the wikipedia.org language
+list, example.com's multilingual notice, whole pages on baidu.com, qq.com, taobao.com,
+naver.com). The Rust engine embeds no CJK face, so this is a deviation from it by design. Why
+this file: every regional face under `OTF/` carries the full pan-CJK set (Unified Ideographs
+and Extension A, kana, all 11,172 Hangul syllables, CJK punctuation, fullwidth forms), and
+nothing smaller does: the `SubsetOTF/SC` face (8.3 MB) and the subset variable face (15.1 MB)
+have no Hangul, the full variable face is 30.7 MB, and a static Bold would add 17 MB. Bold is
+synthesized instead (below). No new native dependency: the face goes through Skia and HarfBuzz.
+
+**How it is loaded.** Like the emoji face, it joins only a render pass whose text (text nodes,
+`::before`/`::after` content) has a CJK code point, or whose styles name the face
+(`LayoutDomOnce`, `FontAssets.TextMayNeedCjkFont` / `FamilyNamesCjkFace`). Both large faces are
+now read in place: Skia gets an `SKData` over the assembly's resource section
+(`FontAssets.Embedded`), and the HarfBuzz blob is built once per process with
+`MemoryMode.Duplicate` and shared, where the emoji face used to be copied three times per
+layout pass. Fallback order is DejaVu Sans, Noto Color Emoji, Noto Sans CJK SC, then the rest.
+"Noto Sans CJK SC/TC/JP/KR/HK" resolve to it as a family; Chromium with the same font set falls
+through on PingFang SC, Microsoft YaHei, SimSun, Meiryo, Malgun Gothic and the Google Fonts
+"Noto Sans SC/JP/KR" names, and so does the port (their CJK text gets the face by fallback).
+A shape cache is no longer carried between passes that loaded a different optional-face set,
+since FontIds shift with it.
+
+Cost, measured interleaved (10 runs each, same build, `fetch --screenshot` of a local page):
+a Latin-only page is unchanged (median 1234 vs 1173 ms, noise; max RSS 183.0 vs 182.9 MB); a
+page with one CJK paragraph costs ~15 ms and 31 MB RSS (186.1 to 217.4 MB), about half of it
+the shared HarfBuzz duplicate. `PocketCalculator.Render.dll` grows from 16.7 to 33.2 MB and
+the `PocketCalculator` package from about 13.8 to 27.6 MB; the package now also carries both
+Noto OFL texts (`LICENSE-NOTO-COLOR-EMOJI.txt`, `LICENSE-NOTO-SANS-CJK.txt`).
+
+**Chromium's treatment of a fallback face**, which CJK text exposes on every line and which
+the port now follows for every fallback face (`TextShaper.ReadShapedGlyphs`), measured on
+Chromium 141 with fontconfig limited to the engine's own faces:
+
+- A glyph from a fallback face advances by whole pixels: ten Hangul syllables (920 units) are
+  150px at 16px as fallback and 147.2px with the face named; a DejaVu check mark is 13px as
+  fallback and 13.41px named; Arabic `مرحبا` is 38px, not 36.99.
+- With `line-height: normal`, the fallback face's leaded ascent and descent join the box's
+  line-box contribution (Blink's `AccumulateUsedFonts`): a Liberation Sans line with Chinese is
+  24px at 16px, 17px at 12px, 35px at 24px; a fixed line-height is unaffected; an emoji or
+  DejaVu fallback glyph makes an 18px line 19px. The inline box's own font box stays the
+  primary face's (a span is still 17px tall).
+- Synthetic bold: a fallback face is emboldened for a request of 600 or more, a named
+  single-weight face only above its weight + 200 (600 regular, 700 bold); the advance never
+  changes. Only the embedded CJK face opts in (`FaceRecord.SynthesizesBold`): Liberation and
+  DejaVu have real bold faces, and a page face's descriptors are not modelled, so web fonts
+  with one weight are still drawn unemboldened.
+
+**Line breaking.** Chromium's `line-break: auto` resolves CJ (small kana, the prolonged sound
+mark) as ID, where UAX#14's default and the Rust engine resolve it as NS; the CJK punctuation
+block, radicals, bopomofo, compatibility jamo, enclosed CJK and the fullwidth forms are ID
+(fullwidth digits used to be numeric and fullwidth letters alphabetic, with no break between
+them); `：；・〜゛゜゠･` are NS; `〝` opens, `〞〟` close; U+3000 breaks after.
+
+Pinned by `CjkFontTests` (Render) and `InlineClientRectTests.RightToLeftSpanHasItsGlyphWidth`,
+re-measured for the fallback rules.
+
+Still short of Chromium:
+
+- `text-spacing-trim` (Chromium's default `normal`) is not implemented: adjacent fullwidth
+  punctuation is not collapsed (`あ。「括弧」の` is 104px in Chromium, 112px here) and a closing
+  punctuation mark at the end of a line is not allowed to hang into half its width, so a
+  Japanese paragraph that fits exactly in Chromium can wrap one character earlier.
+- Han glyph forms are always the SC face's defaults: no `locl` from `lang` (a JP or KR page
+  gets Simplified Chinese forms of the shared ideographs), and one SC face stands in for the
+  TC/JP/KR/HK families.
+- SVG `<text>` and the static `PaintText`/`DomTextMeasure` paths have no per-glyph fallback
+  and still draw CJK as missing glyphs.
+- Emoji are 23px wide at 16px in Chromium and 20px here (unchanged by this work; the port
+  used 19.92).
+
+### HTML element interfaces are distinct, and HTMLElement is not Element
+
+`crates/obscura-js/js/bootstrap.js` aliases HTMLElement and about thirty HTML*Element
+interfaces to `Element` (`globalThis.HTMLScriptElement = Element;`), so every element was an
+instance of every one of them. On live sites: `document.createElement('div') instanceof
+HTMLScriptElement` was true, Ensighten's patch of `HTMLScriptElement.prototype.setAttribute` ran
+for every element and threw, and webpack style-loader treated `<head>` as an iframe and never
+injected CSS. DEVIATION: `HTMLElement` is its own class between `Element` and every HTML
+interface, each of the 34 aliased interfaces (and ten Chromium has that were missing:
+HTMLDataElement, HTMLModElement, HTMLMenuElement, HTMLParamElement, HTMLFontElement,
+HTMLFrameElement, HTMLFrameSetElement, HTMLMarqueeElement, HTMLDirectoryElement,
+HTMLSelectedContentElement) is its own subclass, and `_htmlTagClasses` maps every tag to its
+interface with Chromium 141's table (an unlisted name is HTMLUnknownElement, a hyphenated one
+HTMLElement). SVG and null-namespace elements are not HTMLElements. The constructors throw
+"Illegal constructor" as in Chromium, except `new` of a defined autonomous custom element, which
+now creates the element (the shim used to build a wrapper with no node). Wrappers the shim
+builds go through `_constructElement`, which is how the constructor tells them apart.
+
+Members moved off `Element.prototype` to where Chromium keeps them: innerText, hidden, title,
+lang, dir, accessKey, offset*, click, popover and its methods, attachInternals to
+`HTMLElement.prototype`; style, dataset, tabIndex, autofocus, focus, blur and the
+GlobalEventHandlers `on*` to both `HTMLElement.prototype` and `SVGElement.prototype`; the
+window's handlers (`onhashchange`, `onpopstate`, ...) to HTMLBodyElement/HTMLFrameSetElement.
+Added: outerText, contentEditable, isContentEditable, draggable, spellcheck, translate, inert,
+offsetParent, and offsetTop/offsetLeft are now measured from the offsetParent (document-relative
+for `<body>`) rather than being the viewport rect; the anchor/area stringifier returns href.
+The members Chromium has on the specific interfaces (an anchor's `href`, an iframe's
+`contentWindow`, ...) moved later, see "Interface members off Element.prototype". The host's click (`__obscura_host.dom.call(el,
+'click')`) still reaches SVG elements, which have no click() of their own. The Rust-derived
+`GlobalEventHandlersPresentOnDocumentAndElement` now asserts Chromium's placement. Pinned by
+`HtmlElementInterfacesTests` and `OffsetParentTests`.
+
+### An about:blank iframe's document.open() returns the document
+
+The reference's `_IframeDocument.open()` returns undefined; Chromium's returns the document,
+and Akamai mPulse's `iframe.contentWindow.document.open()._l = ...` threw. Still open: the
+stand-in's `write()` appends through `innerHTML`, so a `<script>` or `<body onload>` written
+into the frame does not run, where Chromium runs it in the frame's realm.
+
+### Workers have `importScripts` and a worker global scope; `data:` and `blob:` modules load
+
+Port addition; Rust has none of it. Measured against Chromium 141 (Playwright 1.56).
+
+- **`importScripts`** (bootstrap.js `Worker`, `Ops/WorkerOps.cs`). Classic workers parse
+  every URL against the worker's URL first (`SyntaxError` DOMException), then fetch and run
+  each in order, synchronously. HTTP(S) loads go through the new sync op
+  `op_worker_import_script`, which blocks the engine thread on the page's client as a
+  static module graph does: page cookies (same-origin credentials), SSRF and mixed-content
+  gates, `Network.setBlockedURLs`, callbacks. Like a module graph it is not offered to CDP
+  `Fetch` interception, because the CDP loop that would resolve the pause is waiting on
+  this thread. A non-2xx response or a type that is not a JavaScript MIME type (no type
+  included) is a `NetworkError`; `data:` and `blob:` imports are decoded in the shim and
+  not type-checked, as in Chromium. An exception from another origin's script is muted to
+  a `NetworkError`; a parse error is a `SyntaxError` naming `importScripts`; a module
+  worker throws `TypeError`. The host hands the source straight to the shim's evaluator
+  (SECURITY.md C3).
+- **Global declarations.** A worker still runs in the page realm under a scope object.
+  Each of its scripts was a direct eval whose top-level `var`/`function`/`let`/`const`/`class`
+  stayed private to that eval, so an `importScripts` library was invisible to its caller.
+  The host scans each script's top-level names (`Ops/ScriptDeclarations.cs`, a tolerant
+  scanner, `op_script_declarations`); a sloppy script's `var`s become scope properties
+  before it runs and its functions after hoisting (also before a nested `importScripts`),
+  and `let`/`const`/`class` go to a per-worker lexical object that later scripts see but
+  `self` does not. Known gaps: a strict script's declarations are copied after it finishes
+  (a snapshot), a block-level function declaration is not hoisted to the scope, and an
+  implicit global assignment still lands on the page's window.
+- **Worker scope.** `self` is a `DedicatedWorkerGlobalScope` (`instanceof WorkerGlobalScope`,
+  `[object DedicatedWorkerGlobalScope]`), `location` is a `WorkerLocation` for the worker's
+  URL, `navigator` a `WorkerNavigator` reading the page's navigator, `name` comes from the
+  options, and `window`, `document` and the other window-only names are `undefined` instead
+  of falling through to the page. `new Worker(new URL(...))` is accepted; a non-2xx worker
+  script is an error instead of running the error page. Messages posted before the worker
+  was ready are delivered in order in the task that runs its script (after the script's
+  microtasks, as Chromium's worker checkpoint does), not one timer turn later each: that
+  extra turn made delivery depend on host load
+  (`WorkerDeliversQueuedMessagesInTheTurnThatStartsIt`).
+- **`data:` modules** (`PocketCalculatorModuleLoader.LoadLocalDocument`, `Url/DataUrl.cs`):
+  decoded locally with the Fetch data: URL processor, one module per URL, UTF-8, refused
+  unless the type is JavaScript (`data:text/plain,...` fails as in Chromium).
+- **`blob:` modules**: `URL.createObjectURL` registers a Blob whose type is JavaScript with
+  the host (`op_blob_script_register`, `BlobScriptStore`, revoked with the URL); the loader
+  imports from there. An untyped Blob is refused, as by Chromium's strict MIME check.
+- **`import.meta.url`** is now set for every module the loader returns (a document context
+  callback); before, only a graph's root had it.
+
+Still open: module workers (`type: 'module'`) evaluate their source as a classic script;
+`SharedWorker` is a stub that never runs; a failed `import()` rejects with `Error`, where
+Chromium rejects with `TypeError` (ClearScript converts the loader's exception); HTTP
+modules are not MIME-checked. Pinned by `RuntimeTests.WorkerImportScripts*`,
+`DataUrlModules*`, `BlobUrlModulesLoadWhenTheBlobIsJavaScript`,
+`ImportedModulesSeeTheirOwnImportMetaUrl` and `ScriptDeclarationsFindsTopLevelNamesOnly`.
+
+### Geometry is reported at LayoutUnit precision; offsets come from the layout
+
+Rust reports every box from taffy's rounded layout, so `getBoundingClientRect()` was whole
+pixels (a `200.4px` float read 200 and the inline-block after it started at 200), and the shim
+answered `offsetLeft`/`offsetTop`/`offsetWidth`/`offsetHeight` from that same rect, so they
+moved with scrolling and transforms, ignored the offset parent (there was no `offsetParent`),
+and `html`/`body` reported the viewport. Chromium lays out in LayoutUnits (1/64px) and snaps
+only at paint: the bounding rect is fractional, the `offset*` and `client*` values are integers.
+
+- `DomPasses.ComputeAbsoluteRects` keeps taffy's unrounded box beside the snapped one
+  (`DomLayout.SubpixelRects`); `DomLayout.PreciseRect` answers with it, truncated to 1/64px as
+  `LayoutUnit(float)` does, while the box keeps the size it had when recorded. Paint still uses
+  the snapped `Rects`, which is Chromium's pixel snapping, so screenshots do not change.
+  `PreparedRender.DocumentRect` and the client-rect fallback read the precise box, so
+  `getBoundingClientRect()`, `getClientRects()`, IntersectionObserver and the CDP box model see
+  it. `clientWidth`/`scrollWidth` still come from the snapped rect, as before. Quantizing the
+  absolute value rather than each layout step can differ from Chromium by 1/64px.
+- `op_layout_offset` (additive) returns `offsetParent` and the four `offset*` integers from
+  `PreparedRender.OffsetMetrics`: the nearest positioned or containing-block ancestor, `body`, or
+  `td`/`th`/`table` for a static element; the border box relative to the parent's padding edge in
+  untransformed layout space; a static `body` parent measures from the document origin; sizes
+  round on their own (Chromium 141 does not snap them against the offset's fraction).
+- An atomic inline's strut descent splits the leading as text lines do (ascent half floored),
+  so a 20px inline-block in a 16px serif line is 24px, not 23.5 (`DomBuild.StrutDescent`).
+- A unitless `line-height` truncates to LayoutUnits (17px * 1.2 = 20.390625); lengths still
+  round (`FontResolution.UsedLineHeightWithMetrics`). `getComputedStyle` keeps the product.
+- Grid track offsets use compensated summation (`GridAlignment`); plain f32 accumulation over
+  2000 implicit tracks put a 1000px item at 999.94px once the unrounded box was visible.
+
+Not done: border widths are not snapped to whole pixels (Chromium draws `4.1px` as 4px, so the
+box is 0.1px narrower there); an atomic inline shorter than the strut's ascent still sits at the
+line's top instead of on the baseline. (A percentage width beside a float resolved against the
+float-zone flow column, and a run of `clear`ing same-side floats was laid out side by side,
+which is why wikipedia.org's footer dropped `.other-projects` below its sidebar; both went with
+the float-zone rows, see "Float layout (CSS 2.1 9.5)".) Pinned by `SubpixelGeometryScriptTests`.
+
+### A redirected navigation is reported hop by hop under the loader id
+
+`crates/obscura-browser` records the document under the URL it asked for, and
+`crates/obscura-cdp` finds the navigation's request by matching that URL against the page
+URL. After a redirect the page URL is the final one, so nothing matched, no request carried
+the loader id, and Playwright's and Puppeteer's `page.goto()` resolved to null for every site
+that redirects (50 of 77 in the live survey, `reddit.com` to `www.reddit.com` among them).
+
+DEVIATION from both. The transport keeps each hop's status and headers
+(`Response.RedirectChain`, a synthesized 307 with `Non-Authoritative-Reason: HSTS` for an
+HSTS upgrade), the page marks its document event (`NetworkEvent.IsNavigation`, with the
+final URL and the hops), and `EmitNavigationEvents` reports what Chromium does: one
+`Network.requestWillBeSent` per hop, all with `requestId` = loader id, each after the first
+carrying the previous hop's `redirectResponse` and `redirectHasExtraInfo: false`, then
+`responseReceived`/`loadingFinished` for the final response. Measured on a local 301 -> 302 ->
+200 chain with Playwright 1.56: Chromium and the port now both give `status() 200`, the final
+`url()`, and `redirectedFrom()` walking `/r2` (302) then `/r1`. An unredirected navigation
+keeps its single request, byte for byte. `Fetch.requestPaused` for the document still names
+the URL first requested. Pinned by `NavigationLifecycle.RedirectedNavigationReportsEachHopUnderTheLoaderId`.
+
+### A navigation deadline after the document committed leaves the page as it stood
+
+`crates/obscura-browser` fails a navigation whenever its end-to-end deadline
+(`POCKETCALCULATOR_NAV_TIMEOUT_MS`, 30s) passes, marking the page `Failed`; over CDP that is a
+protocol error from `Page.navigate` on slow, script-heavy sites whose DOM was already built.
+
+DEVIATION. Chromium's `Page.navigate` answers once the navigation commits and leaves the
+load to the client's own `waitUntil` and timeout. The port now separates the two: a deadline
+before the commit (no response, or the body never finished) still fails the navigation; one
+after it (`Page.Readiness >= Committed`: the response is in and the document built) leaves the
+page as it stood, sets `Page.LoadAbandoned`, and abandons the pending work (remaining
+scripts, resource warmup, frames) rather than resuming it, so the deadline still bounds how
+long the navigation holds the page. `document.readyState` is `loading` from the commit until
+the script phase completes it, as in Chromium. `EmitNavigationEvents` reports the document
+only as far as it got: `commit` always, `DOMContentLoaded` and `load` (and `networkIdle`,
+`frameStoppedLoading`) only if the document dispatched them. The port does not resume the
+document later, so a `load` that was cut off never arrives; a client waiting for it times out
+on its own clock, as it would in Chromium for a load that has not happened, while one waiting
+for `commit` gets the page. The CLI `fetch` reads such a page as it stood and prints
+`Warning: <url> did not finish loading within <n>s`; the library's `GotoAsync`, which promises
+a loaded page, still throws unless the document reached its load. Measured with a page whose
+parser-blocking script stalls 12s and a 5s deadline: `goto(waitUntil: 'commit')` now returns
+200 (was a protocol error), `waitUntil: 'load'` times out on the client as in Chromium, and a
+server that never answers is still a navigation error. Pinned by
+`NavigationLifecycle.DeadlineAfterCommitLeavesThePageAsItStood` and
+`DeadlineBeforeCommitStillFails`.
+
+### A reopened document reports its load, and isolated-world console calls are reported
+
+`crates/obscura-js/js/bootstrap.js`'s `document.close()` does nothing, and an isolated world's
+console calls were dropped. Playwright's `page.setContent()` runs `document.open()`, a tagged
+`console.debug`, `write()` and `close()` in its utility world, then waits for the tag and for
+the frame's `load`, so against the port it hung until its timeout.
+
+DEVIATION. A world's console call is now reported with the world's execution context, as
+Chromium reports it (its arguments carry no `objectId`: those name the world's own store,
+which a console id would not reach). `document.open()` on a document that has finished
+loading marks it reopened, and `close()` then calls the new `op_dom` command `document_close`
+(port addition to the op protocol), which counts a load; `Dispatcher.DrainDocumentLoads`
+reports each as Chromium does after `document.close()`: `Page.lifecycleEvent` `init`,
+`Page.domContentEventFired`, `DOMContentLoaded`, `Page.loadEventFired`, `load` (then
+`networkIdle`), under the current loader id, with no `frameNavigated` and no new context.
+While the document is still loading, open/close add nothing, matching Chromium's no-op
+`open()` during parsing. `setContent` now resolves (Chromium 9ms, the port 174ms cold).
+Still different from Chromium, and not fixed here: `document.open()` only empties the body
+and `write()` parses into it, where Chromium replaces the whole document (a written `<title>`
+lands in the body, `document.title` keeps the old one, old listeners stay), and the reopened
+document fires no page-visible `DOMContentLoaded`/`load`. Pinned by
+`NavigationLifecycle.ReopenedDocumentReportsWorldConsoleAndLoadLifecycle` and
+`DocumentCloseDuringLoadAddsNoLifecycle`.
+
+### An absolutely positioned box's auto margins follow the constraint equation
+
+taffy (`vendor/taffy/src/compute/block.rs`) zeroes a pair of auto margins whenever the
+declared size is `>=` the free space, which compares the box with the space *excluding* the
+box: a `position: fixed; left: 0; right: 0; width: 760px; margin: 0 auto` box in a 1280px
+viewport (bing.com's search box, every centred modal) sat at x=0 where Chromium centres it at
+260, and a `max-width`-clamped auto width never centred at all. It also resolves auto margins
+against whatever space a single inset leaves (`right: 10px; margin: auto` landed mid-way
+instead of at the right edge), and `flexbox.rs` and `grid/alignment.rs` spread them over the
+container whatever the insets. C# follows CSS 2.1 10.3.7 / 10.6.4 as Chromium does, in
+`BlockLayout.ResolveAbsoluteMargins` for all three: auto margins resolve only between two
+non-auto insets and are 0 otherwise, against the used (clamped) size; a negative inline-axis
+pair pins the start margin per the containing block's direction, and a negative block-axis
+pair splits equally.
+
+Three neighbours of the same bug:
+
+- `dom.rs` pre-sizes a stretched fixed box to `viewport - left - right` before its margins
+  are resolved, ignoring margins, padding and border, and does so inside a transformed
+  ancestor too, which is the containing block there. C# runs it after the box edges settle,
+  subtracts them, skips it under a fixed containing block (`Inherited.InsideFixedCb`), and
+  resolves a viewport-fixed box's percentages against the initial containing block.
+- `dom.rs` turns a flex container's `justify-content` off when any child has a main-axis auto
+  margin, absolutely positioned children included, so an abspos `margin: auto` child of a
+  `justify-content: center` container sat at the start. C# skips out-of-flow children.
+- The CSSOM snapshot measured a fixed box's insets against its nearest positioned ancestor
+  (`left: -128px`), and reported `auto` for auto margins. It now uses the fixed containing
+  block, reports a specified inset pair as specified and the used value of an auto margin
+  (Chromium: `left: 0px`, `margin-left: 260px`).
+
+Covered by `PositionedAutoMarginTests`.
+
+### Form controls take Chromium's display adjustments, and an inline-level box has no auto margins
+
+`style.rs` keeps an author `display` on a control as written. Chromium (LayoutTheme::
+AdjustStyle) turns `inline`, `inline-table` and every internal table display into
+`inline-block`, and `table` into `block`, on a control that keeps its native appearance
+(every `input` but hidden/file/image, `button`, `select`, `textarea`, `meter`, `progress`);
+`appearance: none` turns that off, but the control is still laid out as an atomic box.
+`display: contents` on a replaced element or a form control computes to `none` (a button
+keeps it), and a drop-down `select` with native appearance ignores the author `line-height`.
+`ComputedStyle.AdjustFormControlStyle` applies all of it at the end of the cascade, and
+`appearance` / `-webkit-appearance` are now parsed and reported. The UA sheet's `meter` and
+`progress` are `inline-block`, where the reference left them `block`.
+
+wikipedia.org's `.lang-list-button { display: inline; margin: 0 auto }` exposed two more:
+
+- `TaffyStyleMapping` handed an inline-level box's auto margins to taffy as auto, so the
+  centred button sat at the right edge of its line. CSS 2.1 10.3.1 / 10.3.9 make them 0.
+- `native_button_intrinsic_content` collapses the collected label as one string, which trims
+  the space between the label and a trailing icon as if it ended the line, so the button came
+  out one space narrower than its content and the icon wrapped onto a second line. C# leaves a
+  marker for an atomic child, so the space is measured (`NormalizeControlLabel`).
+
+Covered by `FormControlDisplayTests`.
+
+### The `font` shorthand takes CSS-wide keywords, and controls reset their whole font
+
+`style.rs` parses `font` by looking for a font-size token, finds none in `inherit`, and drops
+the declaration, so the reset every page ships - `button, input, optgroup, select, textarea {
+font: inherit }` - left all of them on the UA 13.333px Arial (the `font-family: inherit`
+half was fixed earlier as F3). C# expands `inherit`/`unset` to every longhand,
+`initial` to `normal 400 16px/normal "Times New Roman"`, and keeps the cascaded value for
+`revert`, as the longhands do. `font-style: inherit` computed to `normal` and
+`line-height: initial` inherited; both are fixed. The UA control font
+(`-webkit-small-control`) now also resets weight, style, variant and stretch, which the
+reference let inherit from a bold or italic parent.
+
+`font-variant-caps` and `font-stretch` were not modeled at all, so getComputedStyle answered
+the empty string for `font-variant` and `font-stretch`. They are now cascaded, inherited and
+reported, not rendered: the port synthesises no small capitals and the embedded faces have
+no width axis.
+
+Covered by `FontShorthandKeywordTests`.
+
+### Custom elements follow HTML's reactions model
+
+`crates/obscura-js/js/bootstrap.js`'s registry upgraded what `define()` found with
+`querySelectorAll` and called `connectedCallback` from there, and nothing else: an element that
+innerHTML, cloneNode, document.write or a later insertion produced stayed a plain HTMLElement,
+and insertion, removal and attribute changes never reached a callback. YouTube (Polymer), MSN
+(FAST) and Reddit (faceplate) never finished booting. DEVIATION: the registry keeps HTML's
+definitions (callbacks and `observedAttributes` read once at `define()`), each element has a
+reaction queue, and the DOM methods that can enqueue reactions run them before returning
+([CEReactions]) in element-queue order: upgrade (constructor, then `attributeChangedCallback` for
+each observed attribute present, then `connectedCallback`), `connectedCallback` /
+`disconnectedCallback` for every custom element in an inserted or removed subtree in
+shadow-including tree order (a move is a disconnect then a connect), `attributeChangedCallback`
+from setAttribute(NS), removeAttribute(NS), toggleAttribute, reflected properties, classList,
+dataset and Attr nodes (whose `value` setter now writes through to the owner element), and the
+form-associated callbacks (form owner, fieldset/own `disabled`, `form.reset()`).
+`createElement` constructs synchronously and, as Chromium does, reports a constructor that adds
+attributes or children, throws or returns another element, and returns an HTMLUnknownElement in
+the "failed" state. Customized built-ins (`extends` + `is`, parser `is=`, `createElement(tag,
+{is})`) work, and an is value given without an attribute is serialized. `:defined` is supported
+by the selector engine (`ElementData.CustomElementState`, set by the `ce_state` op), so
+`x-foo:not(:defined) { display: none }` hides an element until its upgrade, as in Chromium.
+
+As in Blink (and unlike the spec's inert fragment document), innerHTML, insertAdjacentHTML,
+outerHTML and createContextualFragment queue an upgrade for each defined element they create,
+also under a disconnected element, and the new elements' upgrades run before the old children's
+`disconnectedCallback`s; template contents and DOMParser documents stay inert. Hooks cost one
+compare while nothing is defined; once something is, a connected insertion and a removal (when a
+definition has `disconnectedCallback`) make one `ce_candidates` crossing that walks the subtree
+natively. Pinned by `CustomElementReactionsTests` (Js) and `CustomElementStateTests` (Dom), whose
+expectations are Chromium 141's.
+
+Known differences: the parser does not construct a defined custom element itself; it stops
+right after inserting one and the realm upgrades it there (see "Scripts run while the document
+is parsed"), so its constructor sees no children, as in Chromium, but already sees its
+attributes and is connected; `connectedMoveCallback` is read but `moveBefore` does not exist;
+reactions are per realm, so an isolated world's DOM writes do not reach the main world's callbacks.
+
+### Documents without a browsing context (dell.com)
+
+dell.com's bot detector (afcs.dellcdn.com detector-lazy.min.js) snapshots the page with
+`document.implementation.createHTMLDocument("cloner-doc").importNode(node, false)` and appends
+the copies into that document. The shim's createHTMLDocument and DOMParser documents were
+plain objects over a detached `<html>` of the page whose importNode/adoptNode returned their
+argument, so the page's own `<html>` moved into the cloner document about 20 s after load and
+screenshots went blank. DEVIATION from crates/obscura-js/js/bootstrap.js and
+crates/obscura-dom (one document per tree), measured against Chromium 141:
+
+- **Real documents.** createHTMLDocument, createDocument, DOMParser, `new Document()`,
+  Document.cloneNode and XHR's responseXML each make a native document node in the page's arena
+  (`DomTree.Documents.cs`, op_dom `create_document`/`parse_document`/`document_info`/
+  `owner_document`/`adopt_node`, `dotnet/docs/op-protocol.md`). It is never connected in the
+  native sense, so nothing in it renders, enters the page's id index, reaches page
+  MutationObservers or loads; its nodes are DOM-connected (`isConnected`), report it as
+  `ownerDocument` (cached per tree-mutation epoch), and run no scripts (a script inserted there
+  is marked already started) and upgrade no custom elements (custom ones still get
+  connected/disconnected/adoptedCallback). HTMLDocument/XMLDocument/Document interfaces as in
+  Chromium; URL about:blank (DOMParser's: the creating document's), readyState "loading" for
+  createHTMLDocument and "complete" otherwise, compatMode from the parse, hidden, no
+  defaultView/location/cookie/style sheets/focus, elementFromPoint null.
+- **importNode/adoptNode/cloneNode.** importNode clones into the target document (TypeError,
+  NotSupportedError for a document or shadow root); adoptNode removes the node from its parent
+  and adopts its shadow-including subtree (NotSupportedError for a document,
+  HierarchyRequestError for a shadow root), queueing adoptedCallback; insertion under another
+  document's node adopts natively. cloneNode keeps the source's document; a document's clone is
+  a new document of its type. Input/textarea clones carry the value and checkedness (HTML
+  cloning steps; the shim dropped a value set from script), and an input in the default or
+  default/on value mode sets its value attribute.
+- **Pre-insertion validity for documents**: a second element, a second doctype or a text node
+  under a document throws HierarchyRequestError (the native tree enforced none).
+- **XML.** DOMParser with an XML type and responseXML parse XML (`XmlParsing.cs`, in-box
+  `XmlReader`, DTD entities internal only and capped); a malformed input carries Chromium's
+  `<parsererror>` (the message text is XmlReader's, not libxml2's), and responseXML is null for
+  it. XMLSerializer, and innerHTML/outerHTML in an XML document, use DOM Parsing's XML
+  serialization (`DomTree.SerializeXml.cs`; `<br xmlns="http://www.w3.org/1999/xhtml" />`).
+  Element.prototype.prefix added.
+- **document.open/write/close** on such a document: open() empties it, each write is parsed at
+  once (the document holds what the input so far parses to), close() makes it "complete"; a
+  write without open() appends to the body while it is "loading".
+- **Node.prototype.ownerDocument on a document is null** (also for the page's document called
+  through Node.prototype's getter). Transcend's airgap.js reads it that way to find its
+  sanitizer sandbox's document and took the page.
+
+Known differences: template contents stay owned by the page's document (Chromium gives an
+imported template's content its own inert document); a CDATA section in parsed XML is text
+(the tree has no CDATA node kind); DOMParser parses with scripting enabled, so `<noscript>`
+content is raw text; Range.cloneContents is still a stub; getComputedStyle on an element of
+such a document answers its inline style where Chromium answers ""; an `<img>` there reports
+complete false. grammarly.com's consent UI (ui.js) finishing after Next.js hydration (React
+#418/#423) was the script scheduling model, fixed by "Scripts run while the document is
+parsed". Pinned by `ParsedDocumentTests` (Js), `SecondaryDocumentTests` (Dom)
+and `ParsedDocumentPageTests` (Browser).
+
+### Interface members off Element.prototype, CharacterData textContent, slots, window.origin
+
+Found while booting youtube.com (Polymer) and msn.com (FAST). All DEVIATIONS from
+`crates/obscura-js/js/bootstrap.js`, measured against Chromium 141.
+
+- **Element.prototype carried every HTML interface's members** (the shim's one class served
+  every element): `iframe.sandbox = '...'` threw "which has only a getter", FAST's
+  `this.options = [...]` on its own element threw, and a custom element's `this.disabled = true`
+  or `this.value = x` wrote attributes instead of making own properties. The ~80 members
+  (`_elementMemberOwners` in bootstrap.js, generated from Chromium's prototypes) now sit on the
+  interfaces Chromium defines them on, enumerable and configurable as there; Element.prototype
+  keeps only Chromium's own members (plus `nodeName`/`nodeType` overrides and the shim's `_`
+  helpers). [PutForwards] attributes take assignment (`classList`, `relList` on a/area/link/form,
+  `sandbox`, a link's `sizes`, an output's `htmlFor`, `style`); an img's/source's `sizes`, a
+  script's `htmlFor` and a body's `text` reflect strings; select/textarea/fieldset/output `type`
+  is read-only, a button's defaults to "submit"; a form has `relList`. SVG elements get Chromium's
+  SVG interfaces (SVGAElement, SVGRectElement, SVGTextElement, ... under SVGGraphicsElement /
+  SVGGeometryElement / SVGTextContentElement) with `href` (getter-only SVGAnimatedString),
+  `getBBox` and the text-content methods only where Chromium has them, and no HTML members. The
+  shim reaches moved members through `_elementMemberImpls` and `_bootEl`; isolated-world bridges
+  replace them on every owning prototype.
+- **textContent on CharacterData** appended a text node the tree refused, so `text.textContent =
+  ''` did nothing, and on the document it removed the doctype and `<html>`. Now: CharacterData sets
+  its data (null is "") with one characterData record, Document and DocumentType ignore it and
+  read null; `nodeValue` on a Text/Comment/PI is "replace data" too (it wrote without a record),
+  and `data = undefined` is "undefined".
+- **Slots**: `HTMLSlotElement.assignedNodes/assignedElements({flatten})`, `assign()`
+  (`slotAssignment: 'manual'`), `name`, `Element/Text.assignedSlot` (null for a closed root) and
+  `slotchange` (trusted, bubbles, not composed, after the mutation observers' callbacks at the same
+  microtask). The assignment is the native one (`DomTree.AssignedNodes`), which the render layer
+  and `::slotted` use; manual assignment is native too (`DomTree.Slots.cs`), so an unassigned light
+  child of a manual root does not render. New op_dom commands (port additions):
+  `shadow_root_host`, `shadow_root_options`, `slot_assigned_nodes`, `assigned_slot`,
+  `slot_assign`, `slot_changes` (dotnet/docs/op-protocol.md). Known differences: the host
+  compares assignment states, so a change undone within one task fires no slotchange where
+  Chromium fires one, and slots are reported per shadow root in tree order (Chromium: the order
+  they were signalled, which differs after successive `assign()` calls).
+- **Declarative shadow roots**: a DSD root's backing node is a document in the native tree, and
+  `_wrap` made it a Document, so a child read through `parentNode` before script touched
+  `host.shadowRoot` (a custom element upgraded inside the root, as Polymer's are) saw `#document`.
+  `_wrap` now asks the host (`shadow_root_host`) and builds the ShadowRoot; the template's
+  `shadowrootdelegatesfocus` / `shadowrootclonable` / `shadowrootserializable` become the root's
+  options (Rust dropped them).
+- **EventListener objects**: node, document and window dispatch called every listener as a
+  function, so FAST's `addEventListener('slotchange', this)` (and its image load listeners) threw
+  "Function.prototype.apply was called on #<...>", and the document dropped object listeners at
+  add time. Listeners now run through `_invokeListener` (a function, or `handleEvent` looked up at
+  dispatch); a null listener is ignored.
+- **window.origin, isSecureContext, crossOriginIsolated**: missing. Own enumerable configurable
+  accessors of the window with Chromium's brand check; `origin` is [Replaceable], the other two
+  getter-only. isSecureContext is true for https/wss/file and loopback http; crossOriginIsolated is
+  always false (the shim does not see COOP/COEP; Chromium reads true when both are sent).
+
+Not done: Attr is still not a Node in the shim (`attr.textContent` makes an own property);
+interface members defined in classes stay non-enumerable (pre-existing, Chromium has
+enumerable accessors); `input.files = fileList` is accepted and ignored;
+`HTMLFencedFrameElement` does not exist. (The on* handlers, `capture`/`once` and the
+document's `currentTarget` are done under "DOM event dispatch" below.) Pinned by
+`InterfaceMemberPlacementTests`, `ShadowSlotTests`, `NodeTextAndWindowOriginTests` (Js) and
+`ManualSlotAssignmentTests` (Dom).
+
+### DOM event dispatch
+
+A conformance pass of DOM's dispatch and HTML's event handlers against Chromium 141, all
+DEVIATIONS from `crates/obscura-js/js/bootstrap.js`. There, elements, the document, the window
+and plain EventTargets each kept listeners their own way, and an element's dispatch ran its
+on* handler, then its listeners, then called its parent's dispatchEvent: no capture phase,
+`capture`/`once`/`passive`/`signal` ignored on elements, the document's listeners saw
+`currentTarget` left at `<html>` and a bubbling event never reached the window, composedPath()
+walked parentNode, listener exceptions went to the console only.
+
+- **One listener store and one dispatch** (`_eventDispatch` in bootstrap.js): the event path
+  through assigned slots and shadow roots (new op_dom `event_path`, one host call per
+  dispatch), target and relatedTarget retargeting, the relatedTarget truncation and
+  clear-targets steps, capture then at-target (capturing listeners first) then bubble, through
+  the document to the window (not for `load`, nor for a document with no browsing context).
+  `eventPhase`/`currentTarget` per step and reset after; stop/stopImmediate/cancelBubble;
+  `returnValue`; `srcElement`; Event.NONE..BUBBLING_PHASE; `timeStamp` on performance.now()'s
+  clock (Rust: Date.now()); composedPath() with closed trees hidden; listeners added during
+  dispatch do not run there, removed ones do not run; `once` removes before the call;
+  re-dispatching resets the flags; initEvent is ignored while dispatching; a createEvent
+  event throws InvalidStateError until initEvent.
+- **addEventListener options**: boolean or {capture, once, passive, signal}, read in Chromium's
+  order (removeEventListener reads only capture); duplicates by (type, callback, capture);
+  `signal` must be an AbortSignal (TypeError otherwise), an aborted one adds nothing, abort
+  removes the listener before the abort event (DOM abort algorithms); a passive listener's
+  preventDefault does nothing; touchstart/touchmove/wheel/mousewheel are passive by default on
+  the window, document, `<html>` and `<body>` (Chromium's intervention); missing arguments and
+  non-object callbacks throw TypeError; an object without a callable handleEvent is skipped
+  silently, as Chromium does.
+- **Chromium behaviours kept over the spec**: a window or plain EventTarget that is itself the
+  target runs every listener in registration order (capturing ones are not first), and
+  composedPath() is `[window]` / `[]` there; the window's load event targets the document.
+- **Exceptions** in listeners, handlers and timer callbacks are reported (HTML "report the
+  exception"): a trusted, cancelable ErrorEvent at the window ("Uncaught Error: msg"),
+  window.onerror with (message, filename, lineno, colno, error) where `return true` cancels,
+  then the console unless cancelled. Other listeners still run. ErrorEvent gained filename,
+  lineno and colno (filename is "" and lineno/colno 0: the shim does not know the script
+  position).
+- **Event handlers**: the on* IDL attributes are enumerable accessors on the interfaces Chromium
+  141 has them on (HTMLElement/SVGElement/MathMLElement, Element's own few, Document, ShadowRoot
+  `onslotchange`, HTMLMediaElement, own accessors on the window; `<body>`/`<frameset>` forward the
+  window's), replacing Rust's null data properties on Element.prototype (with window-only names
+  such as `onhashchange` on every element). A handler is a listener registered at its first
+  non-null value and keeps its place while set; `return false` cancels; non-objects set null;
+  content attributes compile on first use with document, form owner and element in scope
+  (`with`), named `onclick`, length 1; a syntax error is reported and the handler is null. A
+  parser-set attribute is found the first time an event of its type reaches the element (one
+  getAttribute per element and type) and goes first in the list. `window.event` exists
+  (undefined outside a listener and for listeners in shadow trees). Rust's window.onerror
+  (recording `__obscura_errors`) and window.onunhandledrejection defaults are gone: Chromium's
+  are null, and they would now run among the page's listeners.
+- **Lifecycle and UA events**: DOMContentLoaded is one trusted bubbling dispatch at the document
+  (Rust: an untrusted one at the document and another at the window); the window's load is
+  trusted, targets the document and runs window.onload among the listeners (Rust called it
+  first); the viewport scroll is one bubbling dispatch at the document; hashchange, popstate,
+  unhandledrejection and rejectionhandled are trusted and their window handlers run as
+  listeners; focus()/blur() fire blur, focusout, focus, focusin (trusted, composed, with
+  relatedTarget; Rust fired nothing); click() is composed.
+- **Isolated worlds**: world listeners on nodes keep their capture flag (the host index records
+  it for nodes too) and the document realm runs them at the matching step of the path, the
+  window's included, instead of around a node-only dispatch. A world's focus()/blur() leaves
+  the focus events to the page realm, which fires them trusted.
+- **Cost**: in a tree with no shadow root (`event_path` answers the flag with the chain, cached
+  per tree epoch) the path is the parentNode chain the wrappers cache, so a dispatch over an
+  unchanged tree makes no host call. Measured with the CLI on a 22-deep chain, 20k bubbling
+  mousemove dispatches with three listeners: 112-135 ms against 144-232 ms before; with a tree
+  mutation between dispatches 526-770 ms against 652-927 ms; a non-bubbling event on a body
+  child with no listeners 21-47 ms against 13-20 ms (it now walks five targets twice, as the
+  capture phase needs). `ChildFrameNewDocumentScripts.ARoutedClickOnALinkNavigatesTheFrame`
+  polled the frame tree with an indexer that threw on the moment between the old frame's
+  detach and the new one's attach, which the frame navigation now reaches one autonomous turn
+  later; the poll treats an empty list as "not yet".
+
+Not done: the event's state is still own data properties (Chromium: `Object.keys(event)` is
+`['isTrusted']`, an own accessor, and the rest are prototype accessors); click() dispatches a
+MouseEvent where Chromium's is a PointerEvent; a content attribute's SyntaxError message lacks
+Chromium's "Failed to execute 'dispatchEvent' ..." prefix and says "Unexpected token '}'" where
+Chromium says "Unexpected end of input"; an attribute changed outside setAttribute/removeAttribute
+(Attr nodes, setAttributeNS, the host) does not update its handler; focus() still focuses any
+element (Chromium skips non-focusable ones, so no events there); an unhandled rejection is
+reported before a message posted earlier in the same task (Chromium: after).
+`EventTarget.prototype.addEventListener.call({})` still does not throw; a CDP mouse click on
+content inside a shadow root is dispatched at the host, since the hit test does not enter
+shadow trees (Playwright's `#host >> #inner` click never reaches the inner button). Pinned by
+`EventDispatchConformanceTests` (Js), which runs the Chromium probe's sections.
+
+### The navigation deadline is unconditional, and an interrupted task does not lose its batch
+
+Found by the after-fix live survey: reddit.com and cloudflare.com no longer loaded. Over
+CDP `Page.navigate` was never answered, no network event reached the client and every later
+command went unanswered, with the server idle; the CLI printed "Timed out navigating ...
+after 30s" after ~17s. Five port defects, none of them in the reference's shape (deno_core
+drives one thread and resolves ops inside its own loop):
+
+- **A script interrupt escaped as a cancellation.** ClearScript's `ScriptInterruptedException`
+  is an `OperationCanceledException`. A module's top-level await drove the loop, the loop ran
+  reddit's animation frame, whose `innerText` forced a 5s layout and overran the module budget
+  (3s + 5s grace); an op that sees the watchdog's cancellation keeps the isolate interrupted
+  until the watchdog is disarmed, so the bookkeeping after the timeout
+  (`ClearSettledMarker`) was interrupted too and the exception left
+  `EvaluatePreparedModuleAsync`. `Page.EvaluateModuleAsync` and the module-prepare catches let
+  every `OperationCanceledException` through, and the navigation failed as "timed out" (the
+  CLI) or reached `CdpProcessorAsync`'s `catch (OperationCanceledException)`, which ended the
+  connection's processor silently. Now the marker catches the interrupt, the script phase
+  treats anything but the navigation's own token as that script's failure,
+  `RunWithNavigationDeadlineAsync` reads a stray cancellation like the deadline (committed:
+  the page as it stood; not: `navigation was interrupted`), the CDP navigate paths turn one
+  into a protocol error, and the processor keeps serving unless its own connection stopped.
+  e01eeae (before custom elements) also failed cloudflare.com this way, 1 run in 2.
+- **The deadline was not unconditional.** `RunWithNavigationDeadlineAsync` waited for the
+  navigation however long it took once the token was cancelled; it now returns
+  `NavigationBackstopGrace` (5s) after the deadline whatever the navigation awaits, leaving
+  it behind with its token cancelled. `NavigateTaskAsync` waits for the connection's V8 lock
+  for at most one deadline.
+- **An interrupted turn dropped the rest of its batch.** `PumpTick` takes all due timers (and
+  posted tasks) before running them; a watchdog interrupt in one ended the turn and lost the
+  others. On reddit those were the executions of load-delaying dynamic scripts (core-js,
+  recaptcha, doubleclick), so `load` waited out the whole 30s script deadline. The ones not
+  yet run go back (`TimerQueue.Restore`, keeping their ids and order unless cleared meanwhile;
+  `RequeuePostedTasks`); the interrupted one is not run again.
+- **The timer and posted-task queues were not thread-safe.** ClearScript resolves an async
+  op's promise on the thread that completed the op's `Task`, and the page's continuation runs
+  there while the pump thread is between scripts: `TakeDue` threw "Collection was modified"
+  out of reddit's module drain. Both queues are locked.
+- **A finished module was charged for the page's queued tasks.** The drain pumped before
+  checking the settled marker, so a module without top-level await (reddit's
+  `STICKY_CANARY` data: module) ran the page's timers and animation frames on its budget and
+  was reported as timed out. The marker is checked first.
+
+The cost behind the 5s layouts is the custom elements change working: reddit's posts are
+`shreddit-*` elements hidden by `:not(:defined)` until upgraded, and now render. Two cheap
+parts of it are fixed: shadow-root sheets were parsed per root on every pass (~170 Lit roots
+sharing a handful of sheets, 0.5-2.3s a pass), now one compiled sheet per distinct source set,
+kept across passes in the document's `StylesheetCache` (`GetOrParseShadow`); and
+`ProbeFirstLine`'s window applied only to lines over 2048 characters, so a post body re-shaped
+its remainder for every line (2.35M characters in one cold pass, 0.33M with 256/64). What is
+left is layout cost proper (a cold pass is still ~2.7s on reddit; a min-content measurement of
+a grid item lays its text out one word per line).
+
+Measured live through the proxy. CLI `fetch --eval "document.getElementsByTagName('*').length"`:
+reddit.com before loaded in 4 of ~14 runs (the rest "Timed out ... after 30s" at ~17s), after
+1466-1511 in 3 of 3 (23-36s; e01eeae 1382 in 15.8s, without the posts rendered); cloudflare.com
+3025-3027 in 3 of 3 (e01eeae: 3012, or a failure). CDP (Playwright `connectOverCDP`,
+`goto(waitUntil: 'commit')`): reddit.com before 0 of 3 (120s client timeout, no network
+events), after 3 of 3 (goto 21-30s, 1470-1505 elements); cloudflare.com 3 of 3 (goto ~29s,
+3016-3028 elements). A run can still print the CLI's "did not finish loading" warning with
+readiness `Loaded`: the deadline passed after `load`, in frame building or settling.
+Pinned by `NavigationDeadlineTests` (Browser), `InterruptedTaskNavigation` (Cdp),
+`OpCancellationTests.AnInterruptedTimerLeavesTheRestOfItsBatchForTheNextTurn`,
+`AModuleTimeoutThatStopsAPageTaskInsideAnOpIsAnErrorNotACancellation`,
+`RuntimeTests.FinishedModuleIsNotChargedForThePagesQueuedTasks`, `TimerQueueTests` (Js) and
+`ShadowStylesheetCacheTests` (Render).
+
+### WebIDL property shapes: prototype getters, enumerable members, array-like collections
+
+Found on grammarly.com and mozilla.org, where Transcend's consent manager (`airgap.js`) reads
+some sixty members through their descriptors at load
+(`Object.getOwnPropertyDescriptor(HTMLCollection.prototype, "length").get`, `window.closed`,
+`Request.prototype.url`, ...) and threw "Cannot read properties of undefined (reading 'get')".
+All DEVIATIONS from `crates/obscura-js/js/bootstrap.js`, measured against Chromium 141 with a
+descriptor dump of every global interface (prototype and interface object) and of sample
+instances.
+
+- **Collections**: HTMLCollection was an Array subclass (`Array.isArray(document.children)`
+  true, map/forEach present, own `length`), NodeList, DOMRectList and the text track lists
+  carried an own `length`. Now HTMLCollection is its own class; all of them have
+  `length` as an enumerable prototype getter over a private count (`_listLength`) and
+  Array.prototype's `values` as @@iterator; NodeList's forEach/entries/keys/values are
+  Array.prototype's, as in Chromium.
+- **Enumerability and constants** (`_webidlMemberAttributes`): class-defined methods and
+  accessors of every interface the shim puts on the global are enumerable; all-caps numeric
+  members are `{writable: false, enumerable: true, configurable: false}` constants on both the
+  interface and its prototype (Range's and HTMLMediaElement's were static getters, Node's and
+  XHR's writable). Kind mismatches on members both sides have went from 760 to 7 (the seven
+  are `Error.prototype.name` being non-configurable, which Rust does on purpose and is not an
+  interface the shim defines).
+- **Instance fields to prototype getters** (`_defineFieldGetters`): XMLHttpRequest's state
+  (readyState, status, response, ...; responseType/timeout/withCredentials and the on*
+  handlers settable), Request's and Response's attributes, Attr's name/localName/
+  namespaceURI/prefix/ownerElement/specified, ValidityState's flags. The shim writes the
+  `_name` field. DOMException's name/message/code are brand-checked prototype getters and an
+  instance has no own property, `stack` included. XHR's constants left the instances.
+- **Window attributes** (`_shapeWindowAttributes`): window/document/top are unforgeable
+  getters, navigator/history/localStorage/... read-only getters, self/parent/innerWidth/screen/
+  performance/... [Replaceable] get+set (the setter stores what the getter returns, where
+  Chromium replaces the accessor with a data property). `window.closed` added (false). The
+  shim's own writes of read-only ones go through `_setWindowSlot`. Location's members are
+  non-configurable and its operations non-writable; `valueOf` added.
+- **Members on the wrong interface or with the wrong shape**: SVGElement.prototype.className
+  (getter-only SVGAnimatedString; Element's is the string reflection for every element),
+  ShadowRoot.prototype.innerHTML (off DocumentFragment), VTTCue.getCueAsHTML (off
+  TextTrackCue), HTMLSelectElement.remove(index), own toJSON on the timing entries,
+  Document.body setter, [PutForwards] style/media setters on the CSS rules, Navigator.onLine
+  getter-only (the `on` prefix made `_ifaceAttr` treat it as an event handler),
+  Notification.permission and PerformanceObserver.supportedEntryTypes static getters,
+  adoptedStyleSheets enumerable/configurable, read-only Image/Storage prototypes.
+  `Node.lookupNamespaceURI(null)` answered null for HTML elements (it compared the missing
+  `prefix` member with `=== null`).
+- **SecurityPolicyViolationEvent** added (constructible, Chromium's fields and defaults; the
+  shim fires none): airgap.js constructs one at load.
+- **Parsed documents**: Document.prototype's members ignored `this`, so
+  `Document.prototype.write.call(sandboxDoc, html)` (airgap's sanitizer, once it got that far)
+  rewrote grammarly.com's page. Superseded by real documents ("Documents without a browsing
+  context"): the members act on the document they are called on.
+
+Not done (counts from the same dump against Chromium 141 on a data: page): 3393 members
+Chromium has that the shim lacks (1349 on WebGL2RenderingContext, 739 on WebGLRenderingContext,
+73 on CanvasRenderingContext2D, 52 on Document, ...; `Element.prototype.prefix` among them);
+255 own prototype members Chromium does not have there (mostly the shim's `_` helpers, and
+per-interface overrides such as HTMLImageElement's own setAttribute/addEventListener);
+about 380 instance-own members on the sampled objects that Chromium keeps on prototypes (every
+Event's state, Blob/File, FileReader, the stream objects, CanvasRenderingContext2D's
+attributes, Animation, PerformanceEntry); OfflineAudioContext still inherits AudioContext
+(resume/suspend not its own). Pinned by `WebIdlDescriptorTests` (Js).
+
+### A fixed-width box ends the cyclic-percentage walk
+
+`DeferCyclicFlexInlineSizes` (`Dom/DomPassesSubgrid.cs`) walks up from a percentage inline
+size to the content-sized flex item that makes it cyclic. `dom.rs` climbs past every box on
+the way; the port stops at a box whose `width` is a fixed `px` length (not a table part, not
+a flexible row flex item, which the walk still reports first), because that box is the
+percentage's basis and nothing above it can make the percentage cyclic (CSS Sizing 3 5.2.1).
+youtube.com's logo is `ytd-logo > yt-icon (inline-flex, 93x20) > span (flex, 100%) > div
+(100%) > svg (100%, viewBox only)` inside a content-sized flex item: the 100% was
+neutralized, the span's automatic minimum was re-derived from the SVG's 300px default object
+size, and the logo drew 300x65 where Chromium 141 draws 93x20. Pinned by
+`AtomicInlineSizingTests.PercentageUnderFixedWidthBoxIsNotCyclicThroughContentSizedFlexItem`
+and `render-repros/svg-percent-under-fixed-icon.html`.
+
+### `clip: rect()` is implemented
+
+`style.rs` has no `clip` property. The port parses `clip: rect(top, right, bottom, left)`
+(commas optional, lengths or `auto`) into `LayoutStyle.Clip`, reports it in the CSSOM snapshot
+(`auto` or `rect(0px, auto, 10px, 0px)`, whatever the position, as Chromium 141 does), and
+for an absolutely or fixed positioned box intersects it into the box's own clip and its
+subtree's (`OverflowClip.WithClipProperty`, applied in `DomTransforms.ResolveClipRects`,
+`PreparedRender.ResolveClips` and `ScrollPaintState.ViewportFixedClipMap`). The
+visually-hidden idiom `position: fixed; clip: rect(0 0 0 0)` (msn.com's "Skip to footer")
+painted in full. The element-capture clip-scope path and scrolling-overflow extents do not
+read it. Pinned by `ClipPropertyTests` and `render-repros/clip-rect-visually-hidden.html`.
+
+### Custom elements and unknown tags are `display: inline`
+
+`ua_style` falls back to `block` for every tag it does not list. `display` initially is
+`inline`, and Chromium's UA sheet has no rule for an autonomous custom element, an unknown
+HTML tag, or `picture`, `map`, `nobr`, `acronym`, `strike`, `blink`, `rb`, `rtc`, `spacer`,
+so Chromium 141 reports `inline` for all of them; the port now does too
+(`ComputedStyle.KnownHtmlTags`). Known HTML tags the old fallback made `block` are unchanged
+(canvas, video, iframe, embed, object, svg, math, audio and the like still compute `block`
+in the port, where Chromium reports `inline`; that is the replaced-element path and is left
+to it). A block `cs-common-settings-dialog` was one of the boxes that widened msn.com's
+header. Pinned by `UaDisplayTests`.
+
+### The render-resource warmup scans shadow trees
+
+`render_resource_candidates` walks the document's descendants, which stops at shadow hosts.
+`Page.RenderResourceCandidates` also walks every connected shadow root, so a `url()` in a
+shadow tree's `<style>` (adopted sheets are bridged into one) is prefetched like a document
+one. msn.com's logo is such a background, and a CDP capture (which only observes, see
+`PrepareCaptureResourcesIfRequestedAsync`) painted it missing. Pinned by
+`RenderResourceTransportTests.RenderResourceWarmupScansShadowTreeStylesheets`.
+
+### Only list-item boxes have markers, and `::marker { content }` is honoured
+
+`paint.rs` draws a marker for every `li`, and `style.rs` rejects `display: list-item`. The
+port gives `li` the UA display `list-item` (`LayoutStyle.ListItemDisplay`, reported as
+`list-item` in the CSSOM snapshot, as Chromium 141 does), accepts an authored `list-item`
+(laid out as a block), and drops the marker when an author display replaces it. It also
+indexes `::marker` rules (`Stylesheet.MarkerRules`) and reads only their `content`: an empty
+string removes the marker and a string replaces it (`LayoutStyle.MarkerText`); `content:
+none`, counters and the other `::marker` properties are not read, and a `display: inherit`
+child of a list item does not inherit the marker. Markers are still drawn only for `li`
+elements. grammarly.com's feature carousel (`li::marker { content: "" }` on flex-item
+slides) painted a bullet in front of every card. Pinned by `ListItemDisplayTests` and
+`render-repros/list-item-display.html`.
+
+### A shadow root keeps its adopted sheets when its children are replaced, and `:host(...) x` matches
+
+Two shadow-styling gaps msn.com's cards fell into (both visible as the hero card's missing
+text overlay):
+
+- `bootstrap.js` materializes an adopted sheet as a `<style data-obscura-adopted>` child of
+  the shadow root, so `root.innerHTML = ...`, `root.textContent = ...` and
+  `root.replaceChildren(...)` removed it, and with it every rule of a component that set
+  `adoptedStyleSheets` before rendering. `_restoreAdoptedStyles` re-syncs after each of those
+  three. Removing the bridge node with `removeChild` still loses it.
+- `Matcher.Matches` matched every rule without a shadow scope, so `:host(...)` could only
+  match the host itself (`HostRules`), never as the left-hand compound of a rule styling a
+  shadow-tree element (`:host([immersive]) .media { position: absolute; z-index: -1 }`). A
+  selector with `:host` whose subject is inside a shadow tree is now matched with that tree's
+  host as the scope, as `MatchesInShadowScope` already did for `::slotted()`.
+  `shadowRoot.querySelector(':host .x')` still answers null (Chromium matches).
+
+Pinned by `ShadowAdoptedStylesTests` (Js).
+
+### `contain` and `will-change` boxes are stacking contexts, and a sub-pass paints its root first
+
+`paint.rs` isolates only z-index, opacity and transform roots. `PaintDom.IsolatesPaint` also
+treats a box with `contain: layout | paint | content | strict` or a stacking `will-change`
+as a stacking context, painted as an atomic unit in its normal-flow slot, so a `z-index: -1`
+descendant stays inside it. And a sub-pass (a stacking context, float, opacity or transform
+root) now paints its root's own box before the negative z-index layers, per CSS 2.1 Appendix
+E; it used to paint the root after them, so a `z-index: -1` child vanished under its own
+stacking context's background. msn.com's hero image (`position: absolute; z-index: -1` in a
+`contain: content` card) was painted under the card's #333 background. Filter and
+backdrop-filter, which also make stacking contexts, are not included. Pinned by
+`ContainStackingTests` and `render-repros/contain-negative-z.html`.
+
+### A descendant's `max-width` caps a button's intrinsic label width
+
+`native_button_intrinsic_content` sums a button's descendant text and atomic widths whatever
+their own sizing. `DomStyleFixups.NativeButtonWalk` now caps a descendant with a definite
+`max-width` at that width (less its edges under `border-box`). msn.com's settings button hides
+its "Page settings" label in a `max-width: 0; overflow: hidden` span beside a 24px icon:
+Chromium 141 sizes it 40px, the port 132px, which widened the header until its overflow
+logic hid the Sign in button. Percentage max-widths are not applied. Pinned by
+`FormControlDisplayTests.ButtonIntrinsicWidthHonoursADescendantMaxWidth`.
+
+### A definite size wins over the aspect ratio; min/max transfer only into an auto axis
+
+`vendor/taffy` floors a leaf's height at `width / aspect-ratio` even when the height is
+definite (`compute/leaf.rs`), and transfers min and max sizes through the ratio into both axes
+(`maybe_apply_aspect_ratio` on min/max in leaf, block, flexbox, grid and the absolute-position
+pass). capcut.com's 150x36 logo with `width:120px; height:24px; object-fit:contain` laid out
+120x28.8 (Chromium 141: 120x24), and a div with `aspect-ratio:2; width:120px; height:24px`
+120x60. The ratio now fills only an auto axis (`Leaf.cs`), and
+`GeometryExtensions.TransferLimitThroughAspectRatio` transfers a limit only into an axis whose
+preferred size is auto, a transferred minimum capped by that axis's maximum (and a maximum
+floored by its minimum): `width:120px; height:24px; max-height:20px` is 120x20 (was 83x20),
+`min-width:200px; max-height:20px` on an auto/auto image 200x20 (was 200x48). Pinned by
+`ReplacedSizingTests`.
+
+### Replaced elements: inline by default, natural ratios, content-box ratios, image buttons
+
+Measured against Chromium 141 on `render-repros/replaced-sizing/` (70 pages from
+`scripts/replaced-sizing-conformance/gen-pages.mjs`: png, ratio-only svg image, inline svg,
+canvas, video, iframe and `input type=image`, each through 33 sizing combinations in ten
+formatting contexts; compare element sizes and offsets in their wrapper at 0.5px). Element
+boxes matching: 1072/2030 before this work, 1217 after the rule above, then:
+
+- `canvas`, `video`, `iframe`, `embed`, `object` and `audio` are `inline` (Rust's UA makes
+  every element but `img` a block): an atomic inline on the text line, 300x150 by default;
+  `audio:not([controls])` is `display: none` (Chromium's rule is `!important`; here an author
+  `display` still wins);
+- only a canvas has a natural ratio (its bitmap's, 300x150 for a missing attribute); an iframe,
+  embed, object, a video without metadata, audio and meter/progress have a natural size and no
+  ratio (`ReplacedItem.NoRatio`), so `width:120px` on a video is 120x150, not 120x60;
+- `width`/`height` attributes map to `aspect-ratio` only on img, canvas, video, input and svg
+  (Rust maps them on every element: an iframe with width=120 height=24 and `width:60px;
+  height:auto` was 64x16, Chromium 64x154);
+- a block-level replaced box with an auto width takes its natural width (CSS 2.1 10.3.4): these
+  elements now take the image path in `DomBuildCore`, which sizes auto/auto boxes (block canvas
+  300 wide, was 400);
+- a natural ratio applies to the content box in block, leaf and absolute layout as flex and grid
+  already did (`AspectRatioUsesContentBox`): `height:24px; box-sizing:border-box; padding:3px`
+  on a 150x36 image is 81x24, was 100x24;
+- `aspect-ratio: auto <ratio>` keeps the natural ratio where there is one (Rust drops `auto`):
+  `aspect-ratio: auto 1; width:120px` on the image is 120x28.8, was 120x120;
+- `input type=image` is laid out and painted as its image, without the field's padding, border
+  and background (was an 8x6 empty field);
+- a flex item's min/max transfer through the ratio like the other layouts (`FlexboxLayout`);
+- an atomic inline's percentage height resolves against the definite content height of the
+  block holding its line (`TaffyTreeInline`): capcut.com's card images (`height:100%` in a
+  104px box) are 176x104 as in Chromium, were 176x99.
+
+After all of these: 1929/2030. Also left: `getComputedStyle(img).objectFit` reads empty.
+
+Left: an inline `<svg>` without a width attribute is 100% of its containing block in Chromium
+(400x96 in a 400px block, 0x0 under a shrink-to-fit parent) and 300x72 here; an authored
+`aspect-ratio` on a ratio-less replaced box (video, iframe) makes Chromium stretch it to the
+available width.
+
+### Captures and op continuations hold the page isolate's lock
+
+No Rust counterpart: deno_core runs every op reaction on the thread that owns the isolate.
+ClearScript resolves a Task-returning op's promise on the thread that completed the Task, and
+the reaction's script runs there under the isolate lock, while host code on the page thread
+(a CDP capture's layout and paint, an op's continuation after its `await`) ran without it.
+samsung.com's `Page.captureScreenshot` failed with "Collection was modified" (`DomTree.Count`
+under the painter, nodes appended by a fetch reaction) and eset.com/samsung.com's with "the page
+has no retained DOM surface to render" (the retained render or resolved scroll cleared between
+the capture's check and its read). `Ops.IsolateLock` runs host code through a trampoline
+function so V8's reentrant Locker excludes page script; `Page.captureScreenshot`'s synchronous
+body (`Page.WithPageLocked`), the runtime's captures, the render-resource service step and the
+continuations of `op_load_image_metadata` and `op_load_stylesheet` (which seeded the renderer
+cache, installed sheets and invalidated from thread-pool threads) hold it. A page whose fetch and
+image reactions append nodes failed 5 of 327 back-to-back captures, 0 of 1,356 after. Other
+host-side readers (CDP DOM/geometry handlers outside a capture) do not take it yet. Pinned by
+`IsolateLockTests`.
+
+Since op promises settle on the page's event loop (next entry), nothing of the engine's own
+enters the isolate from a pool thread any more: the reactions and the op tails above run on the
+page's loop, between tasks, so the lock is uncontended in the engine's own use. It is kept where
+it is (captures, parser steps, the render-resource service step) because it costs a reentrant
+`Locker` on the thread that already owns the isolate, and an embedder can still call into the
+runtime from a thread of its own while a capture runs.
+
+### Op promises settle on the page's event loop
+
+DEVIATION from nothing in `crates/obscura-js` (deno_core resolves every op inside
+`poll_event_loop`, on the isolate's thread); this is the port reaching that shape. ClearScript
+turns a `Task`-returning op into a promise with `task.ContinueWith(resolve,
+ExecuteSynchronously, scheduler)`, and without a synchronization context the scheduler is the
+default one, so the promise was resolved on whichever pool thread completed the op. Resolving it
+enters V8 and needs the isolate lock, so while page script ran every completing op parked a pool
+thread on that lock; and the page thread itself waited on the network inside script (a module
+graph's static imports, fetched synchronously by ClearScript's loader), whose continuations then
+found no pool thread: GitHub's home page took 12 s for one module instead of 0.3 s. The previous
+answer was `ThreadPool.SetMinThreads(64)` for the whole process, from library code.
+
+Now (`Ops.OpCompletionContext`, `AsyncOpBinding`, `PocketCalculatorJsRuntime.PumpTick`):
+
+- every realm engine is created with `V8ScriptEngineFlags.UseSynchronizationContexts`, and the
+  async-op binding converts the op's task to its promise itself (`ToPromise`) with the runtime's
+  `OpCompletionContext` current for that call only, which is where ClearScript captures
+  `TaskScheduler.FromCurrentSynchronizationContext()`. (Setting the context from script and
+  restoring it from script would leave it current on a pool thread whenever a watchdog
+  terminated the script in between.) The resolution is posted to that queue;
+- each event-loop turn runs the completions queued when it started, one checkpoint after each,
+  ahead of posted tasks and timers (deno_core resolves ready ops before its macrotasks), yields to
+  a waiting CDP command between them, and skips them while a watchdog termination is pending (a
+  resolution run then would be swallowed inside ClearScript's continuation and the promise lost);
+- a completion wakes a parked loop (`ParkAsync`, the parser's `WaitAsync`), so op results no
+  longer wait out the 10-50 ms poll; queued completions count as pending work;
+- the op tails that write page state after their `await` (`op_fetch_url`'s stored bodies and
+  network events, `op_load_image_metadata`, `op_load_stylesheet`) run on the same queue
+  (`IsolateLock.RunOnPageAsync`). `op_fetch_url`'s tail used to run on pool threads in parallel:
+  64 fetches finishing together corrupted the stored-body queue ("Operations that change
+  non-concurrent collections must have exclusive access"). The fetch's concurrency slot is
+  released before the tail, so the next request does not wait for the loop. Host code that
+  awaits `FetchOps.FetchUrlAsync` itself drives no loop, so there the tail runs inline as before
+  (`tailOnPageLoop` is set by the `op_fetch_url` binding only). A style sheet's own fetches
+  keep their tail where the body was read too, since its `@import`s are found from that body and
+  must not wait for the page's next turn; only installing the sheet moves to the loop. Those
+  internal tails can still run beside an `op_fetch_url` tail on the loop, as every tail could
+  before;
+- a disposed runtime drops its queue (host tails queued there are cancelled, so their `finally`
+  blocks run);
+- the `SetMinThreads(64)` floor is gone.
+
+Module graphs are fetched before they are evaluated (`PocketCalculatorModuleLoader.PrefetchGraphAsync`,
+`ScriptDeclarations.ModuleRequests`), as Chromium does: `PrepareModuleAsync` and
+`PrepareInlineModuleAsync` fetch the whole static graph concurrently (six module fetches at a
+time, Chromium's per-host cap) within the prepare budget, resolving through the import map, so
+the evaluation's synchronous loads read the loader's cache. A dynamic module script prefetches
+through `op_prefetch_module_graph` (bootstrap.js, port addition) before its `import()`. Every
+module that loads starts its own static dependencies loading, so a page's own `import()`, the one
+load still made synchronously inside script with the isolate held, fetches its graph
+concurrently instead of one module at a time; that wait observes the script deadline
+(`BlockingLoadCancellation`) and runs with no synchronization context. A failed prefetch fails
+the evaluation with its own error, once, without a second request. Rust's deno_core
+(`RecursiveModuleLoad`) does the same before instantiating; ClearScript offers no hook for it.
+
+The other blocking waits: `importScripts` still blocks (spec-blocking; the worker is emulated on
+the page thread, so the page isolate is held for its fetch; no own worker isolate is ported), now
+with no synchronization context; `Page.TakePrewarmedRuntime` takes the prewarm through a `Lazy`
+and creates the runtime inline when no pool thread has started it, instead of blocking on the
+pool; the CDP TLS replay stream reads synchronously instead of blocking on `ReadAsync`;
+`ImageAgent.Get` (sync, with retry sleeps) is off the page path, since any page with a transport
+makes its renderer cache-only. A search for `.Result`, `.Wait()`, `GetAwaiter().GetResult()` and
+`Thread.Sleep` in `dotnet/src` finds nothing else on a page path: the rest are guarded by
+`IsCompleted`, or run on the watchdog, hang-escalation, accept and hard-deadline threads.
+
+Measured (4 cores, pool at its default minimum): `OpCompletionStarvationTests` (64 fetches and
+64 op_sleeps settling while an 8-deep module chain loads at 60 ms a module) evaluate the static
+graph in 0.58 s and the in-script dynamic import in 0.49 s; with the context and the
+prefetch switched off, 30 s (the budget) and 25 s. Live, interleaved with the base build through
+`serve --proxy` and Playwright: github.com loads in 3.9-4.0 s with 24-28 threads (base 5.7-7.2 s,
+48-56 threads); reddit.com 5.8-9.0 s (12.3-14.9 s), nvidia.com 14.3-14.9 s (16.6-18.5 s),
+youtube.com 7.6-8.3 s (8.5-8.6 s), msn.com 16.9-19.2 s (16.6 s, 58-68 threads; 26-28 now),
+grammarly.com 14.0-14.1 s (13.4-15.3 s), cloudflare.com 14.1-20.3 s (21.6-25.6 s); element
+counts and page errors unchanged; rechecked on the final build: github.com 5.9-6.1 s with 19-24
+threads (base 6.5-8.0 s, 48-53), reddit.com 5.4-6.2 s (7.5-11.5 s). A local 15,000-element page with 30 scripts, four 21-module
+graphs and 60 fetches behind 40 ms latency: 2.3-2.6 s (base 4.9-5.1 s); with no latency
+1.46-1.60 s (base 1.33-1.66 s). Pinned by `OpCompletionContextTests`,
+`OpCompletionStarvationTests`, `ModuleGraphLoadTests.APrefetched...`/`APrefetchFailure...`/
+`AnInlineModuleGraph...` and `ModuleRequestsAreTheStaticImportAndExportFromSpecifiers` (Js).
+
+### An autonomous CDP turn yields to a waiting command between tasks
+
+`RunAutonomousEventLoopTurn` in Rust runs every posted task and due timer before the
+connection processor reads its socket. Chromium serves a DevTools message between any two tasks.
+On weather.com each timer forces a 200-700ms relayout, so one turn ran for seconds and each of
+Playwright's five screenshot commands queued behind one: `page.screenshot` took 22-32s and once
+passed the survey's 35s budget. The CDP pump passes `CdpContext.ConnectionHasWork`; the turn
+stops after the task that is running and hands the rest back to their queues in order:
+2.4-4.0s. Pinned by `RuntimeTests.AutonomousTurnYieldsBetweenTasksWhenTheHostHasWork`.
+
+### A heavy cold layout pass ends with the collection it made due
+
+Port-only (the Rust engine has no tracing GC). The CLI runs workstation GC with concurrent
+collection off, so a gen2 collection is a blocking pause (~150ms over the ~120MB live heap of a
+2,000-item grid). Line carrying (b9768da) cut the cold pass's allocation from 383MB to 266MB, so
+that collection stopped falling inside the cold pass and landed in the first retained relayout:
+the bench's single `className` write + `offsetWidth` read went from ~300ms (4eedc89) to
+450-550ms while the cold pass got faster by more. `PaintApi.CollectAfterColdPass` forces a gen0
+(which the GC escalates to the generation that is due) at the end of a cold pass that allocated
+128MB or more: single relayout 334-363ms, cold pass 1.98-2.12s (4eedc89: 2.16-2.31s).
+`POCKETCALCULATOR_NO_COLD_PASS_GC=1` turns it off. Peak RSS stays ~40MB above 4eedc89: the shape
+cache now stays under its 8,192-entry cap (7.9k slices and paragraphs with their layout memos)
+where the old path overflowed and cleared it mid-pass; not a leak.
+
+### Scripts run while the document is parsed
+
+DEVIATION from crates/obscura-browser (page.rs), which parses the whole response, fetches every
+script, and then runs them back to back before DOMContentLoaded. An inline script saw every
+element after it, `document.write` output was inserted behind the script by DOM insertion, async
+scripts ran in document order with no task between them, readystatechange never fired, and a
+script that a parser script inserted could only run once every parser and deferred script had.
+grammarly.com: Transcend's consent UI (ui.js, inserted by the parser-blocking airgap.js inside
+`#__next`) ran after Next.js hydration, which saw its extra `<script>` and fell back to a client
+render (React #418/#423 in 3 of 4 live loads of the base build, 0 of 7 with this one).
+
+The navigation now follows the HTML parser's script handling as Chromium 141 does it
+(`Page.DocumentLoad.cs`, `DocumentParser`, `HtmlTreeBuilder.Scripting.cs`):
+
+- **The parser stops at each script end tag** (HTML and SVG). An inline script runs there once
+  the parser-inserted style sheets before it have loaded; an external parser-blocking script holds
+  the parser while the event loop runs (posted tasks, timers, loaded async scripts, dynamic
+  scripts); async scripts run as soon as they load, in load order; deferred classic and module
+  scripts run in document order after readyState `interactive`, then DOMContentLoaded; the load
+  event waits for async and load-delaying scripts. The parser yields to the event loop every 4,096
+  tokens (Blink's chunk size) or 50 ms of parsing, and once after the end of the input, as
+  Chromium's network "finished" task does (a 0 ms timer the last script set fires before
+  readystatechange). External parser scripts fire `load`/`error`; `nomodule` classic scripts no
+  longer run (parser or inserted).
+- **document.write at the insertion point.** While a parser-inserted script runs the parser has an
+  insertion point (`op_parser_write`); written text goes into the tokenizer's input there, a
+  written inline script runs inside `write()`, a written external script blocks the parser and
+  later writes wait behind it, a tag split across writes is parsed once complete, and a nested
+  script's writes go right after it. Elsewhere (timers, async scripts, after parsing) `write()`
+  keeps the shim's own stream, as before.
+- **The realm hears about parsed nodes** before its script runs again
+  (`PocketCalculatorJsRuntime.ParserInserted`, `__obscura_host.parserInserted`): tree caches and
+  epochs, layout invalidation, window named access, one MutationObserver record per insertion,
+  isolated worlds, iframes and preload links (loaded on insertion), and parser-inserted scripts
+  are marked started. Parser steps run under the isolate lock.
+- **A preload scanner** (`PreloadScanner`) reads the whole response for external classic scripts
+  (skipping comments, raw text and templates, with `<base>` and `<meta name=referrer>` before
+  each) and starts their fetches at once, at most 16 in flight; the parser takes the response from
+  that fetch.
+- **The page's runtime is created while its response is fetched** (`Page.PrewarmRuntime`; a V8
+  isolate and bootstrap.js take ~90 ms, which otherwise delayed the first script by as much;
+  `POCKETCALCULATOR_NO_RUNTIME_PREWARM=1` turns it off). The thread pool used to keep 64
+  workers here, because op settlements waited on the isolate lock on pool threads and with
+  GitHub's preload links in flight they parked every pool thread while a module graph fetched
+  its dependencies synchronously (one module 12 s instead of 0.3 s); that floor is gone, see
+  "Op promises settle on the page's event loop".
+- **No render-resource warm-up before scripts.** The old engine waited up to 1 s for images and
+  fonts before running any script; they now start loading when parsing ends and scripts do not
+  wait for them, as in Chromium.
+
+Measured with `scripts/script-order-conformance/probe.mjs` (local server, 150 ms document delay so
+the port's runtime is up): 9 of 13 pages log exactly what Chromium logs (the first 9 pages: 0 of 9
+before). The rest
+differ only in timing (the port's first execution of bootstrap paths is slower, e.g. 50 ms for
+the first script insertion, so a 20 ms dynamic script or a 0 ms async fetch finishes in a
+different turn) and in custom elements: the parser stops right after inserting an element of a
+defined name and the realm upgrades it there, so its constructor sees no children as in Chromium
+but sees its attributes and is connected (Chromium constructs it before either). Load times
+(CLI, interleaved, local): a 15,000-element page with 70 scripts 1.5-1.8 s (base 1.9-2.2 s), the
+hydration page 0.84-0.95 s (base 1.23-1.33 s). Pinned by `ScriptOrderTests` (Browser),
+`ParserInsertionTests` (Js), `DocumentParserTests`, `PreloadScannerTests` and the html5lib corpus
+run through `DocumentParser` with a yield after every token (Dom).
+
+Known differences: frame documents (`FrameRealm`) are still parsed whole before their scripts
+run; module graphs load when their turn comes, not speculatively, and the parser waits on nothing
+for them; an async module runs at the parser's next yield or wait, not the moment it has loaded;
+there is no speculative parser past a blocked script beyond the up-front script scan, so a
+style sheet or image after a parser-blocking script is fetched when the parser reaches it; a load
+abandoned at its deadline parses the rest of the document without running its scripts, where
+Chromium would go on loading.

@@ -57,41 +57,56 @@ public sealed partial class Page
         List<string> cssSources = js.WithDom(dom =>
         {
             List<string> sources = [];
-            foreach (NodeId id in dom.Descendants(dom.Document))
+
+            // DEVIATION from crates/obscura-browser, whose walk stops at shadow hosts. A shadow
+            // tree's <style> (an adopted sheet is bridged into one) is styling the page too:
+            // msn.com's logo is a background url() declared there, and without this scan it
+            // only loaded after a capture had painted without it.
+            Stack<NodeId> roots = new();
+            roots.Push(dom.Document);
+            while (roots.TryPop(out NodeId scanRoot))
             {
-                Node? node = dom.GetNode(id);
-                if (node is null)
+                foreach (NodeId id in dom.Descendants(scanRoot))
                 {
-                    continue;
-                }
-                if (node.AsElement() is { } element
-                    && string.Equals(element.Name.Local, "style", StringComparison.Ordinal))
-                {
-                    sources.Add(dom.TextContent(id));
-                }
-                // A fetched <link> sheet and an @import are held beside their node rather than
-                // in a synthetic <style> (see DomTree.ExternalStylesheetCss). Without this the
-                // url() references in every linked sheet - backgrounds, masks, @font-face src -
-                // would stop being prefetched. DEVIATION from crates/obscura-browser, where the
-                // <style> walk above reaches them.
-                if (dom.ExternalStylesheetCss(id) is { } externalCss)
-                {
-                    sources.Add(externalCss);
-                }
-                if (node.GetAttribute("style") is { } style)
-                {
-                    sources.Add(style);
-                }
-                if (node.AsElement() is { } useElement
-                    && string.Equals(useElement.Name.Local, "use", StringComparison.Ordinal))
-                {
-                    string? href = node.GetAttribute("href") ?? node.GetAttribute("xlink:href");
-                    if (href is not null)
+                    Node? node = dom.GetNode(id);
+                    if (node is null)
                     {
-                        sources.Add($"url({href})");
+                        continue;
+                    }
+                    if (dom.HasShadowRoots && dom.ShadowRootOf(id) is { } shadowRoot)
+                    {
+                        roots.Push(shadowRoot);
+                    }
+                    if (node.AsElement() is { } element
+                        && string.Equals(element.Name.Local, "style", StringComparison.Ordinal))
+                    {
+                        sources.Add(dom.TextContent(id));
+                    }
+                    // A fetched <link> sheet and an @import are held beside their node rather than
+                    // in a synthetic <style> (see DomTree.ExternalStylesheetCss). Without this the
+                    // url() references in every linked sheet - backgrounds, masks, @font-face src -
+                    // would stop being prefetched. DEVIATION from crates/obscura-browser, where the
+                    // <style> walk above reaches them.
+                    if (dom.ExternalStylesheetCss(id) is { } externalCss)
+                    {
+                        sources.Add(externalCss);
+                    }
+                    if (node.GetAttribute("style") is { } style)
+                    {
+                        sources.Add(style);
+                    }
+                    if (node.AsElement() is { } useElement
+                        && string.Equals(useElement.Name.Local, "use", StringComparison.Ordinal))
+                    {
+                        string? href = node.GetAttribute("href") ?? node.GetAttribute("xlink:href");
+                        if (href is not null)
+                        {
+                            sources.Add($"url({href})");
+                        }
                     }
                 }
             }
+
             return sources;
         }) ?? [];
 
@@ -449,4 +464,19 @@ public sealed partial class Page
 
     /// <summary>Renderer-owned root scroll offset for document-space capture routing.</summary>
     public (float X, float Y) ScreenshotScrollOffset() => Js?.ScrollOffset ?? (0.0f, 0.0f);
+
+    /// <summary>
+    /// Run host-side work that reads or writes this page's document or layout while holding
+    /// its isolate's lock, so no script of the page runs at the same time.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-browser, where nothing else can run: ClearScript runs the
+    /// reaction to a completed async op on the thread that completed it. See
+    /// <c>PocketCalculator.Js.Ops.IsolateLock</c>.
+    /// </remarks>
+    public T WithPageLocked<T>(Func<T> work)
+    {
+        ArgumentNullException.ThrowIfNull(work);
+        return Js is { } js ? js.State.IsolateLock.Run(work) : work();
+    }
 }

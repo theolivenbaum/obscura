@@ -467,15 +467,16 @@ public static class LineBreaking
         0x0021 or 0x003F or 0x2762 or 0x2763 or 0xFE15 or 0xFE16 or 0xFF01 or 0xFF1F
             => BreakClass.Exclamation,
         0x0024 or 0x002B or 0x005C or 0x00B1 or 0x2116 or 0x00A3 or 0x00A5 or 0x20AC
-            or 0x0023 => BreakClass.Prefix,
+            or 0x0023 or 0xFF04 or 0xFFE1 or 0xFFE5 or 0xFFE6 => BreakClass.Prefix,
         0x0025 or 0x00A2 or 0x00B0 or 0x2030 or 0x2031 or 0x2032 or 0x2033 or 0x2034
-            => BreakClass.Postfix,
+            or 0xFF05 or 0xFFE0 => BreakClass.Postfix,
         0x0028 or 0x005B or 0x007B or 0x2985 or 0x3008 or 0x300A or 0x300C or 0x300E
-            or 0x3010 or 0x3014 or 0x3016 or 0x3018 or 0x301A or 0xFF08 or 0xFF3B or 0xFF5B
-            => BreakClass.OpenPunctuation,
+            or 0x3010 or 0x3014 or 0x3016 or 0x3018 or 0x301A or 0x301D or 0xFF08 or 0xFF3B
+            or 0xFF5B or 0xFF5F or 0xFF62 => BreakClass.OpenPunctuation,
         0x0029 or 0x005D => BreakClass.CloseParenthesis,
         0x007D or 0x2986 or 0x3009 or 0x300B or 0x300D or 0x300F or 0x3011 or 0x3015
-            or 0x3017 or 0x3019 or 0x301B or 0xFF09 or 0xFF3D or 0xFF5D or 0x3001 or 0x3002
+            or 0x3017 or 0x3019 or 0x301B or 0x301E or 0x301F or 0xFF09 or 0xFF3D or 0xFF5D
+            or 0xFF60 or 0xFF63 or 0x3001 or 0x3002 or 0xFE11 or 0xFE12 or 0xFE50 or 0xFE52
             or 0xFF0C or 0xFF0E or 0xFF61 or 0xFF64 => BreakClass.ClosePunctuation,
         0x0022 or 0x0027 or 0x00AB or 0x00BB or 0x2018 or 0x2019 or 0x201C or 0x201D
             => BreakClass.Quotation,
@@ -484,11 +485,24 @@ public static class LineBreaking
         0x00B4 or 0x02C8 or 0x02CC or 0x1806 => BreakClass.BreakBefore,
         0x2024 or 0x2025 or 0x2026 or 0xFE19 => BreakClass.Inseparable,
         0x3005 or 0x303B or 0x309D or 0x309E or 0x30FD or 0x30FE or 0x203C or 0x2047
-            or 0x2048 or 0x2049 => BreakClass.NonStarter,
+            or 0x2048 or 0x2049 or 0x203D or 0x301C or 0x303C or 0x309B or 0x309C or 0x30A0
+            or 0x30FB or 0xFE54 or 0xFE55 or 0xFF1A or 0xFF1B or 0xFF65 or 0xFF9E or 0xFF9F
+            => BreakClass.NonStarter,
+
+        // CJ (small kana and the prolonged sound mark). UAX#14's default LB1 resolves CJ to NS,
+        // which forbids a break before them; CSS `line-break: auto` in Chromium is the "normal"
+        // tailoring that resolves CJ to ID, and Chromium 141 does break before ィ, ァ, ー and
+        // ㇰ. DEVIATION from crates/obscura-render (unicode-linebreak resolves CJ to NS); see
+        // "Known deviations" in todo.md.
         0x3041 or 0x3043 or 0x3045 or 0x3047 or 0x3049 or 0x3063 or 0x3083 or 0x3085
             or 0x3087 or 0x308E or 0x3095 or 0x3096 or 0x30A1 or 0x30A3 or 0x30A5 or 0x30A7
             or 0x30A9 or 0x30C3 or 0x30E3 or 0x30E5 or 0x30E7 or 0x30EE or 0x30F5 or 0x30F6
-            or 0x30FC => BreakClass.ConditionalJapaneseStarter,
+            or 0x30FC => BreakClass.Ideographic,
+
+        // U+3000 IDEOGRAPHIC SPACE breaks after; the kana voicing marks and the ideographic
+        // tone marks combine with what precedes them.
+        0x3000 => BreakClass.BreakAfter,
+        0x3099 or 0x309A or (>= 0x302A and <= 0x302F) => BreakClass.CombiningMark,
         >= 0x0030 and <= 0x0039 => BreakClass.Numeric,
         >= 0x0041 and <= 0x005A => BreakClass.Alphabetic,
         >= 0x0061 and <= 0x007A => BreakClass.Alphabetic,
@@ -512,6 +526,18 @@ public static class LineBreaking
             ? BreakClass.HangulLvSyllable
             : BreakClass.HangulLvtSyllable,
         >= 0x3040 and <= 0x30FF => BreakClass.Ideographic,
+
+        // The rest of the CJK punctuation block, the radicals, bopomofo, Hangul compatibility
+        // jamo, the katakana extension (CJ, resolved to ID as above), the enclosed and
+        // compatibility blocks, and the fullwidth forms other than the punctuation named above
+        // are all ID. The general-category fallback below made fullwidth digits numeric and
+        // fullwidth letters and bopomofo alphabetic, which joined them into unbreakable words;
+        // Chromium breaks between each of them.
+        >= 0x2E80 and <= 0x2FFF => BreakClass.Ideographic,
+        >= 0x3000 and <= 0x303F => BreakClass.Ideographic,
+        >= 0x3100 and <= 0x33FF => BreakClass.Ideographic,
+        >= 0xFF01 and <= 0xFF60 => BreakClass.Ideographic,
+        >= 0xFFE2 and <= 0xFFE4 => BreakClass.Ideographic,
         >= 0x3400 and <= 0x4DBF => BreakClass.Ideographic,
         >= 0x4E00 and <= 0x9FFF => BreakClass.Ideographic,
         >= 0xF900 and <= 0xFAFF => BreakClass.Ideographic,

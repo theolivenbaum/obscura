@@ -165,4 +165,99 @@ public sealed class TimerQueueTests
         Assert.Empty(q.TakeDue());
         Assert.Null(q.NextDelayMs());
     }
+
+    [Fact]
+    public void Restore_hands_back_the_one_shots_a_batch_did_not_run_in_their_order()
+    {
+        // A watchdog that interrupts the first callback ends the turn there; the rest of the
+        // batch was already out of the queue and used to be lost.
+        var q = new TimerQueue();
+        object a = "a", b = "b", c = "c";
+        q.Add(0, false, a);
+        q.Add(0, false, b);
+        q.Add(0, false, c);
+        var batch = q.TakeDueTimers();
+        Assert.Equal(3, batch.Count);
+
+        q.Restore(batch, 1);
+
+        Assert.Equal(2, q.Count);
+        Assert.Equal([b, c], q.TakeDue());
+    }
+
+    [Fact]
+    public void A_restored_timer_keeps_its_id()
+    {
+        var q = new TimerQueue();
+        object a = "a", b = "b", c = "c";
+        q.Add(0, false, a);
+        var idB = q.Add(0, false, b);
+        q.Add(0, false, c);
+        var batch = q.TakeDueTimers();
+        q.Restore(batch, 1);
+
+        // clearTimeout on the next turn still reaches it.
+        q.Cancel(idB);
+        Assert.Equal([c], q.TakeDue());
+    }
+
+    [Fact]
+    public void Restore_skips_a_timer_cancelled_after_the_batch_was_taken()
+    {
+        var q = new TimerQueue();
+        object a = "a", b = "b";
+        q.Add(0, false, a);
+        var idB = q.Add(0, false, b);
+        var batch = q.TakeDueTimers();
+
+        // The first callback cleared the second before the interrupt.
+        q.Cancel(idB);
+        q.Restore(batch, 1);
+
+        Assert.Equal(0, q.Count);
+        Assert.Empty(q.TakeDue());
+    }
+
+    [Fact]
+    public void Restore_does_not_duplicate_a_repeating_timer()
+    {
+        var q = new TimerQueue();
+        q.Add(0, true, new object());
+        var batch = q.TakeDueTimers();
+        q.Restore(batch, 0);
+        Assert.Equal(1, q.Count);
+    }
+
+    [Fact]
+    public void Concurrent_adds_while_the_pump_takes_never_corrupt_the_queue()
+    {
+        // ClearScript resolves an async op's promise on the thread that completed the op,
+        // so page script (and its setTimeout) runs there while the pump thread is taking
+        // the due set. Unlocked, this threw "Collection was modified" out of the pump.
+        var q = new TimerQueue();
+        using var stop = new CancellationTokenSource();
+        var adder = Task.Run(() =>
+        {
+            var added = 0;
+            while (!stop.IsCancellationRequested)
+            {
+                q.Add(0, false, new object());
+                added++;
+            }
+
+            return added;
+        });
+
+        var taken = 0;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (clock.ElapsedMilliseconds < 300)
+        {
+            taken += q.TakeDue().Count;
+        }
+
+        stop.Cancel();
+        var total = adder.GetAwaiter().GetResult();
+        taken += q.TakeDue().Count;
+        Assert.Equal(total, taken);
+    }
 }

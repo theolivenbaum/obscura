@@ -31,7 +31,28 @@ public sealed class NetworkEvent
     public required int BodySize { get; init; }
 
     public required double Timestamp { get; init; }
+
+    /// <summary>
+    /// The page's own document request, as opposed to a subresource. <see cref="Url"/> is
+    /// then the URL the document came from, after any redirects.
+    /// </summary>
+    /// <remarks>
+    /// Port addition. The CDP layer used to find the document by matching
+    /// <see cref="Url"/> against the page URL, which found nothing once a redirect had
+    /// moved the page, so no request carried the loader id and a client's
+    /// <c>page.goto()</c> resolved to null.
+    /// </remarks>
+    public bool IsNavigation { get; init; }
+
+    /// <summary>The redirects the document request followed, in order.</summary>
+    public IReadOnlyList<NetworkRedirect> Redirects { get; init; } = [];
 }
+
+/// <summary>One redirect a request followed: the URL it asked for and the response that sent it on.</summary>
+/// <param name="Url">The URL this hop requested, in the page's URL spelling.</param>
+/// <param name="Status">The redirect status.</param>
+/// <param name="Headers">The redirect response's headers.</param>
+public sealed record NetworkRedirect(string Url, int Status, IReadOnlyDictionary<string, string> Headers);
 
 /// <summary>A response body retained for <c>Network.getResponseBody</c>.</summary>
 public sealed record StoredResponseBody(string Body, bool Base64Encoded);
@@ -154,6 +175,12 @@ public sealed partial class Page : IDisposable
     private List<uint> _suspendedStartedScriptIds = [];
     private CdpObjectState _suspendedCdpObjectState = new();
     private readonly CallbackRegistry _callbacks = new();
+
+    /// <summary>
+    /// This page's <c>sessionStorage</c> areas (one top-level browsing context), which its
+    /// navigations keep, as in Chromium.
+    /// </summary>
+    public PocketCalculator.Js.Ops.WebStorage SessionStorage { get; } = new();
     private bool _disposed;
 
     public Page(string id, BrowserContext context)
@@ -177,6 +204,26 @@ public sealed partial class Page : IDisposable
     public UrlRecord? Url { get; set; }
 
     public DomTree? Dom { get; set; }
+
+    /// <summary>How far the current document got (see <see cref="DocumentReadiness"/>).</summary>
+    public DocumentReadiness Readiness { get; private set; } = DocumentReadiness.Loaded;
+
+    /// <summary>
+    /// The last navigation hit its deadline after the document committed, and the page
+    /// was left as it stood rather than failed: its DOM is built, and whatever parsing,
+    /// scripts or frames were still pending did not run. <see cref="Readiness"/> says how
+    /// far the document got.
+    /// </summary>
+    public bool LoadAbandoned { get; private set; }
+
+    /// <summary>Record that the current document reached <paramref name="readiness"/>.</summary>
+    internal void ReachReadiness(DocumentReadiness readiness)
+    {
+        if (readiness > Readiness)
+        {
+            Readiness = readiness;
+        }
+    }
 
     /// <summary>Live child frame realms, in creation order.</summary>
     public List<FrameRealm> Frames { get; } = [];
@@ -229,6 +276,13 @@ public sealed partial class Page : IDisposable
     /// physical <c>screen</c> fingerprint stays independent.
     /// </summary>
     public (float Width, float Height) Viewport { get; private set; } = (1280.0f, 720.0f);
+
+    /// <summary>
+    /// The clock every document's animation timeline reads. The system's monotonic clock
+    /// unless a test installs one it advances by hand, which makes CSS and Web Animations land
+    /// at exact times however slow the host is. Takes effect from the next document.
+    /// </summary>
+    public TimeProvider AnimationClock { get; set; } = TimeProvider.System;
 
     /// <summary>
     /// Output device pixels per CSS pixel for CDP surface capture. Layout and CSSOM
@@ -448,7 +502,8 @@ public sealed partial class Page : IDisposable
         // Thread the BrowserContext's proxy through to the ES-module loader and
         // op_fetch_url so dynamic imports and JS fetch() honour the configured
         // upstream proxy. A null proxy is a direct connection.
-        var rt = PocketCalculatorJsRuntime.WithBaseUrlAndProxy(UrlString(), Context.ProxyUrl);
+        var rt = TakePrewarmedRuntime() ?? PocketCalculatorJsRuntime.WithBaseUrlAndProxy(UrlString(), Context.ProxyUrl);
+        rt.State.AnimationClock = AnimationClock;
         rt.SetUrl(UrlString());
         rt.SetEncoding(Encoding);
         rt.SetTitle(Title);
@@ -468,6 +523,7 @@ public sealed partial class Page : IDisposable
             _screenMetricsEmulated);
 
         rt.SetCookieJar(Context.CookieJar);
+        rt.SetWebStorage(Context.LocalStorage, SessionStorage);
         rt.SetHttpClient(HttpClient);
         rt.SetCallbacks(_callbacks);
         rt.SetBlockedUrls(BlockedUrlPatterns);
@@ -494,6 +550,93 @@ public sealed partial class Page : IDisposable
         TryExecute(rt, "<device-metrics>", DevicePixelRatioScript());
 
         Js = rt;
+    }
+
+    /// <summary>A runtime being created while the navigation that will use it is fetched.</summary>
+    private RuntimePrewarm? _runtimePrewarm;
+
+    private static readonly bool RuntimePrewarmDisabled =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_NO_RUNTIME_PREWARM") == "1";
+
+    /// <summary>
+    /// Start creating the next document's runtime now, on another thread, while its response
+    /// is fetched. Creating one (a V8 isolate and bootstrap.js) takes about 90 ms, which
+    /// otherwise delays the document's first script by as much once the response is in.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-browser, which creates the runtime once the document has
+    /// been parsed. <c>POCKETCALCULATOR_NO_RUNTIME_PREWARM=1</c> turns it off.
+    /// </remarks>
+    private void PrewarmRuntime(string url)
+    {
+        DiscardPrewarmedRuntime();
+        if (RuntimePrewarmDisabled)
+        {
+            return;
+        }
+
+        string? proxy = Context.ProxyUrl;
+        _runtimePrewarm = new RuntimePrewarm(() => PocketCalculatorJsRuntime.WithBaseUrlAndProxy(url, proxy));
+    }
+
+    /// <summary>The runtime <see cref="PrewarmRuntime"/> started, once it exists; null without one.</summary>
+    private PocketCalculatorJsRuntime? TakePrewarmedRuntime()
+    {
+        if (Interlocked.Exchange(ref _runtimePrewarm, null) is not { } pending)
+        {
+            return null;
+        }
+
+        try
+        {
+            PocketCalculatorJsRuntime runtime = pending.Take();
+            runtime.RebaseModuleLoader(UrlString());
+            return runtime;
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // Created here instead, which reports the failure the usual way.
+            return null;
+        }
+    }
+
+    /// <summary>A navigation that will not use the runtime it started disposes it.</summary>
+    private void DiscardPrewarmedRuntime() => Interlocked.Exchange(ref _runtimePrewarm, null)?.Discard();
+
+    /// <summary>
+    /// A runtime created on a pool thread ahead of need, or on the taker's thread when the pool
+    /// has not got to it yet.
+    /// </summary>
+    /// <remarks>
+    /// The navigation used to block on the prewarm <see cref="Task"/>
+    /// (<c>GetAwaiter().GetResult()</c>), which waits for a pool thread to pick the work up;
+    /// on a pool with no thread to spare that was a wait for the pool to grow. Taking it
+    /// through a <see cref="Lazy{T}"/> creates the runtime inline if no thread has started it,
+    /// and otherwise waits only for the thread that is already creating it.
+    /// </remarks>
+    private sealed class RuntimePrewarm
+    {
+        private readonly Lazy<PocketCalculatorJsRuntime> _runtime;
+        private readonly Task _started;
+
+        public RuntimePrewarm(Func<PocketCalculatorJsRuntime> create)
+        {
+            _runtime = new Lazy<PocketCalculatorJsRuntime>(create, LazyThreadSafetyMode.ExecutionAndPublication);
+            _started = Task.Run(() => _runtime.Value);
+        }
+
+        public PocketCalculatorJsRuntime Take() => _runtime.Value;
+
+        public void Discard() =>
+            _ = _started.ContinueWith(
+                _ =>
+                {
+                    if (_runtime.IsValueCreated)
+                    {
+                        _runtime.Value.Dispose();
+                    }
+                },
+                TaskScheduler.Default);
     }
 
     /// <summary>
@@ -671,6 +814,7 @@ public sealed partial class Page : IDisposable
             return;
         }
         _disposed = true;
+        DiscardPrewarmedRuntime();
         _pendingFrameWork.Clear();
         Frames.Clear();
         Js = null;

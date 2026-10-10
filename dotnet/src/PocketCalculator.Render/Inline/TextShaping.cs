@@ -29,6 +29,9 @@ public struct ShapeGlyph
     public RgbaColor? Color;
     public ulong Metadata;
     public bool FakeItalic;
+
+    /// <summary>Embolden at raster time: a bold request the glyph's single-weight face cannot meet.</summary>
+    public bool FakeBold;
     public TextMetrics? Metrics;
 
     /// <summary>Width at the given font size, honoring a per-span metrics override.</summary>
@@ -189,6 +192,9 @@ public sealed class ShapeLine
     public bool Rtl;
     public List<ShapeSpan> Spans = [];
     public TextMetrics? Metrics;
+
+    /// <summary>Line layouts of this paragraph kept by <see cref="ShapeCache.Layout"/>.</summary>
+    internal LayoutMemo? LayoutMemo;
 }
 
 /// <summary>
@@ -217,6 +223,9 @@ public sealed class TextShaper(FontDatabase database)
 
     private const int WordCacheLimit = 1 << 16;
 
+    /// <summary>The character an atomic inline stands as in the collected text.</summary>
+    internal const char ObjectReplacementChar = '￼';
+
     /// <summary>The longest word, in glyphs, the per-shaper word cache keeps.</summary>
     private const int MaxCachedWordGlyphs = 4096;
 
@@ -225,28 +234,219 @@ public sealed class TextShaper(FontDatabase database)
     private readonly record struct WordShapeKey(string Text, TextAttrs Attrs, bool Rtl);
 
     /// <summary>Shape one paragraph into spans and words.</summary>
-    public ShapeLine ShapeParagraph(string line, AttrsList attrsList, int tabWidth)
+    /// <param name="baseRtl">
+    /// The paragraph direction from CSS <c>direction</c>, or <c>null</c> for the first strong
+    /// character's (UAX#9 P2/P3).
+    /// </param>
+    public ShapeLine ShapeParagraph(string line, AttrsList attrsList, int tabWidth, bool? baseRtl = null)
     {
         if (Cache is { } cache)
         {
-            ShapeCacheKey key = new(line, attrsList, tabWidth);
+            ShapeCacheKey key = new(line, attrsList, tabWidth, baseRtl);
             if (cache.TryGet(key, out ShapeLine cached))
             {
                 return cached;
             }
 
-            ShapeLine fresh = ShapeParagraphUncached(line, attrsList, tabWidth);
+            ShapeLine fresh = ShapeParagraphUncached(line, attrsList, tabWidth, baseRtl);
             cache.Add(key, fresh);
             return fresh;
         }
 
-        return ShapeParagraphUncached(line, attrsList, tabWidth);
+        return ShapeParagraphUncached(line, attrsList, tabWidth, baseRtl);
     }
 
-    private ShapeLine ShapeParagraphUncached(string line, AttrsList attrsList, int tabWidth)
+    /// <summary>
+    /// <see cref="ShapeParagraph"/> for a line known to be the whole words of
+    /// <paramref name="whole"/> from <paramref name="shift"/> on: those words are copied, moved
+    /// to the line's offsets, instead of shaped again.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs, which shapes every line a paragraph
+    /// is split into afresh. Shaping is per word (<see cref="BuildSpan"/>): each word is shaped
+    /// from its own text and attributes, and its break opportunities are kept as glyph indices
+    /// within it. So the words of a left-to-right paragraph without tabs (whose advances depend
+    /// on the position in the paragraph) are the words of any run of them cut at word
+    /// boundaries. A word crossing either end of the line, or anything but one left-to-right
+    /// span, falls back to shaping. <c>POCKETCALCULATOR_VERIFY_LINE_CARRY=1</c> shapes every
+    /// slice as well and reports any difference on stderr.
+    /// </remarks>
+    internal ShapeLine ShapeParagraphSlice(
+        string line, AttrsList attrsList, int tabWidth, bool? baseRtl, ShapeLine whole, int shift)
+    {
+        if (Cache is { } cache)
+        {
+            ShapeCacheKey key = new(line, attrsList, tabWidth, baseRtl);
+            if (cache.TryGet(key, out ShapeLine cached))
+            {
+                return cached;
+            }
+
+            ShapeLine fresh = Slice() ?? ShapeParagraphUncached(line, attrsList, tabWidth, baseRtl);
+            cache.Add(key, fresh);
+            return fresh;
+        }
+
+        return Slice() ?? ShapeParagraphUncached(line, attrsList, tabWidth, baseRtl);
+
+        ShapeLine? Slice()
+        {
+            ShapeLine? result = SliceWords(whole, shift, line.Length);
+            if (result is not null && VerifySlices)
+            {
+                ShapeLine shaped = ShapeParagraphUncached(line, attrsList, tabWidth, baseRtl);
+                if (!SameShape(shaped, result))
+                {
+                    Interlocked.Increment(ref s_sliceMismatches);
+                    Console.Error.WriteLine($"SHAPE SLICE MISMATCH '{line}'");
+                    return shaped;
+                }
+            }
+
+            if (result is not null)
+            {
+                Interlocked.Increment(ref s_slices);
+            }
+
+            return result;
+        }
+    }
+
+    private static long s_slices;
+    private static long s_sliceMismatches;
+
+    /// <summary>Lines shaped as slices, and slices that differed from shaping (verification on).</summary>
+    internal static (long Slices, long Mismatches) SliceCounts =>
+        (Interlocked.Read(ref s_slices), Interlocked.Read(ref s_sliceMismatches));
+
+    internal static bool VerifySlices { get; set; } =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_VERIFY_LINE_CARRY") == "1";
+
+    private static ShapeLine? SliceWords(ShapeLine source, int from, int length)
+    {
+        if (source.Rtl || source.Spans.Count != 1 || source.Spans[0].IsRtl)
+        {
+            return null;
+        }
+
+        int to = from + length;
+        var span = new ShapeSpan { Level = source.Spans[0].Level };
+        int covered = 0;
+        foreach (ShapeWord word in source.Spans[0].Words)
+        {
+            if (word.Glyphs.Count == 0)
+            {
+                return null;
+            }
+
+            int start = int.MaxValue;
+            int end = int.MinValue;
+            foreach (ShapeGlyph glyph in word.Glyphs)
+            {
+                start = Math.Min(start, glyph.Start);
+                end = Math.Max(end, glyph.End);
+            }
+
+            if (end <= from)
+            {
+                continue;
+            }
+
+            if (start >= to)
+            {
+                break;
+            }
+
+            if (start < from || end > to)
+            {
+                return null;
+            }
+
+            var copy = new ShapeWord
+            {
+                Blank = word.Blank,
+                Glyphs = new List<ShapeGlyph>(word.Glyphs.Count),
+                SoftBreaks = word.SoftBreaks,
+                EmergencyBreaks = word.EmergencyBreaks,
+                MinContentBreaks = word.MinContentBreaks,
+                CustomLineBreaks = word.CustomLineBreaks,
+            };
+            foreach (ShapeGlyph glyph in word.Glyphs)
+            {
+                ShapeGlyph moved = glyph;
+                moved.Start -= from;
+                moved.End -= from;
+                copy.Glyphs.Add(moved);
+            }
+
+            covered += end - start;
+            span.Words.Add(copy);
+        }
+
+        // Every character of the line belongs to exactly one copied word.
+        if (covered != length)
+        {
+            return null;
+        }
+
+        var result = new ShapeLine { Rtl = false, Metrics = source.Metrics };
+        result.Spans.Add(span);
+        return result;
+    }
+
+    private static bool SameShape(ShapeLine a, ShapeLine b)
+    {
+        if (a.Rtl != b.Rtl || a.Spans.Count != b.Spans.Count || !Equals(a.Metrics, b.Metrics))
+        {
+            return false;
+        }
+
+        for (int s = 0; s < a.Spans.Count; s++)
+        {
+            ShapeSpan x = a.Spans[s];
+            ShapeSpan y = b.Spans[s];
+            if (x.Level != y.Level || x.Words.Count != y.Words.Count)
+            {
+                return false;
+            }
+
+            for (int w = 0; w < x.Words.Count; w++)
+            {
+                ShapeWord p = x.Words[w];
+                ShapeWord q = y.Words[w];
+                if (p.Blank != q.Blank || p.CustomLineBreaks != q.CustomLineBreaks
+                    || !p.SoftBreaks.SequenceEqual(q.SoftBreaks)
+                    || !p.EmergencyBreaks.SequenceEqual(q.EmergencyBreaks)
+                    || !p.MinContentBreaks.SequenceEqual(q.MinContentBreaks)
+                    || p.Glyphs.Count != q.Glyphs.Count)
+                {
+                    return false;
+                }
+
+                for (int g = 0; g < p.Glyphs.Count; g++)
+                {
+                    ShapeGlyph m = p.Glyphs[g];
+                    ShapeGlyph n = q.Glyphs[g];
+                    if (m.Start != n.Start || m.End != n.End || m.XAdvance != n.XAdvance || m.YAdvance != n.YAdvance
+                        || m.XOffset != n.XOffset || m.YOffset != n.YOffset || m.FontId != n.FontId
+                        || m.GlyphId != n.GlyphId || m.FontIsVariable != n.FontIsVariable
+                        || m.FontWeightAxis != n.FontWeightAxis || m.FontOpticalSize != n.FontOpticalSize
+                        || m.FontItalicAxis != n.FontItalicAxis || m.Color != n.Color || m.Metadata != n.Metadata
+                        || m.FakeItalic != n.FakeItalic || m.FakeBold != n.FakeBold || !Equals(m.Metrics, n.Metrics))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private ShapeLine ShapeParagraphUncached(string line, AttrsList attrsList, int tabWidth, bool? baseRtl)
     {
         var result = new ShapeLine();
-        List<(int Start, int End, byte Level)> runs = Bidi.LevelRuns(line, out bool rtl);
+        List<(int Start, int End, byte Level)> runs = Bidi.LevelRuns(line, out bool rtl, baseRtl);
         result.Rtl = rtl;
         foreach ((int start, int end, byte level) in runs)
         {
@@ -400,7 +600,51 @@ public sealed class TextShaper(FontDatabase database)
     /// </summary>
     private static CssBreakData BuildBreakData(string span, int spanStart, AttrsList attrsList)
     {
+        // An atomic inline has a soft wrap opportunity before and after it whatever its
+        // neighbours are, as Chromium 141 breaks them: after "(" and after a no-break space
+        // before it, and before a no-break space after it (UAX#14 would glue both). A space
+        // after it is already a break after the space. Its own class is taken as ID.
+        List<int>? atomicBreaks = null;
+        if (span.Contains(ObjectReplacementChar))
+        {
+            atomicBreaks = [];
+            for (int i = 0; i < span.Length; i++)
+            {
+                if (span[i] != ObjectReplacementChar)
+                {
+                    continue;
+                }
+
+                if (i > 0)
+                {
+                    atomicBreaks.Add(i);
+                }
+
+                if (i + 1 < span.Length && span[i + 1] is not (' ' or '\t' or '\n'))
+                {
+                    atomicBreaks.Add(i + 1);
+                }
+            }
+
+            span = span.Replace(ObjectReplacementChar, '一');
+        }
+
         List<int> normalBreaks = LineBreaking.Breaks(span);
+        if (atomicBreaks is { Count: > 0 })
+        {
+            normalBreaks.AddRange(atomicBreaks);
+            normalBreaks.Sort();
+            int unique = 0;
+            for (int i = 0; i < normalBreaks.Count; i++)
+            {
+                if (i == 0 || normalBreaks[i] != normalBreaks[i - 1])
+                {
+                    normalBreaks[unique++] = normalBreaks[i];
+                }
+            }
+
+            normalBreaks.RemoveRange(unique, normalBreaks.Count - unique);
+        }
         // At most one cluster per code unit; sized once rather than grown (SECURITY.md M7).
         var clusters = new List<(int End, BreakClass Class, BreakClass BreakAllClass, bool VerticalLine, CssLineBreak? Policy)>(span.Length);
         foreach ((int start, int length) in LineBreaking.GraphemeClusters(span))
@@ -636,6 +880,23 @@ public sealed class TextShaper(FontDatabase database)
         }
 
         TextAttrs attrs = attrsList.GetSpan(startRun);
+        if (attrs.Atomic >= 0)
+        {
+            // An atomic inline's object replacement character: no font glyph, an advance of its
+            // margin box, and its line-box halves as the glyph's box metrics.
+            glyphs.Add(new ShapeGlyph
+            {
+                Start = startRun,
+                End = endRun,
+                XAdvance = attrs.AtomicWidth,
+                FontId = attrs.FontId ?? default,
+                GlyphId = 0,
+                Metadata = attrs.Metadata,
+                Metrics = attrs.Metrics,
+            });
+            return;
+        }
+
         FaceRecord? selected = attrs.FontId is { } id ? _database.Face(id) : null;
 
         // The fallback order walks every face of the database, and a run with a selected face
@@ -649,7 +910,7 @@ public sealed class TextShaper(FontDatabase database)
 
         FaceRecord first = selected ?? order![0];
         int glyphStart = glyphs.Count;
-        List<int> missing = ShapeFallback(glyphs, first, line, attrsList, startRun, endRun, spanRtl);
+        List<int> missing = ShapeFallback(glyphs, first, line, attrsList, startRun, endRun, spanRtl, fallback: false);
 
         int next = 0;
         while (missing.Count > 0)
@@ -672,7 +933,8 @@ public sealed class TextShaper(FontDatabase database)
             }
 
             List<ShapeGlyph> fallbackGlyphs = [];
-            List<int> fallbackMissing = ShapeFallback(fallbackGlyphs, font, line, attrsList, startRun, endRun, spanRtl);
+            List<int> fallbackMissing = ShapeFallback(
+                fallbackGlyphs, font, line, attrsList, startRun, endRun, spanRtl, fallback: true);
 
             int fb = 0;
             while (fb < fallbackGlyphs.Count)
@@ -741,7 +1003,8 @@ public sealed class TextShaper(FontDatabase database)
         AttrsList attrsList,
         int startRun,
         int endRun,
-        bool spanRtl)
+        bool spanRtl,
+        bool fallback)
     {
         string run = line[startRun..endRun];
         TextAttrs attrs = attrsList.GetSpan(startRun);
@@ -777,6 +1040,7 @@ public sealed class TextShaper(FontDatabase database)
                 startRun,
                 endRun,
                 spanRtl,
+                fallback,
                 buffer.GetGlyphInfoSpan(),
                 buffer.GetGlyphPositionSpan());
         }
@@ -800,10 +1064,12 @@ public sealed class TextShaper(FontDatabase database)
         int startRun,
         int endRun,
         bool spanRtl,
+        bool fallback,
         ReadOnlySpan<GlyphInfo> infos,
         ReadOnlySpan<GlyphPosition> positions)
     {
         float fontScale = font.UnitsPerEm;
+        float defaultSize = attrsList.Defaults.Metrics?.FontSize ?? 0f;
 
         List<int> missing = [];
         int glyphStart = glyphs.Count;
@@ -831,11 +1097,39 @@ public sealed class TextShaper(FontDatabase database)
                 }
             }
 
+            // DEVIATION from crates/obscura-render/src/inline.rs (cosmic-text), which treats a
+            // fallback face like the primary one. Chromium on Linux does not, in two ways that
+            // CJK text makes visible on every line (measured on Chromium 141 with Liberation
+            // Sans primary and Noto Sans CJK SC as the only CJK face):
+            // - a glyph from a fallback face advances by whole pixels: ten Hangul syllables
+            //   (920 units) are 150px at 16px and 120px at 13px, where the same text with Noto
+            //   Sans CJK SC as the primary face is 147.2px; a DejaVu check mark is 13px as
+            //   fallback and 13.41px as primary;
+            // - with `line-height: normal`, the fallback face's own leaded ascent and descent
+            //   join the box's line-box contribution (Blink's AccumulateUsedFonts), so a
+            //   Liberation Sans line holding Chinese is 24px at 16px, not 18px.
+            // A fixed line-height is not affected. See "Known deviations" in todo.md.
+            TextMetrics? metrics = glyphAttrs.Metrics;
+            float advance = position.XAdvance / fontScale;
+            if (fallback)
+            {
+                float size = metrics?.FontSize ?? defaultSize;
+                if (size > 0f)
+                {
+                    advance = F32.Round(advance * size) / size;
+                }
+
+                if (metrics is { LineHeightNormal: true } boxMetrics)
+                {
+                    metrics = WithFallbackFaceMetrics(boxMetrics, font.Metrics);
+                }
+            }
+
             glyphs.Add(new ShapeGlyph
             {
                 Start = startGlyph,
                 End = endRun,
-                XAdvance = (position.XAdvance / fontScale) + letterSpacing,
+                XAdvance = advance + letterSpacing,
                 YAdvance = position.YAdvance / fontScale,
                 XOffset = position.XOffset / fontScale,
                 YOffset = position.YOffset / fontScale,
@@ -848,7 +1142,8 @@ public sealed class TextShaper(FontDatabase database)
                 Color = glyphAttrs.Color,
                 Metadata = glyphAttrs.Metadata,
                 FakeItalic = glyphAttrs.FakeItalic,
-                Metrics = glyphAttrs.Metrics,
+                FakeBold = SynthesizesBold(font, glyphAttrs.Weight, fallback),
+                Metrics = metrics,
             });
         }
 
@@ -878,6 +1173,33 @@ public sealed class TextShaper(FontDatabase database)
 
         return missing;
     }
+
+    /// <summary>
+    /// A box's line-box contribution united with a fallback face's own leaded ascent and
+    /// descent, as Blink's <c>InlineBoxState::AccumulateUsedFonts</c> does for
+    /// <c>line-height: normal</c>.
+    /// </summary>
+    internal static TextMetrics WithFallbackFaceMetrics(TextMetrics box, FaceMetrics face)
+    {
+        float lineHeight = FontAssets.NormalLineHeight(box.FontSize, face);
+        (float above, float below) = FontAssets.LineBoxHalves(box.FontSize, lineHeight, face);
+        float shift = box.LineRelative ? 0f : box.Shift;
+        return box with
+        {
+            Above = F32.Max(box.Above, above + shift),
+            Below = F32.Max(box.Below, below - shift),
+        };
+    }
+
+    /// <summary>
+    /// Whether Chromium would embolden this glyph. A face reached through fallback is
+    /// emboldened for any request of 600 or more; the primary face only when the request is
+    /// more than 200 above its own weight (measured on Chromium 141 with Noto Sans CJK SC
+    /// Regular: as fallback 600 is bold, as the named family 600 is regular and 700 bold).
+    /// The advance does not change in either case.
+    /// </summary>
+    private static bool SynthesizesBold(FaceRecord font, ushort weight, bool fallback) =>
+        font.SynthesizesBold && (fallback ? weight >= 600 : weight > font.Weight + 200);
 
     /// <summary>
     /// The canonical axis tuple one span shapes with.

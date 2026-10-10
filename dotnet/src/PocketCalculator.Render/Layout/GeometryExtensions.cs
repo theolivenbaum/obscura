@@ -273,6 +273,81 @@ public static class GeometryExtensions
         return s;
     }
 
+    /// <summary>
+    /// <see cref="MaybeApplyAspectRatio(Size{float?}, float?)"/> for an outer (border-box)
+    /// size whose ratio applies to the box <paramref name="adjustment"/> inside it: the
+    /// content box of a replaced element's natural ratio (CSS Sizing 4, `aspect-ratio: auto`).
+    /// </summary>
+    public static Size<float?> MaybeApplyAspectRatio(this Size<float?> s, float? aspectRatio, Size<float> adjustment)
+    {
+        if (aspectRatio is not { } ratio || !float.IsFinite(ratio) || ratio <= 0.0f)
+        {
+            return s;
+        }
+
+        if (s.Width is { } width && !s.Height.HasValue)
+        {
+            return new Size<float?>(width, (Sys.F32Max(width - adjustment.Width, 0.0f) / ratio) + adjustment.Height);
+        }
+
+        if (!s.Width.HasValue && s.Height is { } height)
+        {
+            return new Size<float?>((Sys.F32Max(height - adjustment.Height, 0.0f) * ratio) + adjustment.Width, height);
+        }
+
+        return s;
+    }
+
+    /// <summary>
+    /// Transfer a min or max size constraint through the aspect ratio into the other axis, the
+    /// way CSS Sizing 4 does it: only into an axis whose preferred size is auto, and a
+    /// transferred minimum is capped by that axis's own maximum (a transferred maximum floored
+    /// by its own minimum).
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from vendor/taffy, which applies <see cref="MaybeApplyAspectRatio"/> to the
+    /// min and max sizes unconditionally. That made <c>width:120px; height:24px;
+    /// max-height:20px</c> on a 150x36 image 83x20 (Chromium 120x20: a definite width is not
+    /// limited by a max-height), <c>min-width:200px</c> beside a definite height 200x48
+    /// (Chromium 200x24), and <c>min-width:200px; max-height:20px</c> on an auto/auto image
+    /// 200x48 (Chromium 200x20: the transferred min-height is capped by the max-height).
+    /// </remarks>
+    /// <param name="limit">The resolved min (or max) size, before any transfer.</param>
+    /// <param name="aspectRatio">The preferred aspect ratio, width over height.</param>
+    /// <param name="preferred">The resolved preferred size, before any transfer.</param>
+    /// <param name="opposite">The resolved max size for a minimum, or min size for a maximum.</param>
+    /// <param name="isMinimum">Whether <paramref name="limit"/> is a minimum.</param>
+    /// <param name="adjustment">The edges between the sizes given and the box the ratio applies to.</param>
+    public static Size<float?> TransferLimitThroughAspectRatio(
+        this Size<float?> limit,
+        float? aspectRatio,
+        Size<float?> preferred,
+        Size<float?> opposite,
+        bool isMinimum,
+        Size<float> adjustment = default)
+    {
+        if (aspectRatio is not { } ratio || !float.IsFinite(ratio) || ratio <= 0.0f)
+        {
+            return limit;
+        }
+
+        float? width = limit.Width;
+        float? height = limit.Height;
+        if (width is null && preferred.Width is null && limit.Height is { } fromHeight)
+        {
+            float transferred = (Sys.F32Max(fromHeight - adjustment.Height, 0.0f) * ratio) + adjustment.Width;
+            width = isMinimum ? transferred.MaybeMin(opposite.Width) : transferred.MaybeMax(opposite.Width);
+        }
+
+        if (height is null && preferred.Height is null && limit.Width is { } fromWidth)
+        {
+            float transferred = (Sys.F32Max(fromWidth - adjustment.Width, 0.0f) / ratio) + adjustment.Height;
+            height = isMinimum ? transferred.MaybeMin(opposite.Height) : transferred.MaybeMax(opposite.Height);
+        }
+
+        return new Size<float?>(width, height);
+    }
+
     /// <summary>Convert a <c>Size&lt;AvailableSpace&gt;</c> into a <c>Size&lt;float?&gt;</c>.</summary>
     public static Size<float?> IntoOptions(this Size<AvailableSpace> s) =>
         new(s.Width.IntoOption(), s.Height.IntoOption());

@@ -49,6 +49,11 @@ public static class RenderState
             state.AnimationTimeline.MaterializeStartCandidates(candidateDom);
         }
 
+        if (animationSample.Mode == AnimationSampleMode.DocumentTime)
+        {
+            state.AnimationTimeline.ResolvePendingWaapiStarts(animationSample.Time.Milliseconds);
+        }
+
         PreparedRender? previous = null;
         if (!incompatible && renderMedia == CssMediaType.Screen)
         {
@@ -58,6 +63,10 @@ public static class RenderState
 
         var mutations = state.PendingStyleMutations.ToArray();
         state.PendingStyleMutations.Clear();
+        if (PrepTrace && state.Dom is { } traced)
+        {
+            TracePrepare(traced, mutations, previous is not null);
+        }
 
         if (state.Dom is not { } dom)
         {
@@ -122,8 +131,11 @@ public static class RenderState
             state.AnimationTimeline.ClearStartCandidates();
         }
 
-        var connected = StateHelpers.ShadowIncludingConnectedNodes(dom);
-        state.AnimationTimeline.RetainNodes(connected.Contains);
+        // Built on the first question only: a document with no animation state asks none, and
+        // every forced layout read used to pay a whole-tree walk and set for it.
+        HashSet<NodeId>? connected = null;
+        state.AnimationTimeline.RetainNodes(
+            node => (connected ??= StateHelpers.ShadowIncludingConnectedNodes(dom)).Contains(node));
 
         state.PreparedRender = built;
         state.ResolvedScroll = null;
@@ -154,6 +166,150 @@ public static class RenderState
             && (prepared.AnimationSample() == state.AnimationSample
                 || prepared.CanReuseGeometryForAnimationSample(state.AnimationSample));
         return reusable ? state.PreparedRender : EnsurePreparedRender(state);
+    }
+
+    /// <summary>
+    /// A diagnostic: <c>POCKETCALCULATOR_PREP_TRACE=1</c> writes, for every prepare, the op that
+    /// forced it and the mutations it consumes to stderr.
+    /// </summary>
+    internal static readonly bool PrepTrace =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_PREP_TRACE") == "1";
+
+    /// <summary>The node the read being traced asked about (<see cref="PrepTrace"/> only).</summary>
+    [ThreadStatic]
+    internal static NodeId? TraceQuery;
+
+    /// <summary>Who dropped the prepared render (<see cref="PrepTrace"/> only).</summary>
+    internal static void TraceDrop()
+    {
+        var frames = Environment.StackTrace.Split('\n')
+            .Where(frame => frame.Contains("PocketCalculator.", StringComparison.Ordinal)
+                && !frame.Contains("TraceDrop", StringComparison.Ordinal)
+                && !frame.Contains("set_PreparedRender", StringComparison.Ordinal))
+            .Take(3)
+            .Select(frame => frame.Trim().Split('(')[0].Replace("at PocketCalculator.", "", StringComparison.Ordinal));
+        Console.Error.WriteLine($"DROP {string.Join(" <- ", frames)}");
+    }
+
+    private static void TracePrepare(DomTree dom, RetainedStyleMutation[] mutations, bool retained)
+    {
+        string op = "?";
+        foreach (string frame in Environment.StackTrace.Split('\n'))
+        {
+            int at = frame.IndexOf("Ops.RenderOps.", StringComparison.Ordinal);
+            if (at < 0)
+            {
+                at = frame.IndexOf("Ops.DomOps.", StringComparison.Ordinal);
+            }
+
+            if (at >= 0)
+            {
+                op = frame[(at + 4)..].Split('(')[0].Trim();
+                break;
+            }
+        }
+
+        string Describe(NodeId node)
+        {
+            if (dom.GetNode(node) is not { } n)
+            {
+                return $"#{node.Index}(gone)";
+            }
+
+            if (n.AsElement() is { } element)
+            {
+                string? id = n.GetAttribute("id");
+                string? cls = n.GetAttribute("class");
+                return $"{element.Name.Local}{(id is null ? "" : "#" + id)}{(cls is null ? "" : "." + cls.Split(' ')[0])}";
+            }
+
+            return n.IsText ? "text" : "node";
+        }
+
+        var parts = new List<string>();
+        foreach (RetainedStyleMutation mutation in mutations.Take(12))
+        {
+            parts.Add(mutation switch
+            {
+                RetainedStyleMutation.Attribute a => $"attr {Describe(a.Mutation.Node)} {a.Mutation.Name}={(dom.GetNode(a.Mutation.Node)?.GetAttribute(a.Mutation.Name) is { } v ? v[..Math.Min(v.Length, 80)] : "-")}",
+                RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Insert i } => $"insert {Describe(i.Node)} into {Describe(i.NewParent)}",
+                RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Remove r } => $"remove {Describe(r.Node)} from {Describe(r.OldParent)}",
+                RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Text t } => $"text in {(t.Parent is { } p ? Describe(p) : "?")}",
+                RetainedStyleMutation.Resource => "resource",
+                _ => mutation.GetType().Name,
+            });
+        }
+
+        string query = TraceQuery is { } asked ? Describe(asked) : "?";
+        Console.Error.WriteLine($"PREP {(retained ? "retained" : "full")} by {op} of {query} n={mutations.Length}: {string.Join(" | ", parts)}");
+    }
+
+    /// <summary>
+    /// The prepared render a box-existence or <c>offsetParent</c> read may consult while style
+    /// mutations are still pending (see <see cref="PreparedRender.TryRetainedOffsetParent"/>),
+    /// or null when the read should prepare as usual: nothing is pending (the geometry fast
+    /// path already answers), or the render is stale for any reason other than those mutations.
+    /// </summary>
+    internal static PreparedRender? PreparedWithPendingMutations(PocketCalculatorState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        // Pending animation start candidates are not checked, unlike EnsurePreparedGeometry: they
+        // are birth times for animations of the elements the next cascade restyles, and the
+        // answer is taken only for elements whose styles that cascade cannot change.
+        if (state.PendingStyleMutations.Count == 0
+            || state.PreparedRender is not { } prepared
+            || prepared.Viewport() != state.Viewport
+            || state.RenderMedia != CssMediaType.Screen)
+        {
+            return null;
+        }
+
+        var baseUrl = StateHelpers.DocumentBaseUrlMemoized(state);
+        return string.Equals(prepared.BaseUrl(), baseUrl, StringComparison.Ordinal)
+            && (prepared.AnimationSample() == state.AnimationSample
+                || prepared.CanReuseGeometryForAnimationSample(state.AnimationSample))
+            ? prepared
+            : null;
+    }
+
+    /// <summary>
+    /// The prepared render a layout-independent computed-style read may consult instead of
+    /// preparing (see <see cref="PreparedRender.TryRetainedComputedStyle"/>), or null. It must
+    /// be stale only by pending mutations, or by a document timeline that moved forward
+    /// (<paramref name="sampleAdvanced"/>), which only an element without running animations on
+    /// its chain may ignore. A render that is current needs no shortcut.
+    /// </summary>
+    internal static PreparedRender? PreparedForStaticStyle(PocketCalculatorState state, out bool sampleAdvanced)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        sampleAdvanced = false;
+        if (state.PreparedRender is not { } prepared
+            || prepared.Viewport() != state.Viewport
+            || state.RenderMedia != CssMediaType.Screen)
+        {
+            return null;
+        }
+
+        var current = prepared.AnimationSample();
+        var sample = state.AnimationSample;
+        if (current != sample)
+        {
+            if (current.Mode != AnimationSampleMode.DocumentTime
+                || sample.Mode != AnimationSampleMode.DocumentTime
+                || sample.Time.Milliseconds < current.Time.Milliseconds)
+            {
+                return null;
+            }
+
+            sampleAdvanced = true;
+        }
+        else if (state.PendingStyleMutations.Count == 0)
+        {
+            return null;
+        }
+
+        var baseUrl = StateHelpers.DocumentBaseUrlMemoized(state);
+        return string.Equals(prepared.BaseUrl(), baseUrl, StringComparison.Ordinal) ? prepared : null;
     }
 
     /// <summary>Samples the live document timeline once per host/HTML task.</summary>

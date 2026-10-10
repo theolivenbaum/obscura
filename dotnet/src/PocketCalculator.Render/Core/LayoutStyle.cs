@@ -234,6 +234,12 @@ public readonly record struct FilterFunction(
 /// <see cref="LayoutStyle"/>, with the same value it had before, and a write of the default
 /// value does not allocate this object. See "Known deviations" in todo.md.
 /// </remarks>
+/// <summary>
+/// <c>clip: rect(top, right, bottom, left)</c> in px offsets from the border box's top-left
+/// corner; a <c>null</c> side is <c>auto</c> (that border edge).
+/// </summary>
+public readonly record struct ClipRect(float? Top, float? Right, float? Bottom, float? Left);
+
 internal sealed class LayoutStyleRare
 {
     public BorderModel? BorderCascadeBase;
@@ -293,6 +299,10 @@ internal sealed class LayoutStyleRare
     public Dimension? FontSizeRaw;
 
     public Dimension? LetterSpacingRaw;
+
+    public ClipRect? Clip;
+
+    public string? MarkerText;
 
     /// <summary>A shallow copy; <see cref="LayoutStyle.Clone"/> deep-copies what needs it.</summary>
     public LayoutStyleRare Clone() => (LayoutStyleRare)MemberwiseClone();
@@ -371,6 +381,13 @@ public sealed class LayoutStyle
     /// </para>
     /// </remarks>
     internal bool DisplayAuthored;
+
+    /// <summary>
+    /// <c>display: list-item</c>: the UA display of <c>li</c>, and an authored
+    /// <c>list-item</c>. Only such a box generates a marker; an authored <c>display:
+    /// block</c> (or any other display) on an <c>li</c> removes it, as in Chromium.
+    /// </summary>
+    internal bool ListItemDisplay;
 
     /// <summary>
     /// The authored internal-table <c>display</c>, which this engine records and reports but
@@ -472,6 +489,26 @@ public sealed class LayoutStyle
     /// appearance too. See "Known deviations" in todo.md.
     /// </remarks>
     internal bool NativeControlAppearance;
+
+    /// <summary>
+    /// The cascaded <c>appearance</c> / <c>-webkit-appearance</c> keyword, lower-cased, or
+    /// <c>null</c> when no author rule set one.
+    /// </summary>
+    internal string? AppearanceSpecified;
+
+    /// <summary>
+    /// The computed <c>appearance</c>: <c>auto</c> on a form control the user-agent sheet
+    /// gives native appearance, <c>none</c> elsewhere, or the author's keyword. Settled at
+    /// the end of the cascade by <see cref="ComputedStyle.AdjustFormControlStyle"/>.
+    /// </summary>
+    internal string ComputedAppearance = "none";
+
+    /// <summary>
+    /// A form control whose computed <c>display</c> stays <c>inline</c> (its appearance is
+    /// <c>none</c>) but which is laid out as an atomic inline-block, as Chromium does for
+    /// every button and form control. Only the <c>getComputedStyle</c> projection reads it.
+    /// </summary>
+    internal bool ReportsInlineDisplay;
 
     /// <summary>
     /// The computed <c>table-layout: fixed</c> value. The fixed algorithm is only activated
@@ -840,6 +877,18 @@ public sealed class LayoutStyle
     public Edges Padding;
 
     /// <summary>
+    /// <see cref="Padding"/> as it was before a post-layout pass wrote the used percentage
+    /// padding into it; see <c>DomPasses.RestorePaddingBeforeUsedSync</c>.
+    /// </summary>
+    internal Edges? PaddingBeforeUsedSync;
+
+    /// <summary>
+    /// The used padding the previous layout wrote, set aside while a retained pass decides
+    /// whether to keep that layout; see <c>DomPasses.ReapplyPaddingUsedByPreviousLayout</c>.
+    /// </summary>
+    internal Edges? PaddingUsedByPreviousLayout;
+
+    /// <summary>
     /// Percentage padding per side (top, right, bottom, left) as a 0..1 fraction, <c>null</c>
     /// when the side is a fixed length.
     /// </summary>
@@ -939,6 +988,38 @@ public sealed class LayoutStyle
     /// <c>null</c> is the computed <c>none</c> value.
     /// </summary>
     public ClipPathPolygon? ClipPath;
+
+    /// <summary>
+    /// The text a <c>::marker { content: "..." }</c> rule gives this list item's marker, or
+    /// <c>null</c> for the list-style marker. An empty string suppresses the marker.
+    /// </summary>
+    public string? MarkerText
+    {
+        get => m_rare?.MarkerText;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.MarkerText = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The CSS 2.1 <c>clip: rect(...)</c> property. <c>null</c> is <c>auto</c>; it applies only
+    /// to an absolutely positioned box (CSS Masking 1 section 9.1).
+    /// </summary>
+    public ClipRect? Clip
+    {
+        get => m_rare?.Clip;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.Clip = value;
+            }
+        }
+    }
 
     /// <summary>RGBA for the paint step. Parsed always (cheap), used only with paint.</summary>
     public RgbaColor? BackgroundColor;
@@ -1346,14 +1427,46 @@ public sealed class LayoutStyle
     public List<FontVariationSetting>? FontVariationSettings;
 
     /// <summary>
-    /// Inherited <c>text-align</c>, represented with the matching horizontal alignment
-    /// keywords.
+    /// Computed inherited <c>text-align</c> keyword; <c>null</c> during cascade means inherit,
+    /// and after the inheritance pass means the initial <c>start</c>.
+    /// </summary>
+    public TextAlignKeyword? TextAlignKeyword;
+
+    /// <summary>
+    /// Computed inherited <c>text-align-last</c>; <c>null</c> is <c>auto</c> (and inherit during
+    /// cascade).
+    /// </summary>
+    public TextAlignKeyword? TextAlignLast;
+
+    /// <summary>
+    /// Cascade only: <c>text-align-last: auto</c> was declared, which stops inheritance where a
+    /// <c>null</c> <see cref="TextAlignLast"/> alone would inherit.
+    /// </summary>
+    public bool TextAlignLastAuto;
+
+    /// <summary>
+    /// <c>text-align</c> as the flex alignment the line-box stand-ins use (an inline run's row
+    /// wrapper, an aligned block's column), resolved against this box's own direction. Those
+    /// containers carry the same <c>direction</c>, so flex-start is the start side: right to
+    /// left, <c>left</c> is flex-end and <c>right</c> flex-start.
     /// </summary>
     /// <remarks>
     /// Kept separate from flex/grid <c>align-items</c>: using one field for both made
     /// <c>text-align:left</c> shrink-wrap flex children.
+    /// DEVIATION from crates/obscura-render/src/style.rs, which stores this flex value itself
+    /// and maps <c>left</c>/<c>start</c>/<c>justify</c> to flex-start and <c>right</c>/<c>end</c>
+    /// to flex-end whatever the direction, so right-to-left text started at the left
+    /// (Chromium 141 starts a <c>dir=rtl</c> paragraph at the right).
     /// </remarks>
-    public Layout.AlignItems? TextAlign;
+    public Layout.AlignItems? TextAlign => TextAlignKeyword switch
+    {
+        null => null,
+        Render.TextAlignKeyword.Center => Layout.AlignItems.Center,
+        Render.TextAlignKeyword.End => Layout.AlignItems.FlexEnd,
+        Render.TextAlignKeyword.Left => Direction == Layout.Direction.Rtl ? Layout.AlignItems.FlexEnd : Layout.AlignItems.FlexStart,
+        Render.TextAlignKeyword.Right => Direction == Layout.Direction.Rtl ? Layout.AlignItems.FlexStart : Layout.AlignItems.FlexEnd,
+        _ => Layout.AlignItems.FlexStart,
+    };
 
     /// <summary>Computed inherited <c>text-indent</c>.</summary>
     /// <remarks>
@@ -1381,6 +1494,13 @@ public sealed class LayoutStyle
     public Layout.AlignContent? JustifyContent;
 
     public float? FlexGrow;
+
+    /// <summary>
+    /// <see cref="FlexGrow"/> was written by <c>GrowTrailingAutoCells</c>, not by the cascade.
+    /// A retained style comes back into that pass with the value still set, and the pass must
+    /// recognise its own write rather than move on to the previous cell.
+    /// </summary>
+    internal bool FlexGrowFromTrailingCell;
 
     public float? FlexShrink;
 
@@ -1973,13 +2093,19 @@ public sealed class LayoutStyle
     /// <summary>`scrollbar-width: thin` gutter width, matching Chromium on this platform.</summary>
     internal const float ThinScrollbarGutter = 10f;
 
-    /// <summary><c>float: left|right</c>.</summary>
+    /// <summary><c>float: left|right</c>, physical (logical values are mapped by direction).</summary>
     /// <remarks>
-    /// True CSS float needs per-line reflow around the float's shape, which taffy's
-    /// block/flex/grid modes do not do; see the DOM float-zone grouping for the bounded
-    /// approximation this drives.
+    /// Laid out as a CSS float by the block formatting context (taffy's float context plus
+    /// the text engine's line boxes around it); see <c>DomBuild.BuildMixedBlock</c>.
     /// </remarks>
     public Float? Float;
+
+    /// <summary>
+    /// Bit 1: <see cref="Float"/> came from <c>inline-start</c>/<c>inline-end</c>; bit 2: so did
+    /// <see cref="Clear"/>. Both are stored as their left-to-right side and swapped for a
+    /// right-to-left element once its direction is known.
+    /// </summary>
+    public byte LogicalFloatClear;
 
     /// <summary><c>visibility: hidden|visible</c>, own value.</summary>
     /// <remarks>
@@ -2103,8 +2229,8 @@ public sealed class LayoutStyle
     public int? ZIndex;
 
     /// <summary>
-    /// <c>clear</c>, when set: this element moves below preceding floats on the given side(s),
-    /// ending their float zone.
+    /// <c>clear</c>, when set: this element moves below preceding floats on the given side(s)
+    /// (CSS 2.1 9.5.2 clearance).
     /// </summary>
     public Clear? Clear;
 
@@ -2240,6 +2366,20 @@ public sealed class LayoutStyle
     /// </remarks>
     public ListStyle? ListStyle;
 
+    /// <summary>
+    /// <c>list-style-position: inside</c> (or the <c>list-style</c> shorthand). Inherited;
+    /// <c>null</c> means inherit, resolved during the inheritance pass like
+    /// <see cref="ListStyle"/>. Not in crates/obscura-render, which draws every marker outside.
+    /// </summary>
+    public bool? ListStyleInside;
+
+    /// <summary>
+    /// The horizontal padding is still the UA sheet's <c>padding-inline-start: 40px</c> of a
+    /// list, which the top-down pass moves to the right in a right-to-left list. Cleared by any
+    /// author padding on the left or right.
+    /// </summary>
+    internal bool UaListPadding;
+
     /// <summary><c>line-height</c>. Inherited.</summary>
     /// <remarks>
     /// <c>null</c> means "not set, inherit"; resolved to a concrete value in the inheritance
@@ -2319,6 +2459,19 @@ public sealed class LayoutStyle
     /// inherit.
     /// </remarks>
     public bool? FontStyleItalic;
+
+    /// <summary>
+    /// The cascaded <c>font-variant-caps</c> keyword (<c>normal</c>, <c>small-caps</c>, ...),
+    /// <c>null</c> to inherit. Recorded and reported only: the port does not synthesise caps.
+    /// </summary>
+    public string? FontVariantCaps;
+
+    /// <summary>
+    /// The cascaded <c>font-stretch</c> as a fraction of normal width (0.75 for
+    /// <c>condensed</c>), <c>null</c> to inherit. Recorded and reported only: the embedded faces
+    /// have no width axis to select.
+    /// </summary>
+    public float? FontStretch;
 
     /// <summary><c>object-fit</c> for a replaced element (<c>&lt;img&gt;</c>).</summary>
     /// <remarks>

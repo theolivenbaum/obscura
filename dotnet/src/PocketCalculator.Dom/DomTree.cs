@@ -584,7 +584,7 @@ public sealed partial class DomTree
         // parents and root-to-host edges.
         var parentNode = Slot(parentId);
         var childNode = Slot(childId);
-        if (parentNode is null || childNode is null || _shadowRoots.ContainsKey(childId))
+        if (parentNode is null || childNode is null || _shadowRoots.ContainsKey(childId) || IsSecondaryDocument(childId))
         {
             return;
         }
@@ -624,6 +624,11 @@ public sealed partial class DomTree
         {
             SetSubtreeConnected(childId, true);
         }
+
+        if (_documents is { Count: > 0 })
+        {
+            AdoptOnInsert(parentId, childId);
+        }
     }
 
     public void InsertBefore(NodeId existingId, NodeId newSiblingId)
@@ -650,6 +655,7 @@ public sealed partial class DomTree
         // still needs this check because its hosted root is not present in the ordinary child list.
         if (Slot(newSiblingId) is null
             || _shadowRoots.ContainsKey(newSiblingId)
+            || IsSecondaryDocument(newSiblingId)
             || WouldCreateHostIncludingCycle(parentId, newSiblingId))
         {
             return;
@@ -691,6 +697,11 @@ public sealed partial class DomTree
         if (parentConnected && !childConnected)
         {
             SetSubtreeConnected(newSiblingId, true);
+        }
+
+        if (_documents is { Count: > 0 })
+        {
+            AdoptOnInsert(parentId, newSiblingId);
         }
     }
 
@@ -808,6 +819,7 @@ public sealed partial class DomTree
         // inherit an old host/root relationship.
         foreach (var id in nodesToRemove)
         {
+            ForgetManualSlotAssignment(id);
             if (_shadowRoots.Remove(id, out var root))
             {
                 if (_shadowRootsByHost.TryGetValue(root.Host, out var hosted) && hosted == id)
@@ -853,6 +865,7 @@ public sealed partial class DomTree
         // the entries do not outlive the node.
         ForgetDirtyFormState(id);
         _externalStylesheets?.Remove(id);
+        ForgetDocumentState(id);
     }
 
     /// <summary>
@@ -918,7 +931,18 @@ public sealed partial class DomTree
 
     public List<NodeId> Children(NodeId nodeId)
     {
-        var result = new List<NodeId>();
+        // Counted first so the list is allocated at its final size: layout asks for the children
+        // of every node on every pass, and growing each list by doubling was a tenth of a
+        // retained relayout (the discarded arrays and the copies). A childless node gets a list
+        // with no backing array at all.
+        int count = 0;
+        for (var probe = Slot(nodeId)?.FirstChild; probe is { } probeId && count <= _nodes.Count;
+            probe = Slot(probeId)?.NextSibling)
+        {
+            count++;
+        }
+
+        var result = new List<NodeId>(count);
         var current = Slot(nodeId)?.FirstChild;
         while (current is { } childId)
         {
@@ -1072,6 +1096,11 @@ public sealed partial class DomTree
             return null;
         }
 
+        if (_shadowRoots.TryGetValue(root, out var rootInfo) && rootInfo.ManualSlotAssignment)
+        {
+            return ManualAssignedSlot(node, root);
+        }
+
         foreach (var candidate in Descendants(root))
         {
             if (IsHtmlSlotElement(candidate)
@@ -1102,6 +1131,11 @@ public sealed partial class DomTree
         }
 
         var host = info.Host;
+        if (info.ManualSlotAssignment)
+        {
+            return ManualAssignedNodes(slot, host);
+        }
+
         var name = Slot(slot)?.GetAttribute("name") ?? "";
 
         bool IsSameNameSlot(NodeId candidate) =>
@@ -1380,6 +1414,16 @@ public sealed partial class DomTree
                 return pi.Data;
         }
 
+        // An element whose only child is one text node - every <style> as parsed - has that
+        // node's text as its text content: hand back the string itself rather than a copy, so
+        // a caller that asks on every render pass gets the same string while it is unchanged.
+        if (Slot(nodeId)?.FirstChild is { } only
+            && Slot(only) is { Data: TextData single } onlyNode
+            && onlyNode.NextSibling is null)
+        {
+            return single.Contents;
+        }
+
         var buf = new System.Text.StringBuilder();
         CollectText(nodeId, buf);
         return buf.ToString();
@@ -1534,6 +1578,23 @@ public sealed partial class DomTree
             PrepareClonedChildren(sourceChild, clonedNode, true, stack);
         }
 
+        // DOM's clone steps create the copy in the source's node document. A document's own
+        // clone is a new document of the same type (Chromium: an HTMLDocument without a
+        // browsing context, also for the page's document).
+        if (sourceNodeId == Document || IsSecondaryDocument(sourceNodeId))
+        {
+            (_documents ??= [])[clonedRoot] = new SecondaryDocument(
+                DocumentContentType(sourceNodeId) ?? "text/html", IsDocumentQuirks(sourceNodeId));
+            foreach (var child in Children(clonedRoot))
+            {
+                AdoptSubtree(child, clonedRoot);
+            }
+        }
+        else if (NodeDocumentOf(sourceNodeId) is var owner && owner != Document)
+        {
+            AdoptSubtree(clonedRoot, owner);
+        }
+
         return clonedRoot;
     }
 
@@ -1656,6 +1717,18 @@ public sealed partial class DomTree
 
     public void UpdateIdIndex(NodeId nodeId, string? oldId, string? newId)
     {
+        // A node of another document never enters the page's index, and leaves alone an entry
+        // that names a page node (DomTree.Documents.cs).
+        if (_documents is { Count: > 0 } && NodeDocumentOf(nodeId) != Document)
+        {
+            if (oldId is not null && _idIndex.TryGetValue(oldId, out var indexed) && indexed == nodeId)
+            {
+                _idIndex.Remove(oldId);
+            }
+
+            return;
+        }
+
         if (oldId is not null)
         {
             _idIndex.Remove(oldId);

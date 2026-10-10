@@ -41,6 +41,12 @@ public enum PseudoClass
     /// browsers use when history-based styling is suppressed for privacy.
     /// </summary>
     Visited,
+
+    /// <summary>
+    /// <c>:defined</c>: not a custom element candidate waiting for its upgrade (HTML). Port
+    /// addition; the reference engine has no custom element state and dropped every rule using it.
+    /// </summary>
+    Defined,
 }
 
 public enum PseudoElement

@@ -19,6 +19,18 @@ public sealed class Response
     public required IReadOnlyList<Uri> RedirectedFrom { get; init; }
 
     /// <summary>
+    /// The responses that redirected, in order, each with its status and headers.
+    /// </summary>
+    /// <remarks>
+    /// Port addition: Rust keeps only the URLs. CDP reports every hop of a document
+    /// navigation as a <c>Network.requestWillBeSent</c> carrying the previous hop's
+    /// <c>redirectResponse</c>, which needs the status and headers. Empty for a
+    /// response that was not redirected, and for one the transport did not build
+    /// (a fulfilled interception, a <c>file:</c> or <c>data:</c> URL).
+    /// </remarks>
+    public IReadOnlyList<RedirectHop> RedirectChain { get; init; } = [];
+
+    /// <summary>
     /// Decode the body as text, honoring the response charset.
     ///
     /// Uses the HTTP <c>Content-Type</c> header's <c>charset=</c> parameter, then for
@@ -40,6 +52,12 @@ public sealed class Response
     public bool IsHtml() =>
         ContentType()?.Contains("text/html", StringComparison.Ordinal) ?? false;
 }
+
+/// <summary>One redirect a request followed: the URL it asked for and the response that sent it on.</summary>
+/// <param name="Url">The URL this hop requested.</param>
+/// <param name="Status">The redirect status (3xx; a synthesized 307 for an HSTS upgrade).</param>
+/// <param name="Headers">The redirect response's headers, lowercased names.</param>
+public sealed record RedirectHop(Uri Url, int Status, IReadOnlyDictionary<string, string> Headers);
 
 /// <summary>The request as passed to interceptors and passive callbacks.</summary>
 public sealed class RequestInfo

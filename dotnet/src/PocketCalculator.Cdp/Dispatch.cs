@@ -234,6 +234,12 @@ public static class Dispatcher
             // A handler fault is still a protocol outcome; Rust's `Result` has no
             // third arm and a panic here would take the connection down.
             result = DomainResult.Err(ex.Message);
+            if (ex is not Domains.DomainError)
+            {
+                // Anything but a protocol error is a fault in the engine; its message alone
+                // ("Collection was modified ...") does not say where.
+                CdpLog.Warn($"{req.Method} failed: {ex}");
+            }
         }
         catch (OperationCanceledException) when (watchdog is not null)
         {
@@ -267,6 +273,7 @@ public static class Dispatcher
         DrainRuntimeEvents(ctx);
         DrainBindingCalls(ctx);
         DrainFrameEvents(ctx);
+        DrainDocumentLoads(ctx);
 
         if (parkedCommand is not null)
         {
@@ -356,6 +363,7 @@ public static class Dispatcher
             DrainRuntimeEvents(ctx);
             DrainBindingCalls(ctx);
             DrainFrameEvents(ctx);
+            DrainDocumentLoads(ctx);
             if (result.IsOk)
             {
                 return CdpResponse.Success(parked.Id, result.Value, parked.SessionId);
@@ -427,7 +435,10 @@ public static class Dispatcher
                             {
                                 ["type"] = console.Event.Kind,
                                 ["args"] = CloneArray(console.Event.Args),
-                                ["executionContextId"] = executionContextId,
+                                // An isolated world's call carries the world's context.
+                                ["executionContextId"] = console.Event.ContextKey != 0
+                                    ? console.Event.ContextKey
+                                    : executionContextId,
                                 ["timestamp"] = console.Event.Timestamp,
                             }),
                         RuntimeEvent.Exception exception => (
@@ -670,6 +681,70 @@ public static class Dispatcher
     /// after every dispatch, reports a frame whenever it actually appears instead
     /// of only at navigation, and is the same drain point binding calls use.
     /// </remarks>
+    /// <summary>
+    /// Report the loads script caused by reopening a loaded document
+    /// (<c>document.open()</c>, <c>write()</c>, <c>close()</c>) the way Chromium does: the
+    /// document keeps its loader and runs its lifecycle again, so each load is
+    /// <c>init</c>, <c>DOMContentLoaded</c> and <c>load</c> under the current loader id,
+    /// with no <c>Page.frameNavigated</c> and no new execution context.
+    /// </summary>
+    /// <remarks>
+    /// Port addition; the Rust engine reports nothing, and Playwright's <c>setContent</c>,
+    /// which waits for that <c>load</c>, hung until its timeout. Every session on the page
+    /// hears it, as with <see cref="DrainFrameEvents"/>. <c>networkIdle</c> follows
+    /// straight away, as it does after a navigation here.
+    /// </remarks>
+    public static void DrainDocumentLoads(CdpContext ctx)
+    {
+        ArgumentNullException.ThrowIfNull(ctx);
+        Dictionary<string, List<string>>? pageToSessions = null;
+        foreach (var page in ctx.Pages)
+        {
+            var loads = page.TakeScriptDocumentLoads();
+            if (loads == 0)
+            {
+                continue;
+            }
+
+            pageToSessions ??= SessionsByPage(ctx, ctx.Sessions.Keys);
+            if (!pageToSessions.TryGetValue(page.Id, out var sessions))
+            {
+                continue;
+            }
+
+            var loaderId = ctx.CurrentLoaderIds.TryGetValue(page.Id, out var current)
+                ? current
+                : $"loader-blank-{page.Id}";
+            for (var i = 0; i < loads; i++)
+            {
+                var ts = (DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds;
+                foreach (var sessionId in sessions)
+                {
+                    ctx.PendingEvents.Add(Lifecycle(page.FrameId, loaderId, "init", ts, sessionId));
+                    ctx.PendingEvents.Add(CdpEvent.WithSession(
+                        "Page.domContentEventFired", new JsonObject { ["timestamp"] = ts }, sessionId));
+                    ctx.PendingEvents.Add(Lifecycle(page.FrameId, loaderId, "DOMContentLoaded", ts, sessionId));
+                    ctx.PendingEvents.Add(CdpEvent.WithSession(
+                        "Page.loadEventFired", new JsonObject { ["timestamp"] = ts }, sessionId));
+                    ctx.PendingEvents.Add(Lifecycle(page.FrameId, loaderId, "load", ts, sessionId));
+                    ctx.PendingEvents.Add(Lifecycle(page.FrameId, loaderId, "networkIdle", ts, sessionId));
+                }
+            }
+        }
+
+        static CdpEvent Lifecycle(string frameId, string loaderId, string name, double ts, string sessionId) =>
+            CdpEvent.WithSession(
+                "Page.lifecycleEvent",
+                new JsonObject
+                {
+                    ["frameId"] = frameId,
+                    ["loaderId"] = loaderId,
+                    ["name"] = name,
+                    ["timestamp"] = ts,
+                },
+                sessionId);
+    }
+
     public static void DrainFrameEvents(CdpContext ctx)
     {
         ArgumentNullException.ThrowIfNull(ctx);

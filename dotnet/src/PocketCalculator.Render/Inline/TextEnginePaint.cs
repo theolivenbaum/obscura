@@ -99,11 +99,14 @@ public sealed partial class TextEngine
             int lineSourceStart = run.LineIndex < lineSourceStarts.Count ? lineSourceStarts[run.LineIndex] : 0;
             int lineSourceEnd = lineSourceStart + run.Text.Length;
             float inlineAlignment = InlineGeometry.LineEdgeAlignmentShift(item, lineSourceStart, lineSourceEnd);
+            float[]? visualShifts = InlineGeometry.VisualEdgeShifts(item, run, lineSourceStart, lineSourceEnd);
+            int glyphIndex = -1;
             float baseY = run.LineY;
             (float X0, float X1, float FontSize, RgbaColor Color, (float X, float Y) Relative)? segment = null;
 
             foreach (LayoutGlyph glyph in run.Glyphs)
             {
+                glyphIndex++;
                 // Keep decoration and background-clip bounds in lockstep with glyph painting. A
                 // truncated glyph must not leave an underline tail or expand a gradient's
                 // sampling bounds past the separately painted ellipsis marker.
@@ -114,16 +117,35 @@ public sealed partial class TextEngine
                     continue;
                 }
 
+                // An atomic inline's box paints itself; its glyph holds only its place.
+                if (InlineGeometry.IsAtomic(glyph.Metadata))
+                {
+                    if (segment is { } open)
+                    {
+                        underlines.Add((
+                            open.X0,
+                            open.X1,
+                            baseY + open.Relative.Y + F32.Max(open.FontSize * 0.12f, 1f),
+                            F32.Max(open.FontSize / 14f, 1f),
+                            open.Color));
+                        segment = null;
+                    }
+
+                    continue;
+                }
+
                 (float X, float Y) relative = InlineGeometry.GlyphRelativeOffset(
                     item.RelativeOwnerRanges,
                     lineSourceStart,
                     glyph.Start,
                     glyph.End);
-                relative.X += inlineAlignment + InlineGeometry.LineAdvanceBeforeText(
-                    item,
-                    lineSourceStart + glyph.Start,
-                    lineSourceStart,
-                    lineSourceEnd);
+                relative.X += inlineAlignment + (visualShifts is not null
+                    ? visualShifts[glyphIndex]
+                    : InlineGeometry.LineAdvanceBeforeText(
+                        item,
+                        lineSourceStart + glyph.Start,
+                        lineSourceStart,
+                        lineSourceEnd));
 
                 bool underlined = (glyph.Metadata & InlineGeometry.MetaUnderline) != 0;
                 if (InlineGeometry.MetadataFill(glyph.Metadata) is { } fillIndex
@@ -216,12 +238,20 @@ public sealed partial class TextEngine
             int lineSourceStart = run.LineIndex < lineSourceStarts.Count ? lineSourceStarts[run.LineIndex] : 0;
             int lineSourceEnd = lineSourceStart + run.Text.Length;
             float inlineAlignment = InlineGeometry.LineEdgeAlignmentShift(item, lineSourceStart, lineSourceEnd);
+            float[]? visualShifts = InlineGeometry.VisualEdgeShifts(item, run, lineSourceStart, lineSourceEnd);
+            int glyphIndex = -1;
 
             foreach (LayoutGlyph glyph in run.Glyphs)
             {
+                glyphIndex++;
                 if (item.Marker is { } marker
                     && marker.LineIndex == lineIndex
                     && glyph.X + lineOffset + glyph.W > marker.ContentEnd)
+                {
+                    continue;
+                }
+
+                if (InlineGeometry.IsAtomic(glyph.Metadata))
                 {
                     continue;
                 }
@@ -231,11 +261,13 @@ public sealed partial class TextEngine
                     lineSourceStart,
                     glyph.Start,
                     glyph.End);
-                relative.X += inlineAlignment + InlineGeometry.LineAdvanceBeforeText(
-                    item,
-                    lineSourceStart + glyph.Start,
-                    lineSourceStart,
-                    lineSourceEnd);
+                relative.X += inlineAlignment + (visualShifts is not null
+                    ? visualShifts[glyphIndex]
+                    : InlineGeometry.LineAdvanceBeforeText(
+                        item,
+                        lineSourceStart + glyph.Start,
+                        lineSourceStart,
+                        lineSourceEnd));
 
                 PhysicalGlyph physical = glyph.Physical((lineOffset + relative.X, relative.Y), rasterScale);
                 RgbaColor glyphColor = glyph.Color ?? defaultColor;

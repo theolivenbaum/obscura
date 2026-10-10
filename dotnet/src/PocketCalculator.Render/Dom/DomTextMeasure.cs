@@ -47,8 +47,25 @@ internal static class DomTextMeasure
             return 0f;
         }
 
-        SKFont font = FallbackFont(family);
-        float width = MeasureAdvances(font, text, size, out int glyphCount);
+        string stem = FallbackFaceStem(family);
+        float width;
+        int glyphCount;
+        lock (Gate)
+        {
+            if (!Advances.TryGetValue((stem, text), out (float Units, float Divisor, int Glyphs) advance))
+            {
+                advance = UnitAdvances(FallbackFontByStem(stem), text);
+                if (Advances.Count >= MaxAdvances)
+                {
+                    Advances.Clear();
+                }
+
+                Advances[(stem, text)] = advance;
+            }
+
+            width = advance.Divisor > 0f ? advance.Units * size / advance.Divisor : 0f;
+            glyphCount = advance.Glyphs;
+        }
 
         // paint.rs adds one pixel per glyph as its synthetic-bold advance.
         if (isBold)
@@ -59,62 +76,53 @@ internal static class DomTextMeasure
         return width;
     }
 
-    private static float MeasureAdvances(SKFont font, string text, float size, out int glyphCount)
+    /// <summary>
+    /// The unscaled advance sum of each word measured, by face: the per-word fallback lays a
+    /// text node out as a leaf per word and measured every word with Skia on every pass (a
+    /// sixth of a retained box-tree build on nvidia.com). The width is the same function of
+    /// the sum, so a hit gives the same float.
+    /// </summary>
+    private static readonly Dictionary<(string Stem, string Text), (float Units, float Divisor, int Glyphs)> Advances = [];
+
+    private const int MaxAdvances = 1 << 16;
+
+    private static readonly Dictionary<string, string> StemsByFamily = new(StringComparer.Ordinal);
+
+    private static (float Units, float Divisor, int Glyphs) UnitAdvances(SKFont font, string text)
     {
-        // Page text sizes this buffer, so only a short label goes on the stack: a <select>
-        // option holding megabytes of text overflowed it and killed the process (SECURITY.md H5).
         char[]? rented = text.Length > MaxStackChars ? ArrayPool<char>.Shared.Rent(text.Length) : null;
         try
         {
             Span<char> buffer = rented is null ? stackalloc char[MaxStackChars] : rented;
-            return MeasureAdvances(font, text, size, buffer, out glyphCount);
-        }
-        finally
-        {
-            if (rented is not null)
+            int length = 0;
+            int glyphCount = 0;
+            foreach (System.Text.Rune rune in text.EnumerateRunes())
             {
-                ArrayPool<char>.Shared.Return(rented);
-            }
-        }
-    }
+                if (System.Text.Rune.IsControl(rune))
+                {
+                    continue;
+                }
 
-    private const int MaxStackChars = 256;
-
-    private static float MeasureAdvances(SKFont font, string text, float size, Span<char> buffer, out int glyphCount)
-    {
-        int length = 0;
-        // Rust advances one glyph per Unicode scalar value; C# strings are UTF-16, so the
-        // scalar count is taken over runes while the shaped buffer keeps its code units.
-        glyphCount = 0;
-        foreach (System.Text.Rune rune in text.EnumerateRunes())
-        {
-            if (System.Text.Rune.IsControl(rune))
-            {
-                continue;
+                length += rune.EncodeToUtf16(buffer[length..]);
+                glyphCount++;
             }
 
-            length += rune.EncodeToUtf16(buffer[length..]);
-            glyphCount++;
-        }
+            if (length == 0)
+            {
+                return (0f, 0f, glyphCount);
+            }
 
-        if (length == 0)
-        {
-            return 0f;
-        }
-
-        lock (Gate)
-        {
             // Measure in font units and scale once, rather than measuring at the
             // height-scaled size: Skia quantizes advances at a fractional size, which
             // left three of seven calibration cases a pixel off the reference, and
             // ab_glyph's own arithmetic is a single scale applied to unit advances.
+            // The caller holds Gate: the font is shared.
             int unitsPerEm = font.Typeface.UnitsPerEm;
             font.Size = unitsPerEm;
-            ReadOnlySpan<char> visible = buffer[..length];
-            ushort[] glyphs = font.GetGlyphs(visible);
+            ushort[] glyphs = font.GetGlyphs(buffer[..length]);
             if (glyphs.Length == 0)
             {
-                return 0f;
+                return (0f, 0f, glyphCount);
             }
 
             float[] widths = font.GetGlyphWidths(glyphs);
@@ -126,9 +134,18 @@ internal static class DomTextMeasure
 
             SKFontMetrics metrics = font.Metrics;
             float height = -metrics.Ascent + metrics.Descent;
-            return height > 0f ? units * size / height : units * size / unitsPerEm;
+            return (units, height > 0f ? height : unitsPerEm, glyphCount);
+        }
+        finally
+        {
+            if (rented is not null)
+            {
+                ArrayPool<char>.Shared.Return(rented);
+            }
         }
     }
+
+    private const int MaxStackChars = 256;
 
     /// <summary>
     /// The Skia font size that reproduces ab_glyph's <c>PxScale</c> for a CSS px size.
@@ -185,8 +202,6 @@ internal static class DomTextMeasure
         return scale;
     }
 
-    private static SKFont FallbackFont(string? family) => FallbackFontByStem(FallbackFaceStem(family));
-
     private static SKFont FallbackFontByStem(string stem)
     {
         lock (Gate)
@@ -217,6 +232,31 @@ internal static class DomTextMeasure
         {
             return "liberation-sans";
         }
+
+        lock (Gate)
+        {
+            if (StemsByFamily.TryGetValue(family, out string? known))
+            {
+                return known;
+            }
+        }
+
+        string stem = FallbackFaceStemUncached(family);
+        lock (Gate)
+        {
+            if (StemsByFamily.Count >= MaxAdvances)
+            {
+                StemsByFamily.Clear();
+            }
+
+            StemsByFamily[family] = stem;
+        }
+
+        return stem;
+    }
+
+    private static string FallbackFaceStemUncached(string family)
+    {
 
         foreach (string raw in family.Split(','))
         {

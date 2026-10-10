@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Json.Nodes;
 using PocketCalculator.Dom;
 using PocketCalculator.Js.Modules;
 using PocketCalculator.Net;
@@ -172,7 +173,7 @@ public static class DomOps
                 // changes through title.textContent must be reflected by
                 // document.title, not hidden behind the navigation-time snapshot.
                 var title = string.Empty;
-                if (dom.TryQuerySelector("title", out var titleId, out _) && titleId is { } found)
+                if (dom.TryQuerySelectorFrom(DocumentArg(dom, arg1), "title", out var titleId, out _) && titleId is { } found)
                 {
                     var parts = dom.TextContent(found)
                         .Split(TitleWhitespace, StringSplitOptions.RemoveEmptyEntries);
@@ -216,12 +217,18 @@ public static class DomOps
             case "document_encoding":
                 return SerdeJson.String(gs.Encoding);
 
+            // Port addition: the document-level commands take an optional document node id in
+            // arg1, for the secondary documents below (DomTree.Documents.cs). Empty is the page.
             case "document_element":
             {
-                foreach (var cid in dom.Children(dom.Document))
+                var documentNode = DocumentArg(dom, arg1);
+                var anyElement = documentNode != dom.Document;
+                foreach (var cid in dom.Children(documentNode))
                 {
+                    // A secondary document's element child is its document element whatever
+                    // its name (an XML document's root); the page keeps the html-only lookup.
                     var element = dom.GetNode(cid)?.AsElement();
-                    if (element is not null && string.Equals(element.Name.Local, "html", StringComparison.Ordinal))
+                    if (element is not null && (anyElement || string.Equals(element.Name.Local, "html", StringComparison.Ordinal)))
                     {
                         return Expose(dom, cid);
                     }
@@ -232,7 +239,7 @@ public static class DomOps
 
             case "document_doctype":
             {
-                foreach (var cid in dom.Children(dom.Document))
+                foreach (var cid in dom.Children(DocumentArg(dom, arg1)))
                 {
                     if (dom.GetNode(cid)?.Data is DoctypeData doctype)
                     {
@@ -259,7 +266,14 @@ public static class DomOps
                 // best-effort: it only registers nodes at creation time and does not
                 // update on reparent, so it can point to a detached clone while the
                 // live node is elsewhere in the tree.
-                var doc = dom.Document;
+                var doc = DocumentArg(dom, arg2);
+                if (doc != dom.Document)
+                {
+                    return dom.TryQuerySelectorFrom(doc, IdSelector(arg1), out var inDocument, out _) && inDocument is { } hitInDocument
+                        ? Expose(dom, hitInDocument)
+                        : "-1";
+                }
+
                 var nid = dom.GetElementById(arg1);
                 if (nid is { } indexed && dom.Ancestors(indexed).Contains(doc))
                 {
@@ -267,9 +281,7 @@ public static class DomOps
                 }
 
                 // Fall back to full scan for the live document.
-                var selector = "[id=\"" + arg1.Replace("\\", "\\\\", StringComparison.Ordinal)
-                    .Replace("\"", "\\\"", StringComparison.Ordinal) + "\"]";
-                return dom.TryQuerySelector(selector, out var scanned, out _) && scanned is { } hit
+                return dom.TryQuerySelector(IdSelector(arg1), out var scanned, out _) && scanned is { } hit
                     ? Expose(dom, hit)
                     : "-1";
             }
@@ -391,7 +403,10 @@ public static class DomOps
                 var name = string.Empty;
                 if (element is not null)
                 {
+                    // An HTML element is upper-cased in an HTML document only: an XHTML element
+                    // of an XML document keeps its case (DOM "HTML-uppercased qualified name").
                     name = string.Equals(element.Name.Ns, Namespaces.Html, StringComparison.Ordinal)
+                        && !InXmlDocument(dom, ParseNodeOrZero(arg1))
                         ? element.Name.Local.ToUpperInvariant()
                         : element.Name.Prefix is { } prefix
                             ? prefix + ":" + element.Name.Local
@@ -493,11 +508,23 @@ public static class DomOps
                 return "true";
             }
 
+            // A node of an XML document serializes as XML (DOM Parsing's fragment
+            // serializing algorithm); everything else as HTML.
             case "inner_html":
-                return SerdeJson.String(dom.InnerHtml(ParseNodeOrZero(arg1)));
+            {
+                var nodeId = ParseNodeOrZero(arg1);
+                return SerdeJson.String(InXmlDocument(dom, nodeId) ? dom.InnerXml(nodeId) : dom.InnerHtml(nodeId));
+            }
 
             case "outer_html":
-                return SerdeJson.String(dom.OuterHtml(ParseNodeOrZero(arg1)));
+            {
+                var nodeId = ParseNodeOrZero(arg1);
+                return SerdeJson.String(InXmlDocument(dom, nodeId) ? dom.OuterXml(nodeId) : dom.OuterHtml(nodeId));
+            }
+
+            // Port addition: XMLSerializer.serializeToString.
+            case "outer_xml":
+                return SerdeJson.String(dom.OuterXml(ParseNodeOrZero(arg1)));
 
             case "append_child":
             {
@@ -753,6 +780,13 @@ public static class DomOps
                 gs.WriteStream = null;
                 return "true";
 
+            // Port addition: document.close() ended the parser document.open() started on
+            // a loaded document, so the document has loaded again. The CDP layer reports
+            // the lifecycle events Chromium sends for that (Dispatcher.DrainDocumentLoads).
+            case "document_close":
+                gs.ScriptDocumentLoads++;
+                return "true";
+
             case "set_text_content":
             {
                 var nodeId = ParseNodeOrZero(arg1);
@@ -790,6 +824,71 @@ public static class DomOps
             {
                 var contents = dom.TemplateContents(ParseNodeOrZero(arg1));
                 return contents is { } id ? Expose(dom, id) : "-1";
+            }
+
+            // Port addition (DomTree.Documents.cs): a document without a browsing context, empty
+            // (arg1 its content type) or parsed from arg2. HTML for text/html, XML otherwise.
+            // Scripts parsed into it are already started, so moving one into the page does
+            // not run it, as in Chromium.
+            case "create_document":
+                return Expose(dom, dom.CreateDocument(arg1.Length == 0 ? "application/xml" : arg1));
+
+            case "parse_document":
+            {
+                var contentType = arg1.Length == 0 ? "text/html" : arg1;
+                var html = string.Equals(contentType, "text/html", StringComparison.Ordinal);
+                var parsed = html
+                    ? HtmlParsing.ParseInertDocument(arg2, dom.ContentByteBudget)
+                    : XmlParsing.Parse(arg2, dom.ContentByteBudget);
+                EnsureFragmentFits(dom, parsed);
+                var document = dom.CreateDocument(contentType, html && parsed.IsQuirks);
+                dom.ImportChildrenFrom(document, parsed, parsed.Document);
+                foreach (var child in dom.Children(document))
+                {
+                    StateHelpers.MarkScriptSubtreeStarted(gs, child);
+                }
+
+                return Expose(dom, document);
+            }
+
+            // A secondary document's content type and mode, or null for any other node.
+            case "document_info":
+            {
+                var nodeId = ParseNodeOrZero(arg1);
+                if (dom.DocumentContentType(nodeId) is not { } type)
+                {
+                    return "null";
+                }
+
+                var sb = new StringBuilder(64);
+                sb.Append("{\"contentType\":");
+                SerdeJson.AppendString(sb, type);
+                sb.Append(",\"quirks\":");
+                sb.Append(Bool(dom.IsDocumentQuirks(nodeId)));
+                sb.Append('}');
+                return sb.ToString();
+            }
+
+            // Node.ownerDocument: a secondary document's id, -1 for the page's document, and
+            // -2 for a document node, which has none.
+            case "owner_document":
+            {
+                var owner = dom.OwnerDocumentOf(ParseNodeOrZero(arg1));
+                return owner is not { } ownerId ? "-2" : ownerId != dom.Document ? Expose(dom, ownerId) : "-1";
+            }
+
+            // DOM "adopt" after the shim removed the node from its parent: arg2 is the new
+            // node document, empty for the page's.
+            case "adopt_node":
+            {
+                var nodeId = ParseNodeOrZero(arg1);
+                if (dom.GetNode(nodeId) is null)
+                {
+                    return "false";
+                }
+
+                dom.AdoptSubtree(nodeId, DocumentArg(dom, arg2));
+                return "true";
             }
 
             case "create_document_fragment":
@@ -852,8 +951,19 @@ public static class DomOps
 
             // arg1 = name, arg2 = public_id. system_id is stored only in the JS
             // wrapper, since neither current WPT test reads it back from the tree.
+            // Port addition: arg2 may be "public_id\0system_id", which keeps the system id
+            // in the tree (DOMImplementation.createDocumentType).
             case "create_doctype":
-                return Expose(dom, dom.NewNode(NodeData.Doctype(arg1, arg2, string.Empty)));
+            {
+                var (publicId, systemId) = arg2.Contains('\0', StringComparison.Ordinal) ? SplitOnceNul(arg2) : (arg2, string.Empty);
+                return Expose(dom, dom.NewNode(NodeData.Doctype(arg1, publicId, systemId)));
+            }
+
+            case "doctype_system_id":
+            {
+                var doctype = dom.GetNode(ParseNodeOrZero(arg1))?.Data as DoctypeData;
+                return SerdeJson.String(doctype?.SystemId ?? string.Empty);
+            }
 
             case "pi_target":
             {
@@ -911,6 +1021,121 @@ public static class DomOps
 
                 return SerdeJson.String(StateHelpers.RangeText(
                     dom, ParseNodeOrZero(parts[0]), so, ParseNodeOrZero(parts[2]), eo));
+            }
+
+            // Port addition (custom elements, bootstrap.js _ceCandidates): the shadow-including
+            // inclusive descendants of arg1 that can be custom elements, in shadow-including
+            // tree order, as a flat JSON array [nid, "localName", "isValue", ...] ("" for no is
+            // value). One crossing per insertion, removal or parse, and only once a page has
+            // defined an element.
+            case "ce_candidates":
+                return CustomElementCandidates(dom, ParseNodeOrZero(arg1));
+
+            // Port addition: customElements.define() registered arg1, so the document's parser
+            // stops after inserting such an element and the realm upgrades it there.
+            case "ce_define":
+                gs.DefinedCustomElements.Add(arg1);
+                return "true";
+
+            // Port addition: the custom element state ("custom", "failed") for :defined.
+            case "ce_state":
+            {
+                if (dom.GetNode(ParseNodeOrZero(arg1))?.Data is ElementData element)
+                {
+                    element.CustomElementState = arg2 switch
+                    {
+                        "custom" => CustomElementState.Custom,
+                        "failed" => CustomElementState.Failed,
+                        _ => CustomElementState.Unknown,
+                    };
+                }
+
+                return "true";
+            }
+
+            // Port addition: an is value given without an is attribute (createElement options).
+            case "ce_is":
+            {
+                if (dom.GetNode(ParseNodeOrZero(arg1))?.Data is ElementData element)
+                {
+                    element.IsValue = arg2;
+                }
+
+                return "true";
+            }
+
+            // Port addition (shadow DOM): arg1 is a shadow root's node. Answers
+            // "host\0mode\0flags" (flags: delegatesFocus, clonable, serializable, manual slot
+            // assignment, each "1" or "0"), or "" when arg1 is no shadow root. The shim wraps a
+            // declarative root it meets through parentNode with this, since node_type reports
+            // the root's backing node as a document.
+            case "shadow_root_host":
+            {
+                if (dom.ShadowRootInfo(ParseNodeOrZero(arg1)) is not { } info)
+                {
+                    return string.Empty;
+                }
+
+                return Expose(dom, info.Host) + "\0"
+                    + (info.Mode == ShadowRootMode.Open ? "open" : "closed") + "\0"
+                    + (info.DelegatesFocus ? "1" : "0") + (info.Clonable ? "1" : "0")
+                    + (info.Serializable ? "1" : "0") + (info.ManualSlotAssignment ? "1" : "0");
+            }
+
+            // Port addition: attachShadow's options for the root arg1, as the four flags above.
+            case "shadow_root_options":
+                return Bool(arg2.Length >= 4 && dom.SetShadowRootOptions(
+                    ParseNodeOrZero(arg1),
+                    manualSlotAssignment: arg2[3] == '1',
+                    delegatesFocus: arg2[0] == '1',
+                    clonable: arg2[1] == '1',
+                    serializable: arg2[2] == '1'));
+
+            // Port addition (HTMLSlotElement.assignedNodes): the slot's assigned nodes, the
+            // assignment the render layer uses, or "null" when arg1 is not a slot in a shadow tree.
+            case "slot_assigned_nodes":
+                return dom.AssignedNodes(ParseNodeOrZero(arg1)) is { } assignedNodes
+                    ? SerdeJson.IntArray(ExposeAll(dom, assignedNodes))
+                    : "null";
+
+            // Port addition (assignedSlot): the slot arg1 is assigned to, or -1.
+            case "assigned_slot":
+                return dom.AssignedSlot(ParseNodeOrZero(arg1)) is { } assignedSlot
+                    ? Expose(dom, assignedSlot)
+                    : "-1";
+
+            // Port addition (event dispatch): "1" when the tree has a shadow root, else "0",
+            // then DOM's "get the parent" from node arg1 up to its root, comma-separated, the
+            // start node left out. A node assigned to a slot steps to the slot (the entry is
+            // prefixed "s"), a shadow root to its host; anything else to its parent.
+            // bootstrap.js builds an event path from this in one call and decides itself where a
+            // non-composed event stops at a shadow root; with no shadow root it walks the
+            // parents it caches and asks again only after the tree changed.
+            case "event_path":
+                return EventParentChain(dom, ParseNodeOrZero(arg1));
+
+            // Port addition (slotchange): the slots whose assigned nodes changed since the
+            // last call, as a JSON array of node ids. bootstrap.js asks at the microtask where
+            // Chromium fires slotchange.
+            case "slot_changes":
+                return SerdeJson.IntArray(ExposeAll(dom, dom.TakeSlotChanges()));
+
+            // Port addition (HTMLSlotElement.assign): arg2 is a JSON array of node ids.
+            case "slot_assign":
+            {
+                var nodes = new List<NodeId>();
+                if (JsonNode.Parse(arg2) is JsonArray array)
+                {
+                    foreach (var item in array)
+                    {
+                        if (item is JsonValue value && value.TryGetValue<long>(out var raw) && raw >= 0 && raw <= uint.MaxValue)
+                        {
+                            nodes.Add(NodeId.New((uint)raw));
+                        }
+                    }
+                }
+
+                return Bool(dom.AssignSlottablesManually(ParseNodeOrZero(arg1), nodes));
             }
 
             // Connectivity is maintained incrementally by DomTree. Exposing the cached
@@ -975,6 +1200,11 @@ public static class DomOps
         // box/style loss keeps that latent state, but DOM removal, reparenting, and
         // subtree replacement reset the affected identities, matching Chromium's
         // lifecycle behavior.
+        if (state.Dom is { HasShadowRoots: true } slotTree)
+        {
+            NoteSlotMutation(slotTree, cmd, arg1, arg2);
+        }
+
         HashSet<NodeId> resetNodes = [];
         if (state.Dom is { } tree)
         {
@@ -1120,6 +1350,154 @@ public static class DomOps
         state.ResolvedScroll = null;
     }
 
+    /// <summary>
+    /// Port addition (slotchange): before a mutation runs, mark the shadow trees whose slot
+    /// assignment it can change, so <c>slot_changes</c> can compare against the state before it.
+    /// A host's child list or a child's <c>slot</c> attribute is a dictionary lookup; a slot moving
+    /// in or out of a shadow tree, or renamed, costs an ancestor walk.
+    /// </summary>
+    private static void NoteSlotMutation(DomTree dom, string cmd, string arg1, string arg2)
+    {
+        static NodeId? Node(string value) => uint.TryParse(value, out var raw) ? NodeId.New(raw) : null;
+
+        void Moving(NodeId moved, NodeId? newParent)
+        {
+            var oldParent = dom.GetNode(moved)?.Parent;
+            dom.MarkHostSlotsDirty(oldParent);
+            dom.MarkHostSlotsDirty(newParent);
+            if (dom.MayCarrySlot(moved))
+            {
+                dom.MarkContainingSlotsDirty(oldParent);
+                dom.MarkContainingSlotsDirty(newParent);
+            }
+        }
+
+        switch (cmd)
+        {
+            case "append_child":
+                if (Node(arg1) is { } parent && Node(arg2) is { } child)
+                {
+                    Moving(child, parent);
+                }
+
+                break;
+            case "insert_before":
+                if (Node(arg1) is { } inserted && Node(arg2) is { } reference)
+                {
+                    Moving(inserted, dom.GetNode(reference)?.Parent);
+                }
+
+                break;
+            case "remove_child":
+                if (Node(arg1) is { } removed)
+                {
+                    Moving(removed, null);
+                }
+
+                break;
+            case "set_attribute":
+            case "remove_attribute":
+            case "set_attribute_ns":
+            case "remove_attribute_ns":
+            {
+                if (Node(arg1) is not { } target)
+                {
+                    break;
+                }
+
+                var name = cmd switch
+                {
+                    "set_attribute" => arg2.Split('\0', 2)[0],
+                    "remove_attribute" => arg2,
+                    "set_attribute_ns" => arg2.Split('\0', 3) is { Length: > 1 } parts ? parts[1] : string.Empty,
+                    _ => SplitOnceNul(arg2).Local,
+                };
+                if (string.Equals(name, "slot", StringComparison.Ordinal))
+                {
+                    dom.MarkHostSlotsDirty(dom.GetNode(target)?.Parent);
+                }
+                else if (string.Equals(name, "name", StringComparison.Ordinal) && dom.IsHtmlSlotElement(target))
+                {
+                    dom.MarkContainingSlotsDirty(target);
+                }
+
+                break;
+            }
+
+            case "set_inner_html":
+            case "set_inner_html_context":
+            case "set_text_content":
+            case "set_fragment_html_executable":
+                // A text node's data never moves a slottable.
+                if (Node(arg1) is { } replaced && dom.GetNode(replaced) is { Data: ElementData or DocumentData })
+                {
+                    dom.MarkHostSlotsDirty(replaced);
+                    dom.MarkContainingSlotsDirty(replaced);
+                }
+
+                break;
+        }
+    }
+
+    private static string CustomElementCandidates(DomTree dom, NodeId root)
+    {
+        if (dom.GetNode(root) is null)
+        {
+            return "[]";
+        }
+
+        var sb = new StringBuilder("[");
+        var first = true;
+        var stack = new Stack<NodeId>();
+        stack.Push(root);
+        var visited = 0;
+        while (stack.TryPop(out var id))
+        {
+            if ((++visited & 1023) == 0)
+            {
+                WorkCancellation.ThrowIfCancellationRequested();
+            }
+
+            var node = dom.GetNode(id);
+            if (node is null)
+            {
+                continue;
+            }
+
+            if (node.Data is ElementData element
+                && string.Equals(element.Name.Ns, Namespaces.Html, StringComparison.Ordinal))
+            {
+                var isValue = element.IsValue ?? node.GetAttribute("is");
+                if (isValue is not null || element.Name.Local.Contains('-', StringComparison.Ordinal))
+                {
+                    if (!first)
+                    {
+                        sb.Append(',');
+                    }
+
+                    first = false;
+                    sb.Append(Expose(dom, id)).Append(',')
+                        .Append(SerdeJson.String(element.Name.Local)).Append(',')
+                        .Append(SerdeJson.String(isValue ?? string.Empty));
+                }
+            }
+
+            // Shadow-including preorder: the light children go on the stack first, so the
+            // shadow tree, pushed last, is walked right after its host.
+            for (var child = node.LastChild; child is { } c; child = dom.GetNode(c)?.PrevSibling)
+            {
+                stack.Push(c);
+            }
+
+            if (node.IsElement && dom.ShadowRootOf(id) is { } shadow)
+            {
+                stack.Push(shadow);
+            }
+        }
+
+        return sb.Append(']').ToString();
+    }
+
     private static NodeId ParseNodeOrZero(string value) =>
         NodeId.New(uint.TryParse(value, out var raw) ? raw : 0);
 
@@ -1135,6 +1513,79 @@ public static class DomOps
     }
 
     private static string Bool(bool value) => value ? "true" : "false";
+
+    /// <summary>The document a document-level command addresses: the page's unless a secondary document's id is given.</summary>
+    private static NodeId DocumentArg(DomTree dom, string arg) =>
+        arg.Length != 0 && uint.TryParse(arg, out var raw) && dom.IsSecondaryDocument(NodeId.New(raw))
+            ? NodeId.New(raw)
+            : dom.Document;
+
+    /// <summary>Whether a node belongs to a secondary document that is not an HTML document.</summary>
+    private static bool InXmlDocument(DomTree dom, NodeId node) =>
+        dom.HasSecondaryDocuments
+        && dom.NodeDocumentOf(node) is var document
+        && document != dom.Document
+        && !string.Equals(dom.DocumentContentType(document), "text/html", StringComparison.Ordinal);
+
+    private static string IdSelector(string id) =>
+        "[id=\"" + id.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal) + "\"]";
+
+    /// <summary>
+    /// The ancestors an event at <paramref name="start"/> propagates through (op_dom
+    /// <c>event_path</c>). The walk is capped like <c>Descendants()</c>, so a corrupt parent
+    /// chain cannot hang a dispatch.
+    /// </summary>
+    private static string EventParentChain(DomTree dom, NodeId start)
+    {
+        var shadow = dom.HasShadowRoots;
+        var sb = new StringBuilder();
+        sb.Append(shadow ? '1' : '0');
+        if (dom.GetNode(start) is null)
+        {
+            return sb.ToString();
+        }
+
+        var current = start;
+        var first = true;
+        for (var steps = 0; steps < 100_000; steps++)
+        {
+            NodeId next;
+            var viaSlot = false;
+            if (shadow && dom.ShadowRootInfo(current) is { } root)
+            {
+                next = root.Host;
+            }
+            else if (dom.GetNode(current)?.Parent is { } parent)
+            {
+                next = parent;
+                if (shadow && dom.ShadowRootOf(parent) is not null && dom.AssignedSlot(current) is { } slot)
+                {
+                    next = slot;
+                    viaSlot = true;
+                }
+            }
+            else
+            {
+                break;
+            }
+
+            if (!first)
+            {
+                sb.Append(',');
+            }
+
+            first = false;
+            if (viaSlot)
+            {
+                sb.Append('s');
+            }
+
+            sb.Append(Expose(dom, next));
+            current = next;
+        }
+
+        return sb.ToString();
+    }
 
     private static List<int> ExposeAll(DomTree dom, List<NodeId> ids)
     {

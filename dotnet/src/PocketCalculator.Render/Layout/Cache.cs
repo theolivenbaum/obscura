@@ -83,7 +83,22 @@ public sealed class Cache
     }
 
     /// <summary>Cached intermediate layout results.</summary>
-    private readonly record struct CacheEntry<T>(CacheKey Key, T Content);
+    /// <remarks>
+    /// <see cref="FloatContribution"/> and <see cref="Carried"/> are not in vendor/taffy; see
+    /// <see cref="GetCarried"/>.
+    /// </remarks>
+    /// <remarks>
+    /// <see cref="MinY"/> and <see cref="ClearSides"/> are the float-context reads of a
+    /// float-blind layout in a shared block formatting context, relative to the box's own
+    /// border-top; see <see cref="GetFloatBlind"/>.
+    /// </remarks>
+    private readonly record struct CacheEntry<T>(
+        CacheKey Key,
+        T Content,
+        float FloatContribution = 0f,
+        bool Carried = false,
+        float MinY = float.PositiveInfinity,
+        byte ClearSides = 0);
 
     /// <summary>The block-layout metadata required by a preliminary size contribution.</summary>
     private readonly record struct MeasureOutput(
@@ -264,15 +279,251 @@ public sealed class Cache
         }
     }
 
-    /// <summary>Store a computed size in the cache.</summary>
-    public void Store(in LayoutInput input, in LayoutOutput layoutOutput)
+    /// <summary>
+    /// Not in vendor/taffy. <see cref="Get"/> for a cache whose entries may have been carried
+    /// over from a previous pass (<c>TaffyTree.TransplantFrom</c>), answering also the
+    /// block-context float contribution the entry's computation left behind - but only the
+    /// first time a carried entry answers.
+    /// </summary>
+    /// <remarks>
+    /// A child laid out in its parent's block formatting context reports, besides its
+    /// <see cref="LayoutOutput"/>, a float-content height contribution through the shared
+    /// block context (<c>BlockContext.FloatedContentHeightContribution</c>), and taffy's cache
+    /// does not keep it: a cache hit contributes nothing. Within one pass that is the reference
+    /// behaviour, and the first request for a key is always computed. A carried entry answers
+    /// what would have been that first, computed request, so it hands back the contribution
+    /// once and behaves as an ordinary entry afterwards.
+    /// </remarks>
+    internal LayoutOutput? GetCarried(in LayoutInput input, out float? carriedContribution)
+    {
+        carriedContribution = null;
+        var key = KeyFrom(input);
+        switch (input.RunMode)
+        {
+            case RunMode.PerformLayout:
+                if (_finalLayoutEntry is { } entry && entry.Key == key)
+                {
+                    if (entry.Carried)
+                    {
+                        carriedContribution = entry.FloatContribution;
+                        _finalLayoutEntry = entry with { Carried = false };
+                    }
+
+                    return entry.Content;
+                }
+
+                return null;
+
+            case RunMode.ComputeSize:
+                if (_measureEntries is not { } entries)
+                {
+                    return null;
+                }
+
+                byte marginKey = VerticalMarginContextKey(input);
+                for (int i = 0; i < entries.Length; i++)
+                {
+                    if (entries[i] is not { } measure || !Matches(measure, key, marginKey))
+                    {
+                        continue;
+                    }
+
+                    if (measure.Carried)
+                    {
+                        carriedContribution = measure.FloatContribution;
+                        entries[i] = measure with { Carried = false };
+                    }
+
+                    return measure.Content.IntoLayoutOutput();
+                }
+
+                if (_overflow is { } overflow)
+                {
+                    for (int i = 0; i < _overflowCount; i++)
+                    {
+                        if (!Matches(overflow[i], key, marginKey))
+                        {
+                            continue;
+                        }
+
+                        if (overflow[i].Carried)
+                        {
+                            carriedContribution = overflow[i].FloatContribution;
+                            overflow[i] = overflow[i] with { Carried = false };
+                        }
+
+                        return overflow[i].Content.IntoLayoutOutput();
+                    }
+                }
+
+                return null;
+
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>
+    /// Not in vendor/taffy. <see cref="Get"/> for the cache of a box laid out in its parent's
+    /// block formatting context in a tree with floats, which holds only float-blind layouts
+    /// (<c>FloatDependencies</c>): besides the output, the float contribution its computation
+    /// left behind, handed back on every hit since such a layout used to be computed every
+    /// time, and what it read of the float context, relative to the box's border-top.
+    /// </summary>
+    internal LayoutOutput? GetFloatBlind(in LayoutInput input, out float contribution, out float minY, out byte clearSides)
+    {
+        contribution = 0f;
+        minY = float.PositiveInfinity;
+        clearSides = 0;
+        var key = KeyFrom(input);
+        switch (input.RunMode)
+        {
+            case RunMode.PerformLayout:
+                if (_finalLayoutEntry is { } entry && entry.Key == key)
+                {
+                    contribution = entry.FloatContribution;
+                    minY = entry.MinY;
+                    clearSides = entry.ClearSides;
+                    return entry.Content;
+                }
+
+                return null;
+
+            case RunMode.ComputeSize:
+                if (_measureEntries is not { } entries)
+                {
+                    return null;
+                }
+
+                byte marginKey = VerticalMarginContextKey(input);
+                for (int i = 0; i < entries.Length; i++)
+                {
+                    if (entries[i] is { } measure && Matches(measure, key, marginKey))
+                    {
+                        contribution = measure.FloatContribution;
+                        minY = measure.MinY;
+                        clearSides = measure.ClearSides;
+                        return measure.Content.IntoLayoutOutput();
+                    }
+                }
+
+                if (_overflow is { } overflow)
+                {
+                    for (int i = 0; i < _overflowCount; i++)
+                    {
+                        if (Matches(overflow[i], key, marginKey))
+                        {
+                            contribution = overflow[i].FloatContribution;
+                            minY = overflow[i].MinY;
+                            clearSides = overflow[i].ClearSides;
+                            return overflow[i].Content.IntoLayoutOutput();
+                        }
+                    }
+                }
+
+                return null;
+
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>Not in vendor/taffy. Stores a float-blind layout; see <see cref="GetFloatBlind"/>.</summary>
+    internal void StoreFloatBlind(
+        in LayoutInput input,
+        in LayoutOutput layoutOutput,
+        float contribution,
+        float minY,
+        byte clearSides)
     {
         var key = KeyFrom(input);
         switch (input.RunMode)
         {
             case RunMode.PerformLayout:
                 _isEmpty = false;
-                _finalLayoutEntry = new CacheEntry<LayoutOutput>(key, layoutOutput);
+                _finalLayoutEntry = new CacheEntry<LayoutOutput>(key, layoutOutput, contribution, false, minY, clearSides);
+                break;
+
+            case RunMode.ComputeSize:
+                _isEmpty = false;
+                int cacheSlot = ComputeCacheSlot(input.KnownDimensions, input.AvailableSpace);
+                _measureEntries ??= new CacheEntry<MeasureOutput>?[CacheSize];
+                if (_measureEntries[cacheSlot] is { } evicted)
+                {
+                    KeepEvicted(evicted);
+                }
+
+                _measureEntries[cacheSlot] = new CacheEntry<MeasureOutput>(
+                    key, MeasureOutput.New(input, layoutOutput), contribution, false, minY, clearSides);
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Not in vendor/taffy. Drops the final-layout entry: the box was just laid out again
+    /// without storing the result (or into another cache), so its descendants' stored layouts
+    /// no longer belong to that entry.
+    /// </summary>
+    internal void ClearFinalLayout()
+    {
+        if (_finalLayoutEntry is null)
+        {
+            return;
+        }
+
+        _finalLayoutEntry = null;
+        _isEmpty = IsEmpty();
+    }
+
+    /// <summary>
+    /// Not in vendor/taffy. Marks every entry as carried over from a previous pass; see
+    /// <see cref="GetCarried"/>.
+    /// </summary>
+    internal void MarkCarried()
+    {
+        if (_finalLayoutEntry is { } entry)
+        {
+            _finalLayoutEntry = entry with { Carried = true };
+        }
+
+        if (_measureEntries is { } entries)
+        {
+            for (int i = 0; i < entries.Length; i++)
+            {
+                if (entries[i] is { } measure)
+                {
+                    entries[i] = measure with { Carried = true };
+                }
+            }
+        }
+
+        if (_overflow is { } overflow)
+        {
+            for (int i = 0; i < _overflowCount; i++)
+            {
+                overflow[i] = overflow[i] with { Carried = true };
+            }
+        }
+    }
+
+    /// <summary>Store a computed size in the cache.</summary>
+    public void Store(in LayoutInput input, in LayoutOutput layoutOutput) => Store(input, layoutOutput, 0f);
+
+    /// <summary>
+    /// Store a computed size in the cache, with the block-context float contribution its
+    /// computation left behind (not in vendor/taffy; see <see cref="GetCarried"/>).
+    /// </summary>
+    internal void Store(in LayoutInput input, in LayoutOutput layoutOutput, float floatContribution)
+    {
+        var key = KeyFrom(input);
+        switch (input.RunMode)
+        {
+            case RunMode.PerformLayout:
+                _isEmpty = false;
+                _finalLayoutEntry = new CacheEntry<LayoutOutput>(key, layoutOutput, floatContribution);
                 break;
 
             case RunMode.ComputeSize:
@@ -285,7 +536,7 @@ public sealed class Cache
                 }
 
                 _measureEntries[cacheSlot] =
-                    new CacheEntry<MeasureOutput>(key, MeasureOutput.New(input, layoutOutput));
+                    new CacheEntry<MeasureOutput>(key, MeasureOutput.New(input, layoutOutput), floatContribution);
                 break;
 
             default:

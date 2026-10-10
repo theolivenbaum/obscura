@@ -30,15 +30,16 @@ public sealed class LayoutDeadlineTests : IDisposable
     [Fact]
     public void APathologicalLayoutEndsAtTheFetchTimeout()
     {
-        // Four chains of 700 nested floats laid out by one getBoundingClientRect(): about
-        // 25 s of layout inside a single op, even after nested floats were made quadratic.
+        // 20,000 paragraphs, each wrapping around a float, laid out by one
+        // getBoundingClientRect(): about 10 s of layout inside a single op. This used to be
+        // four chains of 700 nested floats, which took about 25 s with floats built as flex
+        // rows and about 1 s with real float layout, inside the 2 s timeout.
         var path = Path.Combine(_directory, "floats.html");
         File.WriteAllText(
             path,
-            "<!doctype html><body><script>for(let c=0;c<4;c++){let p=document.createElement('section');"
-            + "document.body.appendChild(p);for(let i=0;i<700;i++){"
-            + "const d=document.createElement('div');d.style.cssText='float:left;padding:1px';"
-            + "d.textContent='x';p.appendChild(d);p=d;}}document.body.getBoundingClientRect();"
+            "<!doctype html><body><script>for(let i=0;i<20000;i++){const p=document.createElement('p');"
+            + "p.innerHTML='text <span style=\"float:left;width:20px;height:30px\"></span>more words here';"
+            + "document.body.appendChild(p);}document.body.getBoundingClientRect();"
             + "document.title='finished';</script>");
 
         var clock = Stopwatch.StartNew();

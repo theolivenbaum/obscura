@@ -159,8 +159,21 @@ public sealed class WaapiAnimation
     public List<float>? LinearEasing;
 
     public float StartTimeMs;
+
+    /// <summary>
+    /// The start time is not resolved yet. DEVIATION from crates/obscura-js/src/ops.rs
+    /// op_waapi_create, which takes the wall clock at the <c>animate()</c> call as the start
+    /// time. Chromium leaves a new animation pending (currentTime 0) and resolves its start
+    /// time to the timeline time of the first frame rendered after it, so the port resolves
+    /// it at the next document-time style flush (<see cref="AnimationTimelineState.ResolvePendingWaapiStarts"/>).
+    /// </summary>
+    public bool StartPending;
     public float? HoldTimeMs;
     public WaapiPlayState PlayState;
+
+    /// <summary>Local time at <paramref name="documentTimeMs"/>: the hold time, 0 while the start is pending, else document time minus start.</summary>
+    internal float LocalTimeMs(float documentTimeMs) =>
+        HoldTimeMs ?? (StartPending ? 0f : F32.Max(documentTimeMs - StartTimeMs, 0f));
 
     public WaapiAnimation Clone() => new()
     {
@@ -171,6 +184,7 @@ public sealed class WaapiAnimation
         Easing = Easing is null ? null : (float[])Easing.Clone(),
         LinearEasing = LinearEasing is null ? null : [.. LinearEasing],
         StartTimeMs = StartTimeMs,
+        StartPending = StartPending,
         HoldTimeMs = HoldTimeMs,
         PlayState = PlayState,
     };
@@ -326,6 +340,30 @@ public sealed class AnimationTimelineState
 
     public bool CancelWaapi(ulong id) => _waapi.Remove(id);
 
+    /// <summary>
+    /// Resolves every pending Web Animation start time to <paramref name="documentTimeMs"/>,
+    /// the timeline time of the frame being prepared (see <see cref="WaapiAnimation.StartPending"/>).
+    /// </summary>
+    public void ResolvePendingWaapiStarts(float documentTimeMs)
+    {
+        if (!float.IsFinite(documentTimeMs))
+        {
+            return;
+        }
+
+        foreach (WaapiAnimation animation in _waapi.Values)
+        {
+            if (animation.StartPending)
+            {
+                animation.StartPending = false;
+                if (animation.HoldTimeMs is null)
+                {
+                    animation.StartTimeMs = documentTimeMs;
+                }
+            }
+        }
+    }
+
     public bool SetWaapiCurrentTime(ulong id, float documentTimeMs, float localTimeMs)
     {
         if (!_waapi.TryGetValue(id, out WaapiAnimation? animation))
@@ -336,6 +374,7 @@ public sealed class AnimationTimelineState
         float local = F32.Max(localTimeMs, 0f);
         animation.HoldTimeMs = local;
         animation.StartTimeMs = documentTimeMs - local;
+        animation.StartPending = false;
         return true;
     }
 
@@ -346,12 +385,17 @@ public sealed class AnimationTimelineState
             return false;
         }
 
-        float current = animation.HoldTimeMs ?? F32.Max(documentTimeMs - animation.StartTimeMs, 0f);
+        float current = animation.LocalTimeMs(documentTimeMs);
         switch (state)
         {
+            case WaapiPlayState.Running when animation.StartPending && animation.HoldTimeMs is null:
+                // animate() registers and then plays: a play of a pending animation leaves it
+                // pending, as in Chromium.
+                break;
             case WaapiPlayState.Running:
                 animation.StartTimeMs = documentTimeMs - current;
                 animation.HoldTimeMs = null;
+                animation.StartPending = false;
                 break;
             default:
                 animation.HoldTimeMs = current;
@@ -410,8 +454,7 @@ public sealed class AnimationTimelineState
                 continue;
             }
 
-            float local = animation.HoldTimeMs
-                ?? F32.Max(documentTime.Milliseconds - animation.StartTimeMs, 0f);
+            float local = animation.LocalTimeMs(documentTime.Milliseconds);
             yield return (animation, new AnimationSampleTime(local));
         }
     }
@@ -611,8 +654,7 @@ public sealed class AnimationTimelineState
             return false;
         }
 
-        float local = animation.HoldTimeMs
-            ?? F32.Max(documentTime.Milliseconds - animation.StartTimeMs, 0f);
+        float local = animation.LocalTimeMs(documentTime.Milliseconds);
         float end = animation.Timing.DelayMs
             + (animation.Timing.DurationMs * animation.Timing.IterationCount);
         return local < F32.Max(end, 0f);

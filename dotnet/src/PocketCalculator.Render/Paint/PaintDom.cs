@@ -205,6 +205,23 @@ internal static class PaintDomPainter
         return null;
     }
 
+    /// <summary>
+    /// Whether a box with no z-index layer of its own is still a stacking context because of
+    /// <c>contain: layout | paint</c> (or <c>content</c>/<c>strict</c>) or a
+    /// <c>will-change</c> that names a stacking property.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/paint.rs, which isolates only z-index, opacity
+    /// and transform roots. A <c>z-index: -1</c> descendant of such a box paints above the
+    /// box's ancestors' backgrounds, as in Chromium 141: msn.com's hero image is
+    /// <c>position: absolute; z-index: -1</c> inside a <c>contain: content</c> card and was
+    /// painted under the card's #333 background.
+    /// </remarks>
+    internal static bool IsolatesPaint(LayoutStyle style) =>
+        (style.ContainingBlockTriggers & (ContainingBlockTrigger.Contain | ContainingBlockTrigger.WillChange)) != 0
+        && style.Display != Display.None
+        && !style.DisplayContents;
+
     /// <summary>Whether this box participates in the float painting band.</summary>
     internal static bool IsEffectiveFloat(DomTree tree, DomLayout laid, NodeId id)
     {
@@ -391,8 +408,12 @@ internal static class PaintDomPainter
                 && HasAuthoredTransform(transformStyle);
             int? z = pass.SuppressStackingFor != nid ? StackingZIndex(tree, laid, nid) : null;
             bool isFloatRoot = pass.PaintRoot != nid && IsEffectiveFloat(tree, laid, nid);
+            bool isIsolationRoot = pass.PaintRoot != nid
+                && z is null
+                && laid.Styles.TryGetValue(nid, out LayoutStyle? isolationStyle)
+                && IsolatesPaint(isolationStyle);
 
-            if (isOpacityRoot || isTransformRoot)
+            if (isOpacityRoot || isTransformRoot || isIsolationRoot)
             {
                 consumed.Add(nid);
                 foreach (NodeId member in DomTraversal.RenderedDescendants(tree, nid))
@@ -454,8 +475,19 @@ internal static class PaintDomPainter
             }
         }
 
+        // A sub-pass paints one stacking context (or float) rooted at PaintRoot. CSS 2.1
+        // Appendix E paints the root's own background (step 1) before its negative z-index
+        // layers (step 3); the root used to sit in `normal` behind them, so a `z-index: -1`
+        // child vanished under its stacking context's own background.
+        List<NodeId> rootFirst = [];
+        if (pass.PaintRoot is { } subRoot && negLayers.Count != 0 && normal.Remove(subRoot))
+        {
+            rootFirst.Add(subRoot);
+        }
+
         List<NodeId> paintOrder =
         [
+            .. rootFirst,
             .. negLayers.OrderBy(entry => entry.Z).Select(entry => entry.Node),
             .. normal,
             .. floatLayers,
@@ -469,7 +501,7 @@ internal static class PaintDomPainter
         // backgrounds (step 4) and floats (step 5) but *below* its positive z-index stacking
         // contexts (step 9), which is what Chromium paints, so the flush happens where the
         // positive band begins instead.
-        int inlineBandEnd = negLayers.Count + normal.Count + floatLayers.Count;
+        int inlineBandEnd = rootFirst.Count + negLayers.Count + normal.Count + floatLayers.Count;
         bool inlineBandPainted = false;
 
         // Generated boxes are anonymous layout children: ::before paints directly after its
@@ -576,7 +608,12 @@ internal static class PaintDomPainter
                 continue;
             }
 
-            if (pass.PaintRoot != nid && IsEffectiveFloat(tree, laid, nid))
+            if (pass.PaintRoot != nid
+                && (IsEffectiveFloat(tree, laid, nid)
+                    || (laid.Styles.TryGetValue(nid, out LayoutStyle? isolating)
+                        && IsolatesPaint(isolating)
+                        && !(isolating.Opacity is { } isolatingOpacity && Math.Clamp(isolatingOpacity, 0f, 1f) < 1f)
+                        && !HasAuthoredTransform(isolating))))
             {
                 opacitySubtreeSkip.Add(nid);
                 foreach (NodeId member in DomTraversal.RenderedDescendants(tree, nid))
@@ -1153,7 +1190,7 @@ internal static class PaintDomPainter
 
                 OverflowClip? positionedPseudoOverflowClip =
                     scrollState.DescendantOverflowClipFor(laid, nid);
-                foreach (LayoutStyle? pseudo in new[] { style.BeforePseudo, style.AfterPseudo })
+                foreach (LayoutStyle? pseudo in (ReadOnlySpan<LayoutStyle?>)[style.BeforePseudo, style.AfterPseudo])
                 {
                     if (pseudo is null)
                     {
@@ -1218,7 +1255,7 @@ internal static class PaintDomPainter
 
             PaintBorders.PaintCssOutline(pixmap, rect, style, elementClipMask, rasterScale);
 
-            if (boxOnSurface && localName is "img" or "video"
+            if (boxOnSurface && (localName is "img" or "video" || PaintImages.IsImageButton(node))
                 && pass.SelectedImages.TryGetValue(nid, out SelectedImage? source))
             {
                 bool painted = PaintImages.PaintImage(
@@ -1240,7 +1277,7 @@ internal static class PaintDomPainter
                 if (!painted && string.Equals(localName, "img", StringComparison.Ordinal))
                 {
                     string? alt = node.GetAttribute("alt");
-                    if (alt is not null && alt.Trim().Length > 0)
+                    if (alt is not null && alt.AsSpan().Trim().Length > 0)
                     {
                         PaintText.DrawText(
                             pixmap,
@@ -1360,28 +1397,24 @@ internal static class PaintDomPainter
                 }
             }
 
-            // List-item marker, drawn in the indent to the left of the item's content box.
-            if (string.Equals(localName, "li", StringComparison.Ordinal)
-                && PaintText.ListMarkerText(tree, nid, style.ListStyle) is { } marker)
+            // List-item marker. DEVIATION from crates/obscura-render/src/paint.rs, which draws
+            // the marker text 6px left of the padding edge at the content box's top; see
+            // ListMarkers for Chromium's placement.
+            if (string.Equals(localName, "li", StringComparison.Ordinal))
             {
-                float markerSize = style.FontSize ?? 16f;
-                RgbaColor markerColor = style.Color ?? new RgbaColor(0, 0, 0, 255);
-                float markerWidth = PaintText.MeasureText(marker, markerSize, false, style.FontFamily);
-                float mx = rect.X + style.Padding.Left - markerWidth - 6f;
-                float my = rect.Y + style.Border.Top + style.Padding.Top;
-                PaintText.DrawText(
+                ListMarkers.Paint(
                     pixmap,
-                    marker,
-                    mx,
-                    my,
-                    markerColor,
-                    markerSize,
-                    false,
-                    style.FontFamily,
-                    style.LetterSpacing ?? 0f,
+                    tree,
+                    laid,
+                    nid,
+                    style,
+                    rect,
+                    ox,
+                    oy,
                     boxClip,
                     elementClipMask,
-                    rasterScale);
+                    rasterScale,
+                    pass.PrintEconomy);
             }
 
             // `::before`/`::after` generated text has no DOM text node of its own.

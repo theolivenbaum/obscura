@@ -467,7 +467,7 @@ internal static class DomSubgridPasses
                 continue;
             }
 
-            foreach (int slot in new[] { 0, 2, 4 })
+            foreach (int slot in (ReadOnlySpan<int>)[0, 2, 4])
             {
                 string? functional = style.SizeExpressions[slot];
                 if (functional is not null
@@ -559,6 +559,24 @@ internal static class DomSubgridPasses
                 if (flexItem is not null)
                 {
                     found = flexItem;
+                    break;
+                }
+
+                // DEVIATION from crates/obscura-render/src/dom.rs, whose walk climbs past every
+                // box to the nearest indefinite flex item. A box with a fixed `px` width that
+                // the flex algorithm cannot move is the percentage basis for everything under
+                // it, so nothing above it can make a descendant percentage cyclic (CSS Sizing 3
+                // 5.2.1). Walking past it neutralized YouTube's `width: 100%` logo under a 93px
+                // `yt-icon` inside a content-sized flex item, and the SVG drew at 300px.
+                if (styles.TryGetValue(item, out LayoutStyle? boxStyle)
+                    && boxStyle.Width.Kind == DimensionKind.Px
+                    && boxStyle.SizeExpressions[0] is null
+                    && !boxStyle.IgnoresUsedBoxSizes()
+                    && !boxStyle.IsTableBox
+                    && !boxStyle.IsTableCellBox
+                    && boxStyle.AuthoredTableDisplay == TableInternalDisplay.None
+                    && boxStyle.Display != Display.None)
+                {
                     break;
                 }
 
