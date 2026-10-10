@@ -55,7 +55,11 @@ public static class Leaf
                 .MaybeAdd(boxSizingAdjustment);
             var styleMinSize = style.MinSize
                 .MaybeResolve(parentSize, resolveCalcValue)
-                .MaybeApplyAspectRatio(aspectRatio)
+                .TransferLimitThroughAspectRatio(
+                    aspectRatio,
+                    style.Size.MaybeResolve(parentSize, resolveCalcValue),
+                    style.MaxSize.MaybeResolve(parentSize, resolveCalcValue),
+                    isMinimum: true)
                 .MaybeAdd(boxSizingAdjustment);
             var styleMaxSize = style.MaxSize
                 .MaybeResolve(parentSize, resolveCalcValue)
@@ -135,9 +139,22 @@ public static class Leaf
             .Or(nodeSize)
             .UnwrapOr(measuredSize.Add(contentBoxInset.SumAxes()))
             .MaybeClamp(nodeMinSize, nodeMaxSize);
-        var size = new Size<float>(
-            clampedSize.Width,
-            Sys.F32Max(clampedSize.Height, aspectRatio.HasValue ? clampedSize.Width / aspectRatio.Value : 0.0f));
+        // DEVIATION from vendor/taffy/src/compute/leaf.rs, which floors the height at
+        // `width / aspect_ratio` unconditionally. A preferred aspect ratio only sizes an axis
+        // that is auto (CSS 2.1 10.6.2, CSS Sizing 4 "aspect-ratio"), so a definite height wins
+        // over it: Chromium lays a 150x36 image with `width:120px; height:24px` out 120x24
+        // (capcut.com's logo was 120x28.8), and a div with `aspect-ratio:2; width:120px;
+        // height:24px` 120x24 (it was 120x60). With the height auto the ratio-derived height
+        // is still the floor, clamped by min/max-height as Chromium clamps it.
+        float height = clampedSize.Height;
+        if (aspectRatio is { } ratio && knownDimensions.Height is null && nodeSize.Height is null)
+        {
+            height = Sys.F32Max(
+                height,
+                (clampedSize.Width / ratio).MaybeClamp(nodeMinSize.Height, nodeMaxSize.Height));
+        }
+
+        var size = new Size<float>(clampedSize.Width, height);
         size = size.MaybeMax(paddingBorder.SumAxes().AsOptions());
 
         return new LayoutOutput

@@ -254,11 +254,19 @@ public static class FlexboxLayout
 
         var minSize = style.MinSize
             .MaybeResolve(parentSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                style.Size.MaybeResolve(parentSize, calc),
+                style.MaxSize.MaybeResolve(parentSize, calc),
+                isMinimum: true)
             .MaybeAdd(boxSizingAdjustment);
         var maxSize = style.MaxSize
             .MaybeResolve(parentSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                style.Size.MaybeResolve(parentSize, calc),
+                style.MinSize.MaybeResolve(parentSize, calc),
+                isMinimum: false)
             .MaybeAdd(boxSizingAdjustment);
         var clampedStyleSize = inputs.SizingMode == SizingMode.InherentSize
             ? style.Size
@@ -494,11 +502,19 @@ public static class FlexboxLayout
             IsWrapReverse = isWrapReverse,
             MinSize = style.MinSize
                 .MaybeResolve(parentSize, calc)
-                .MaybeApplyAspectRatio(aspectRatio)
+                .TransferLimitThroughAspectRatio(
+                    aspectRatio,
+                    style.Size.MaybeResolve(parentSize, calc),
+                    style.MaxSize.MaybeResolve(parentSize, calc),
+                    isMinimum: true)
                 .MaybeAdd(boxSizingAdjustment),
             MaxSize = style.MaxSize
                 .MaybeResolve(parentSize, calc)
-                .MaybeApplyAspectRatio(aspectRatio)
+                .TransferLimitThroughAspectRatio(
+                    aspectRatio,
+                    style.Size.MaybeResolve(parentSize, calc),
+                    style.MinSize.MaybeResolve(parentSize, calc),
+                    isMinimum: false)
                 .MaybeAdd(boxSizingAdjustment),
             Margin = margin,
             Border = border,
@@ -2074,13 +2090,21 @@ public static class FlexboxLayout
                 .MaybeAdd(boxSizingAdjustment);
             var minSize = childStyle.MinSize
                 .MaybeResolve(insetRelativeSize, calc)
-                .MaybeApplyAspectRatio(aspectRatio)
+                .TransferLimitThroughAspectRatio(
+                    aspectRatio,
+                    childStyle.Size.MaybeResolve(insetRelativeSize, calc),
+                    childStyle.MaxSize.MaybeResolve(insetRelativeSize, calc),
+                    isMinimum: true)
                 .MaybeAdd(boxSizingAdjustment)
                 .Or(paddingBorderSum.AsOptions())
                 .MaybeMax(paddingBorderSum);
             var maxSize = childStyle.MaxSize
                 .MaybeResolve(insetRelativeSize, calc)
-                .MaybeApplyAspectRatio(aspectRatio)
+                .TransferLimitThroughAspectRatio(
+                    aspectRatio,
+                    childStyle.Size.MaybeResolve(insetRelativeSize, calc),
+                    childStyle.MinSize.MaybeResolve(insetRelativeSize, calc),
+                    isMinimum: false)
                 .MaybeAdd(boxSizingAdjustment);
             var knownDimensions = styleSize.MaybeClamp(minSize, maxSize);
 

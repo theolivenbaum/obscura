@@ -403,11 +403,19 @@ public static class BlockLayout
 
         var minSize = style.MinSize
             .MaybeResolve(parentSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                style.Size.MaybeResolve(parentSize, calc),
+                style.MaxSize.MaybeResolve(parentSize, calc),
+                isMinimum: true)
             .MaybeAdd(boxSizingAdjustment);
         var maxSize = style.MaxSize
             .MaybeResolve(parentSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                style.Size.MaybeResolve(parentSize, calc),
+                style.MinSize.MaybeResolve(parentSize, calc),
+                isMinimum: false)
             .MaybeAdd(boxSizingAdjustment);
         var clampedStyleSize = inputs.SizingMode == SizingMode.InherentSize
             ? style.Size
@@ -497,11 +505,19 @@ public static class BlockLayout
             .MaybeAdd(boxSizingAdjustment);
         var minSize = style.MinSize
             .MaybeResolve(parentSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                style.Size.MaybeResolve(parentSize, calc),
+                style.MaxSize.MaybeResolve(parentSize, calc),
+                isMinimum: true)
             .MaybeAdd(boxSizingAdjustment);
         var maxSize = style.MaxSize
             .MaybeResolve(parentSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                style.Size.MaybeResolve(parentSize, calc),
+                style.MinSize.MaybeResolve(parentSize, calc),
+                isMinimum: false)
             .MaybeAdd(boxSizingAdjustment);
 
         // css-sizing-4: a definite size in one axis transfers through `aspect-ratio` to make the
@@ -823,11 +839,19 @@ public static class BlockLayout
                     .MaybeAdd(boxSizingAdjustment),
                 MinSize = childStyle.MinSize
                     .MaybeResolve(nodeInnerSize, calc)
-                    .MaybeApplyAspectRatio(aspectRatio)
+                    .TransferLimitThroughAspectRatio(
+                        aspectRatio,
+                        childStyle.Size.MaybeResolve(nodeInnerSize, calc),
+                        childStyle.MaxSize.MaybeResolve(nodeInnerSize, calc),
+                        isMinimum: true)
                     .MaybeAdd(boxSizingAdjustment),
                 MaxSize = childStyle.MaxSize
                     .MaybeResolve(nodeInnerSize, calc)
-                    .MaybeApplyAspectRatio(aspectRatio)
+                    .TransferLimitThroughAspectRatio(
+                        aspectRatio,
+                        childStyle.Size.MaybeResolve(nodeInnerSize, calc),
+                        childStyle.MinSize.MaybeResolve(nodeInnerSize, calc),
+                        isMinimum: false)
                     .MaybeAdd(boxSizingAdjustment),
                 Overflow = overflow,
                 ScrollbarWidth = childStyle.ScrollbarWidth,
@@ -1916,13 +1940,21 @@ public static class BlockLayout
                 .MaybeAdd(boxSizingAdjustment);
             var minSize = childStyle.MinSize
                 .MaybeResolve(areaSize, calc)
-                .MaybeApplyAspectRatio(aspectRatio)
+                .TransferLimitThroughAspectRatio(
+                    aspectRatio,
+                    childStyle.Size.MaybeResolve(areaSize, calc),
+                    childStyle.MaxSize.MaybeResolve(areaSize, calc),
+                    isMinimum: true)
                 .MaybeAdd(boxSizingAdjustment)
                 .Or(paddingBorderSum.AsOptions())
                 .MaybeMax(paddingBorderSum);
             var maxSize = childStyle.MaxSize
                 .MaybeResolve(areaSize, calc)
-                .MaybeApplyAspectRatio(aspectRatio)
+                .TransferLimitThroughAspectRatio(
+                    aspectRatio,
+                    childStyle.Size.MaybeResolve(areaSize, calc),
+                    childStyle.MinSize.MaybeResolve(areaSize, calc),
+                    isMinimum: false)
                 .MaybeAdd(boxSizingAdjustment);
             var knownDimensions = styleSize.MaybeClamp(minSize, maxSize);
 
