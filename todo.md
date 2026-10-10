@@ -3536,6 +3536,30 @@ come from the shaped words alone unless the height of those lines does too; on t
 page that layout is 80% of the cold pass, most of it allocating the `LayoutGlyph`s of lines that
 are measured and dropped.
 
+### A container-query pass keeps the previous pass's styles and layout
+
+DEVIATION from `crates/obscura-render`, which cascades and lays the whole document out from
+scratch on every container-query pass after the first, retained prepare or not. Between two
+passes of one prepare only the answers of container-query rules can change, so pass k now takes
+pass k-1's style maps, restyles what a container-query rule selects inside a query container
+(`RetainedStylePlanner.AddContainerQueryResetScopes`, the scopes a retained pass resets) and
+carries pass k-1's layout over to the rest (`RetainedTaffyLayout`, with no mutations and those
+scopes as the dirty set). A pass that ends on equal adjacent signatures returns its own layout
+rather than the previous candidate's, whose styles it took: it applied the same decisions to the
+same tree. The rules of shadow trees are outside those scopes, so a page whose shadow sheets or
+`::part` rules have container queries passes from scratch as before.
+`POCKETCALCULATOR_NO_RETAINED_CONTAINER_PASSES=1` restores the old passes.
+
+Tried and dropped: starting a retained prepare from the container sizes the previous one
+converged on, which would skip the container-query-less first pass and the reset. When the sizes
+come out the same it is a fixed point of the iteration, but not always the one the iteration from
+no sizes reaches: the differential suite's container-query fixture found three seeds (of 60)
+where the two disagree, so the iteration still starts from no sizes.
+
+Found, not fixed (present at 2158322): `RandomMutationSequencesMatchAFullRelayout(7, 57)`, the
+shadow fixture at a soak seed, diverges at step 3 (a slotted element's `slot` removed, a float
+class on another, a `title` added): the retained layout is 19px taller.
+
 ### A split paragraph's lines are taken from the line they were cut from
 
 DEVIATION from `crates/obscura-render/src/inline.rs` (`shape_with_text_indent`), which shapes and

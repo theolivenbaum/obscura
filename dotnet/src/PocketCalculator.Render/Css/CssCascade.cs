@@ -933,6 +933,20 @@ public sealed class Stylesheet
         id == ContainerConditionId.None
         || (evaluator is not null && evaluator.ConditionMatches(this, subject, id, kind));
 
+    /// <summary>Whether a container-query rule of this sheet is a <c>::part()</c> rule.</summary>
+    internal bool ContainerRulesMatchParts()
+    {
+        foreach (var rule in Rules)
+        {
+            if (rule.ContainerConditionId != ContainerConditionId.None && rule.Selector.Selector.IsPart)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public bool HasContainerQueries()
     {
         foreach (var rule in Rules)
