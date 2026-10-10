@@ -3556,9 +3556,19 @@ come out the same it is a fixed point of the iteration, but not always the one t
 no sizes reaches: the differential suite's container-query fixture found three seeds (of 60)
 where the two disagree, so the iteration still starts from no sizes.
 
-Found, not fixed (present at 2158322): `RandomMutationSequencesMatchAFullRelayout(7, 57)`, the
-shadow fixture at a soak seed, diverges at step 3 (a slotted element's `slot` removed, a float
-class on another, a `title` added): the retained layout is 19px taller.
+Found by the same soak and fixed: a light child that changed slots (its `slot` attribute, a
+slot's `name`, a slot or a host child inserted or removed) left the slot it was assigned to before
+out of the layout's dirty closure, since that slot is above nothing in the tree as it is now; the
+slot's box and its inline context, still holding the moved text, were carried over
+(`RandomMutationSequencesMatchAFullRelayout(7, 57)`, present at 2158322: the page 19px taller).
+`RetainedTaffyLayout.DirtyClosure` now seeds every slot of the shadow tree such a mutation can
+reassign.
+
+Found, not fixed (present at 2158322): `RandomMutationSequencesMatchAFullRelayout(5, 77)` diverges
+at step 4, an `<img>` inside a `<button>` getting a new `src`: the retained button keeps the width
+its control sizing took from the old image (102px against 192px). The source swap restyles the
+image's subtree only (see "An `<img>` source swap restyles the image"), and the button's
+control-sized width is written into its retained style.
 
 ### A split paragraph's lines are taken from the line they were cut from
 
