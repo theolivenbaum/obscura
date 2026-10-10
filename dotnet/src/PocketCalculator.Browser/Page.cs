@@ -553,7 +553,7 @@ public sealed partial class Page : IDisposable
     }
 
     /// <summary>A runtime being created while the navigation that will use it is fetched.</summary>
-    private Task<PocketCalculatorJsRuntime>? _runtimePrewarm;
+    private RuntimePrewarm? _runtimePrewarm;
 
     private static readonly bool RuntimePrewarmDisabled =
         Environment.GetEnvironmentVariable("POCKETCALCULATOR_NO_RUNTIME_PREWARM") == "1";
@@ -576,7 +576,7 @@ public sealed partial class Page : IDisposable
         }
 
         string? proxy = Context.ProxyUrl;
-        _runtimePrewarm = Task.Run(() => PocketCalculatorJsRuntime.WithBaseUrlAndProxy(url, proxy));
+        _runtimePrewarm = new RuntimePrewarm(() => PocketCalculatorJsRuntime.WithBaseUrlAndProxy(url, proxy));
     }
 
     /// <summary>The runtime <see cref="PrewarmRuntime"/> started, once it exists; null without one.</summary>
@@ -589,7 +589,7 @@ public sealed partial class Page : IDisposable
 
         try
         {
-            PocketCalculatorJsRuntime runtime = pending.GetAwaiter().GetResult();
+            PocketCalculatorJsRuntime runtime = pending.Take();
             runtime.RebaseModuleLoader(UrlString());
             return runtime;
         }
@@ -601,20 +601,42 @@ public sealed partial class Page : IDisposable
     }
 
     /// <summary>A navigation that will not use the runtime it started disposes it.</summary>
-    private void DiscardPrewarmedRuntime()
+    private void DiscardPrewarmedRuntime() => Interlocked.Exchange(ref _runtimePrewarm, null)?.Discard();
+
+    /// <summary>
+    /// A runtime created on a pool thread ahead of need, or on the taker's thread when the pool
+    /// has not got to it yet.
+    /// </summary>
+    /// <remarks>
+    /// The navigation used to block on the prewarm <see cref="Task"/>
+    /// (<c>GetAwaiter().GetResult()</c>), which waits for a pool thread to pick the work up;
+    /// on a pool with no thread to spare that was a wait for the pool to grow. Taking it
+    /// through a <see cref="Lazy{T}"/> creates the runtime inline if no thread has started it,
+    /// and otherwise waits only for the thread that is already creating it.
+    /// </remarks>
+    private sealed class RuntimePrewarm
     {
-        if (Interlocked.Exchange(ref _runtimePrewarm, null) is { } pending)
+        private readonly Lazy<PocketCalculatorJsRuntime> _runtime;
+        private readonly Task _started;
+
+        public RuntimePrewarm(Func<PocketCalculatorJsRuntime> create)
         {
-            _ = pending.ContinueWith(
-                task =>
+            _runtime = new Lazy<PocketCalculatorJsRuntime>(create, LazyThreadSafetyMode.ExecutionAndPublication);
+            _started = Task.Run(() => _runtime.Value);
+        }
+
+        public PocketCalculatorJsRuntime Take() => _runtime.Value;
+
+        public void Discard() =>
+            _ = _started.ContinueWith(
+                _ =>
                 {
-                    if (task.IsCompletedSuccessfully)
+                    if (_runtime.IsValueCreated)
                     {
-                        task.Result.Dispose();
+                        _runtime.Value.Dispose();
                     }
                 },
                 TaskScheduler.Default);
-        }
     }
 
     /// <summary>

@@ -1213,6 +1213,69 @@ public sealed class ModuleGraphLoadTests : IDisposable
         Assert.Equal(0, loader.Activity.Pending);
     }
 
+    [Fact]
+    public async Task APrefetchedGraphIsEvaluatedFromTheCacheWithOneRequestPerModule()
+    {
+        using var loader = Loader("{}");
+        using var engine = NewEngine(loader);
+
+        await loader.PrefetchGraphAsync(_origin + "/a.js", dynamic: false, CancellationToken.None);
+        await loader.PrefetchGraphAsync(_origin + "/b.js", dynamic: false, CancellationToken.None);
+        Assert.Equal(1, Hits("/a.js"));
+        Assert.Equal(1, Hits("/b.js"));
+        Assert.Equal(1, Hits("/c.js"));
+
+        engine.Execute(
+            RootInfo(),
+            "import { a } from '/a.js'; import { b } from '/b.js'; globalThis.sum = a + b;");
+
+        Assert.Equal(211, engine.Evaluate("globalThis.sum"));
+        Assert.Equal(1, Hits("/a.js"));
+        Assert.Equal(1, Hits("/c.js"));
+        Assert.False(loader.Activity.IsPendingOrRecent(TimeSpan.FromSeconds(30)));
+    }
+
+    [Fact]
+    public async Task APrefetchFailureFailsTheEvaluationWithItsOwnErrorAndIsNotFetchedTwice()
+    {
+        using var loader = Loader("{}");
+        using var engine = NewEngine(loader);
+
+        await loader.PrefetchGraphAsync(_origin + "/imports-missing.js", dynamic: false, CancellationToken.None);
+        Assert.Equal(1, Hits("/missing.js"));
+
+        var error = Assert.Throws<ScriptEngineException>(
+            () => engine.Execute(RootInfo(), "import '/imports-missing.js';"));
+        Assert.Contains("returned HTTP 404", error.Message, StringComparison.Ordinal);
+        Assert.Equal(1, Hits("/missing.js"));
+
+        // Reported once, then forgotten: a later import tries again, as before prefetching.
+        Assert.Throws<ScriptEngineException>(() => engine.Execute(RootInfo("again.js"), "import '/missing.js';"));
+        Assert.Equal(2, Hits("/missing.js"));
+    }
+
+    [Fact]
+    public async Task AnInlineModuleGraphIsPrefetchedThroughTheImportMap()
+    {
+        using var loader = Loader("""{"imports":{"dep":"/vendor/dep.js"}}""");
+        using var engine = NewEngine(loader);
+
+        await loader.PrefetchInlineGraphAsync(
+            "import { v } from 'dep'; import { a } from './a.js'; import('/dyn.js');",
+            _origin + "/index.html",
+            CancellationToken.None);
+
+        Assert.Equal(1, Hits("/vendor/dep.js"));
+        Assert.Equal(1, Hits("/a.js"));
+        Assert.Equal(1, Hits("/c.js"));
+        // A dynamic import is the page's to make, when it makes it.
+        Assert.Equal(0, Hits("/dyn.js"));
+    }
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _hits = new(StringComparer.Ordinal);
+
+    private int Hits(string path) => _hits.GetValueOrDefault(path);
+
     private PocketCalculatorModuleLoader Loader(string importMapJson)
     {
         Assert.True(
@@ -1252,6 +1315,7 @@ public sealed class ModuleGraphLoadTests : IDisposable
             }
 
             var path = context.Request.Url?.AbsolutePath ?? "/";
+            _hits.AddOrUpdate(path, 1, (_, n) => n + 1);
             var response = context.Response;
             try
             {
@@ -1271,6 +1335,7 @@ public sealed class ModuleGraphLoadTests : IDisposable
                     "/a.js" => "import { c } from '/c.js'; export const a = 1 + c;",
                     "/b.js" => "import { c } from '/c.js'; export const b = 10 + c;",
                     "/c.js" => "export const c = 100;",
+                    "/imports-missing.js" => "import '/missing.js'; export const never = 1;",
                     _ => null,
                 };
 

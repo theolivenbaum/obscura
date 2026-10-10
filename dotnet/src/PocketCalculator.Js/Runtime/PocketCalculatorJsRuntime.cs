@@ -75,36 +75,21 @@ public sealed partial class PocketCalculatorJsRuntime
     internal bool IsDisposed => _disposed;
 
     /// <summary>
-    /// Enough thread-pool workers that page work waiting for the isolate cannot starve the
-    /// work the isolate is waiting for.
+    /// Where this page's op promises are resolved: posted by the thread that completes an op,
+    /// run by the event loop (<see cref="PumpTick(out string?, out bool)"/>). Shared by every
+    /// realm of the isolate.
     /// </summary>
     /// <remarks>
-    /// ClearScript settles an async op's promise on the thread that completed the op, which
-    /// blocks on the isolate lock while script runs. A module graph's dependencies are fetched
-    /// synchronously inside that script (ClearScript's loader), and the fetch's own
-    /// continuations need pool threads. With twenty page fetches settling during one module
-    /// evaluation (GitHub's home page: its preload links start loading while the document is
-    /// parsed), every pool thread was parked on the lock and each dependency waited for the
-    /// pool to grow by one thread every half second: one module took 12 s instead of 0.3 s.
-    /// Port addition: deno_core settles ops on the isolate's own thread.
+    /// This replaced a process-wide <c>ThreadPool.SetMinThreads(64)</c>: ClearScript resolved a
+    /// promise on the thread that completed the op, which parked that pool thread on the
+    /// isolate lock for as long as page script ran, so a page waiting on the network inside
+    /// script (a module graph's imports) starved the very continuations it waited for. See
+    /// <see cref="PocketCalculator.Js.Ops.OpCompletionContext"/>.
     /// </remarks>
-    private static readonly bool PoolSized = SizeThreadPool();
-
-    private static bool SizeThreadPool()
-    {
-        const int MinimumWorkers = 64;
-        ThreadPool.GetMinThreads(out var workers, out var io);
-        if (workers < MinimumWorkers)
-        {
-            ThreadPool.SetMinThreads(MinimumWorkers, io);
-        }
-
-        return true;
-    }
+    private readonly PocketCalculator.Js.Ops.OpCompletionContext _opCompletions = new();
 
     private PocketCalculatorJsRuntime(string baseUrl, string? proxyUrl)
     {
-        _ = PoolSized;
         // A process over POCKETCALCULATOR_MAX_PROCESS_BYTES takes no new page (M7).
         ProcessMemoryGuard.Default.ThrowIfOverLimit();
 
@@ -142,7 +127,9 @@ public sealed partial class PocketCalculatorJsRuntime
         };
         _engine = CreateRealmEngine();
         _isolateHandle = new V8IsolateHandle(_engine, _ops.Cancellation);
-        _ops.Page.IsolateLock = PocketCalculator.Js.Ops.IsolateLock.For(_engine);
+        _ops.Page.IsolateLock = PocketCalculator.Js.Ops.IsolateLock.For(_engine, _opCompletions);
+        // A module graph the page thread waits for inside script stops at the script deadline.
+        _moduleLoader.BlockingLoadCancellation = () => _ops.Cancellation.Token;
         _memoryRegistration = ProcessMemoryGuard.Default.Register(_isolateHandle);
         _ops.Cancellation.Interrupter = () =>
         {
@@ -171,6 +158,9 @@ public sealed partial class PocketCalculatorJsRuntime
         // bootstrap.js, which is what makes the runtime testable on its own.
         _ops.TaskSpawner = this;
         _ops.AsyncOps = this;
+        // A dynamic module script's graph (bootstrap.js __runDynScriptTask). Each request is
+        // bounded by the transport's own timeout; nothing waits on the prefetch but the task.
+        _ops.ModuleGraphPrefetcher = url => _moduleLoader.PrefetchGraphAsync(url, dynamic: true, CancellationToken.None);
         _ops.WasmMemoryLimit = WasmMemoryLimitBytes();
         _shim = BootstrapLoader.Install(_engine, ops => BindOps(ops, mainRealm: true));
         if (BootstrapLoader.ExposeOpsForTests)
@@ -263,6 +253,9 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         var engine = _v8.CreateScriptEngine(
             V8ScriptEngineFlags.EnableTaskPromiseConversion
+            // An op's promise is resolved on the context current when the op was called, which
+            // AsyncOpBinding makes the page's op completion queue (_opCompletions).
+            | V8ScriptEngineFlags.UseSynchronizationContexts
             | V8ScriptEngineFlags.EnableDynamicModuleImports
             | V8ScriptEngineFlags.EnableValueTaskPromiseConversion);
         // A JS number is a double. ClearScript otherwise narrows a lossless
@@ -1115,7 +1108,19 @@ public sealed partial class PocketCalculatorJsRuntime
     /// <summary>The op's promise settled and its reactions are running.</summary>
     void PocketCalculator.Js.Ops.IAsyncOpTracker.OpSettled() => Interlocked.Decrement(ref _pendingAsyncOps);
 
-    private bool HasPendingAsyncOps => Volatile.Read(ref _pendingAsyncOps) > 0;
+    /// <inheritdoc/>
+    PocketCalculator.Js.Ops.OpCompletionContext? PocketCalculator.Js.Ops.IAsyncOpTracker.Completions => _opCompletions;
+
+    /// <summary>The page's op completion queue (see <see cref="_opCompletions"/>).</summary>
+    internal PocketCalculator.Js.Ops.OpCompletionContext OpCompletions => _opCompletions;
+
+    /// <summary>
+    /// A task that completes once an op completion (or other page-thread work) has been posted
+    /// for the event loop, so a host loop that parks can wake for it instead of polling.
+    /// </summary>
+    public Task WhenOpCompletionPosted() => _opCompletions.WhenPosted();
+
+    private bool HasPendingAsyncOps => Volatile.Read(ref _pendingAsyncOps) > 0 || _opCompletions.Pending > 0;
 
     // ------------------------------------------------------------------ dispose
 
@@ -1134,6 +1139,9 @@ public sealed partial class PocketCalculatorJsRuntime
             return;
         }
         _disposed = true;
+        // Completions still queued belong to this document: dropped, never run against a
+        // disposed engine. A host continuation queued there (InvokeAsync) is cancelled.
+        _opCompletions.Dispose();
         _memoryRegistration.Dispose();
         DetachDomGc();
         // Background render-resource loads belong to this document; a closed page must

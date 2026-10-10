@@ -472,4 +472,41 @@ public sealed partial class RuntimeTests
             """{"s":false,"v":["x"],"f":["y"],"l":[]}""",
             ScriptDeclarations.ScanJson("var x = 1\nfunction y() {}"));
     }
+
+    /// <summary>The static requests the module graph prefetch reads (port addition).</summary>
+    [Fact]
+    public void ModuleRequestsAreTheStaticImportAndExportFromSpecifiers()
+    {
+        var requests = ScriptDeclarations.ModuleRequests(
+            """
+            import "./side.js";
+            import def from './default.js'
+            import def2, { a as b, "str" as c } from "./named.js";
+            import * as ns from "./ns.js";
+            import{x}from"./min.js";import"./min2.js";
+            export { y } from './reexport.js';
+            export * from './star.js';
+            export * as all from './star-as.js';
+            export { local };
+            export const z = 1;
+            import json from './data.json' with { type: 'json' };
+            const lazy = import('./lazy.js');
+            const meta = import.meta.url;
+            obj.import('./method.js');
+            const s = "import x from './in-string.js'";
+            // import a from './in-comment.js';
+            const re = /import "x"/;
+            function f() { return `${import('./tmpl.js')}`; }
+            import "./side.js";
+            """);
+
+        Assert.Equal(
+            [
+                "./side.js", "./default.js", "./named.js", "./ns.js", "./min.js", "./min2.js",
+                "./reexport.js", "./star.js", "./star-as.js", "./data.json",
+            ],
+            requests);
+        Assert.Empty(ScriptDeclarations.ModuleRequests("export default function () {}"));
+        Assert.Empty(ScriptDeclarations.ModuleRequests("import 'a\\u0062.js';"));
+    }
 }

@@ -97,6 +97,16 @@ public static class WorkerOps
     /// loop, which is waiting on this thread.
     /// </para>
     /// <para>
+    /// The wait stays blocking on purpose. <c>importScripts</c> blocks its worker by
+    /// specification, and a worker here is emulated in the page's realm (bootstrap.js
+    /// <c>Worker</c>), so its thread is the page's and the page isolate is held for the fetch;
+    /// a worker of its own (an isolate and a thread) is what would let the page run meanwhile,
+    /// and is not ported. What made the wait dangerous is gone: op settlements no longer park
+    /// pool threads on the isolate lock (<see cref="OpCompletionContext"/>), so the fetch's
+    /// continuations get a thread. The wait runs with no synchronization context, under the
+    /// fetch timeout and the script's deadline (<see cref="PocketCalculator.Dom.WorkCancellation"/>).
+    /// </para>
+    /// <para>
     /// The source never reaches page script as a value: the host passes it straight to the
     /// shim's runner, which evaluates it (SECURITY.md C3). <c>muted</c> is true for a
     /// script from another origin than the worker's, whose exceptions
@@ -194,11 +204,12 @@ public static class WorkerOps
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(PocketCalculator.Dom.WorkCancellation.Current);
             deadline.CancelAfter(FetchOps.FetchTimeout());
             var target = new Uri(parsed.Href);
-            response = (state.StealthClient is { IsAvailable: true } stealth
+            response = OpCompletionContext.WithoutContext(() =>
+                (state.StealthClient is { IsAvailable: true } stealth
                     ? stealth.FetchResourceWithCallbacksAsync(target, request, state.Callbacks, deadline.Token)
                     : client.FetchResourceWithCallbacksAsync(target, request, state.Callbacks, deadline.Token))
                 .GetAwaiter()
-                .GetResult();
+                .GetResult());
         }
         catch (OperationCanceledException) when (PocketCalculator.Dom.WorkCancellation.Current.IsCancellationRequested)
         {

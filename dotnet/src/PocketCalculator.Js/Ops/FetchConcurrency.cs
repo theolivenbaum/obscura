@@ -37,15 +37,16 @@ internal static class FetchConcurrency
     {
         SemaphoreSlim gate = Gates.GetValue(state, static _ => new SemaphoreSlim(Limit()));
         await gate.WaitAsync().ConfigureAwait(false);
-        return new Slot(gate);
+        return new Slot(new StrongBox<SemaphoreSlim?>(gate));
     }
 
     /// <summary>Requests in flight on <paramref name="state"/>'s page, for tests.</summary>
     internal static int InFlight(PocketCalculatorState state) =>
         Gates.TryGetValue(state, out SemaphoreSlim? gate) ? Limit() - gate.CurrentCount : 0;
 
-    internal readonly struct Slot(SemaphoreSlim gate) : IDisposable
+    /// <summary>A held slot. Disposing it again is a no-op, so it can be freed early.</summary>
+    internal readonly struct Slot(StrongBox<SemaphoreSlim?> gate) : IDisposable
     {
-        public void Dispose() => gate.Release();
+        public void Dispose() => Interlocked.Exchange(ref gate.Value, null)?.Release();
     }
 }

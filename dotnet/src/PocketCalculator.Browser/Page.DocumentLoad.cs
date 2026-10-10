@@ -1131,9 +1131,12 @@ public sealed partial class Page
 
                 double wait = Math.Clamp(_js.NextTimerDelayMs ?? 10, 1, 10);
                 Task delay = Task.Delay(TimeSpan.FromMilliseconds(wait), _ct);
+                // An op completion (a dynamic script's body, a fetch) is page work for the
+                // event loop: it wakes the wait rather than waiting out the poll interval.
+                Task opPosted = _js.WhenOpCompletionPosted();
                 Task woken = wake is null
-                    ? await Task.WhenAny(signal.Task, delay).ConfigureAwait(false)
-                    : await Task.WhenAny(signal.Task, delay, wake).ConfigureAwait(false);
+                    ? await Task.WhenAny(signal.Task, delay, opPosted).ConfigureAwait(false)
+                    : await Task.WhenAny(signal.Task, delay, wake, opPosted).ConfigureAwait(false);
                 if (woken == signal.Task)
                 {
                     Interlocked.CompareExchange(

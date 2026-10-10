@@ -1,5 +1,9 @@
+using System.Collections.Concurrent;
 using System.Globalization;
+using System.Reflection;
+using System.Runtime.ExceptionServices;
 using Microsoft.ClearScript;
+using Microsoft.ClearScript.JavaScript;
 
 namespace PocketCalculator.Js.Ops;
 
@@ -21,6 +25,13 @@ public interface IAsyncOpTracker
 
     /// <summary>The op's promise has settled and its reactions are running.</summary>
     void OpSettled();
+
+    /// <summary>
+    /// The context the op's promise is resolved on (current while the op's task is converted
+    /// to a promise); null resolves it on the thread that completes the op (ClearScript's
+    /// default).
+    /// </summary>
+    OpCompletionContext? Completions => null;
 }
 
 /// <summary>
@@ -76,9 +87,10 @@ internal static class AsyncOpBinding
             return false;
         }
 
+        var arity = op.Method.GetParameters().Length;
         var parameters = string.Join(
             ", ",
-            Enumerable.Range(0, op.Method.GetParameters().Length)
+            Enumerable.Range(0, arity)
                 .Select(index => "a" + index.ToString(CultureInfo.InvariantCulture)));
         // The parameter list is spelled out rather than forwarded with `arguments`,
         // because `inner` is a host delegate of fixed arity and calling it with a
@@ -112,12 +124,93 @@ internal static class AsyncOpBinding
             return false;
         }
 
+        var inner = tracker.Completions is { } completions
+            ? SettlingOn(op, arity, completions, ops.Engine)
+            : function;
         ops.SetProperty(
             name,
             factory.InvokeAsFunction(
-                function,
+                inner,
                 (Action)(() => OpGuard.Run(name + " started", tracker.OpStarted)),
                 (Action)(() => OpGuard.Run(name + " settled", tracker.OpSettled))));
         return true;
     }
+
+    /// <summary>
+    /// <paramref name="op"/>, returning its task as a promise that settles on
+    /// <paramref name="completions"/>.
+    /// </summary>
+    /// <remarks>
+    /// ClearScript resolves a task's promise with the scheduler it captures when it converts
+    /// the task (<c>TaskScheduler.FromCurrentSynchronizationContext()</c> under
+    /// <c>UseSynchronizationContexts</c>). Converting here, with the context current only for
+    /// that call and restored in a <c>finally</c>, is what lets it capture the page's queue
+    /// without the context ever outliving the call: setting it from script and restoring it
+    /// from script would leave it current on a pool thread whenever a watchdog terminated the
+    /// script in between, and the next <c>await</c> on that thread would post itself to a loop
+    /// that is waiting for it. The op body itself runs with the caller's context, as before.
+    /// The wrapper keeps the op's arity, and every async op takes <see cref="object"/>
+    /// arguments, so ClearScript marshals the arguments exactly as it did for the op.
+    /// </remarks>
+    private static Delegate SettlingOn(Delegate op, int arity, OpCompletionContext completions, ScriptEngine engine)
+    {
+        var convert = PromiseConverter(op.Method.ReturnType);
+
+        object Call(object?[] args)
+        {
+            Task task;
+            try
+            {
+                task = (Task)op.DynamicInvoke(args)!;
+            }
+            catch (TargetInvocationException error) when (error.InnerException is { } thrown)
+            {
+                ExceptionDispatchInfo.Throw(thrown);
+                throw;
+            }
+
+            var previous = SynchronizationContext.Current;
+            SynchronizationContext.SetSynchronizationContext(completions);
+            try
+            {
+                return convert(task, ScriptEngine.Current ?? engine);
+            }
+            finally
+            {
+                SynchronizationContext.SetSynchronizationContext(previous);
+            }
+        }
+
+        return arity switch
+        {
+            0 => (Func<object>)(() => Call([])),
+            1 => (Func<object?, object>)(a => Call([a])),
+            2 => (Func<object?, object?, object>)((a, b) => Call([a, b])),
+            3 => (Func<object?, object?, object?, object>)((a, b, c) => Call([a, b, c])),
+            4 => (Func<object?, object?, object?, object?, object>)((a, b, c, d) => Call([a, b, c, d])),
+            5 => (Func<object?, object?, object?, object?, object?, object>)(
+                (a, b, c, d, e) => Call([a, b, c, d, e])),
+            6 => (Func<object?, object?, object?, object?, object?, object?, object>)(
+                (a, b, c, d, e, f) => Call([a, b, c, d, e, f])),
+            7 => (Func<object?, object?, object?, object?, object?, object?, object?, object>)(
+                (a, b, c, d, e, f, g) => Call([a, b, c, d, e, f, g])),
+            8 => (Func<object?, object?, object?, object?, object?, object?, object?, object?, object>)(
+                (a, b, c, d, e, f, g, h) => Call([a, b, c, d, e, f, g, h])),
+            _ => throw new NotSupportedException($"An async op of {arity} arguments has no binding."),
+        };
+    }
+
+    private static readonly ConcurrentDictionary<Type, Func<Task, ScriptEngine, object>> Converters = new();
+
+    /// <summary>ClearScript's conversion for a task of <paramref name="taskType"/>, typed so its result is kept.</summary>
+    private static Func<Task, ScriptEngine, object> PromiseConverter(Type taskType) =>
+        Converters.GetOrAdd(taskType, static type =>
+            type.IsGenericType && type.GetGenericTypeDefinition() == typeof(Task<>)
+                ? typeof(AsyncOpBinding)
+                    .GetMethod(nameof(ConvertTyped), BindingFlags.NonPublic | BindingFlags.Static)!
+                    .MakeGenericMethod(type.GetGenericArguments()[0])
+                    .CreateDelegate<Func<Task, ScriptEngine, object>>()
+                : static (task, engine) => task.ToPromise(engine));
+
+    private static object ConvertTyped<T>(Task task, ScriptEngine engine) => ((Task<T>)task).ToPromise(engine);
 }
