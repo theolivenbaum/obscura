@@ -6771,9 +6771,11 @@ answer was `ThreadPool.SetMinThreads(64)` for the whole process, from library co
 Now (`Ops.OpCompletionContext`, `AsyncOpBinding`, `PocketCalculatorJsRuntime.PumpTick`):
 
 - every realm engine is created with `V8ScriptEngineFlags.UseSynchronizationContexts`, and the
-  async-op shim makes the runtime's `OpCompletionContext` current while the op is called, which
-  is where ClearScript captures `TaskScheduler.FromCurrentSynchronizationContext()`. The
-  resolution is posted to that queue; nothing runs inline and nothing is posted back from it;
+  async-op binding converts the op's task to its promise itself (`ToPromise`) with the runtime's
+  `OpCompletionContext` current for that call only, which is where ClearScript captures
+  `TaskScheduler.FromCurrentSynchronizationContext()`. (Setting the context from script and
+  restoring it from script would leave it current on a pool thread whenever a watchdog
+  terminated the script in between.) The resolution is posted to that queue;
 - each event-loop turn runs the completions queued when it started, one checkpoint after each,
   ahead of posted tasks and timers (deno_core resolves ready ops before its macrotasks), yields to
   a waiting CDP command between them, and skips them while a watchdog termination is pending (a
@@ -6785,7 +6787,13 @@ Now (`Ops.OpCompletionContext`, `AsyncOpBinding`, `PocketCalculatorJsRuntime.Pum
   (`IsolateLock.RunOnPageAsync`). `op_fetch_url`'s tail used to run on pool threads in parallel:
   64 fetches finishing together corrupted the stored-body queue ("Operations that change
   non-concurrent collections must have exclusive access"). The fetch's concurrency slot is
-  released before the tail, so the next request does not wait for the loop;
+  released before the tail, so the next request does not wait for the loop. Host code that
+  awaits `FetchOps.FetchUrlAsync` itself drives no loop, so there the tail runs inline as before
+  (`tailOnPageLoop` is set by the `op_fetch_url` binding only). A style sheet's own fetches
+  keep their tail where the body was read too, since its `@import`s are found from that body and
+  must not wait for the page's next turn; only installing the sheet moves to the loop. Those
+  internal tails can still run beside an `op_fetch_url` tail on the loop, as every tail could
+  before;
 - a disposed runtime drops its queue (host tails queued there are cancelled, so their `finally`
   blocks run);
 - the `SetMinThreads(64)` floor is gone.

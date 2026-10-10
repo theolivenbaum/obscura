@@ -104,9 +104,12 @@ internal static partial class LinkedStylesheetLoader
             return new LoadedSheet(string.Empty, url, true);
         }
 
+        // The fetch's own tail is not moved to the page loop (tailOnPageLoop): a sheet's @imports
+        // are found from its body, and their requests must not wait for the page's next turn.
+        // Only installing the sheet does (OpLoadStylesheetAsync).
         var raw = await FetchOps.FetchUrlAsync(
                 transport, document, url, "GET", "{}", [], "no-cors", "same-origin",
-                internalLoad: true, hostConsumesBody: true, referrer: referrer, tailOnPageLoop: true)
+                internalLoad: true, hostConsumesBody: true, referrer: referrer)
             .ConfigureAwait(false);
         var load = TakeLoad(document, raw)
             ?? throw new InvalidOperationException("Stylesheet fetch failed: " + url);
