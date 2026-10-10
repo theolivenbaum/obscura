@@ -138,7 +138,11 @@ internal static class GridAlignment
             .MaybeApplyAspectRatio(aspectRatio);
         var maxSize = style.MaxSize
             .MaybeResolve(gridAreaSizeOption, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                style.Size.MaybeResolve(gridAreaSizeOption, calc),
+                style.MinSize.MaybeResolve(gridAreaSizeOption, calc),
+                isMinimum: false)
             .MaybeAdd(boxSizingAdjustment);
 
         // Preserve `normal` provenance until both axes and the preferred aspect ratio are known.

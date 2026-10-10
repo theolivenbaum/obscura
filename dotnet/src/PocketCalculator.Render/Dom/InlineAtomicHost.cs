@@ -53,7 +53,8 @@ internal sealed class InlineAtomicHost(
             return null;
         }
 
-        if (local is "input" or "select" or "textarea" or "button" or "meter" or "progress")
+        if (local is "input" or "select" or "textarea" or "button" or "meter" or "progress"
+            && !(tree.GetNode(dom) is { } control && PaintImages.IsImageButton(control)))
         {
             if (local == "button")
             {

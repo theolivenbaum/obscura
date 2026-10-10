@@ -39,7 +39,10 @@ public class RenderCancellationTests
     [Fact]
     public void APathologicalLayoutStopsAtItsDeadline()
     {
-        DomTree tree = FloatedParagraphs(5_000);
+        // 20,000 paragraphs, not 5,000: with real float layout and the layout caches, 5,000
+        // could finish within a few hundred ms, and on a loaded host the deadline's timer
+        // callback can fire after that, so the pass completed and nothing was thrown.
+        DomTree tree = FloatedParagraphs(20_000);
         using var deadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
         var clock = Stopwatch.StartNew();
 

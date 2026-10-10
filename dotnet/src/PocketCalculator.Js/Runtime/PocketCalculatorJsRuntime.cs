@@ -113,6 +113,7 @@ public sealed partial class PocketCalculatorJsRuntime
         };
         _engine = CreateRealmEngine();
         _isolateHandle = new V8IsolateHandle(_engine, _ops.Cancellation);
+        _ops.Page.IsolateLock = PocketCalculator.Js.Ops.IsolateLock.For(_engine);
         _memoryRegistration = ProcessMemoryGuard.Default.Register(_isolateHandle);
         _ops.Cancellation.Interrupter = () =>
         {

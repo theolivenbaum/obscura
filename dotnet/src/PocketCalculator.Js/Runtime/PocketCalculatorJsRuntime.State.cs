@@ -679,6 +679,7 @@ public sealed partial class PocketCalculatorJsRuntime
         frame.BlockedUrls.AddRange(State.BlockedUrls);
         frame.InterceptEnabled = State.InterceptEnabled;
         frame.PageInFlight = State.PageInFlight;
+        frame.IsolateLock = State.IsolateLock;
         frame.StealthClient = State.StealthClient;
         // A frame realm shares the page transport, so its renderer cache must not open
         // synchronous requests either (upstream 97ff86d). Frame geometry resolves

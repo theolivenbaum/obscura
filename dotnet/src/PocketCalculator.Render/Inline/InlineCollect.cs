@@ -491,6 +491,10 @@ public static class Inline
     internal static Size<float> ConstrainedAutoReplacedSize(float width, float height, LayoutStyle style) =>
         ReplacedItem.FromStyle(width, height, style).Size(new Size<float?>(null, null));
 
+    /// <inheritdoc cref="ConstrainedAutoReplacedSize(float, float, LayoutStyle)"/>
+    internal static Size<float> ConstrainedAutoReplacedSize(ReplacedIntrinsic intrinsic, LayoutStyle style) =>
+        ReplacedItem.FromIntrinsic(intrinsic, style).Size(new Size<float?>(null, null));
+
     /// <summary>
     /// HTML's default object size for replaced media whose intrinsic metadata is not available
     /// yet. Canvas dimensions and decoded video metadata can replace these defaults before

@@ -70,6 +70,14 @@ public sealed partial class PocketCalculatorJsRuntime
     private LoopTick PumpTick(out string? taskError) => PumpTick(out taskError, out _);
 
     /// <summary>
+    /// Set for the length of an autonomous turn: whether the host has work waiting (a CDP
+    /// command) that the rest of the turn's tasks should not hold up.
+    /// </summary>
+    private Func<bool>? _yieldTo;
+
+    private bool YieldRequested() => _yieldTo is { } yieldTo && yieldTo();
+
+    /// <summary>
     /// Runs one batch of ready work. <paramref name="ranTimers"/> reports
     /// whether a timer batch was delivered, which is what the single-turn
     /// entry points use to decide whether the turn still owes the caller one.
@@ -119,6 +127,12 @@ public sealed partial class PocketCalculatorJsRuntime
                 RequeuePostedTasks(posted, index + 1);
                 throw;
             }
+
+            if (index + 1 < posted.Length && YieldRequested())
+            {
+                RequeuePostedTasks(posted, index + 1);
+                return LoopTick.Progressed;
+            }
         }
 
         var due = Timers.TakeDueTimers();
@@ -145,6 +159,12 @@ public sealed partial class PocketCalculatorJsRuntime
                 {
                     Timers.Restore(due, index + 1);
                     throw;
+                }
+
+                if (index + 1 < due.Count && YieldRequested())
+                {
+                    Timers.Restore(due, index + 1);
+                    break;
                 }
             }
             return LoopTick.Progressed;
@@ -304,7 +324,33 @@ public sealed partial class PocketCalculatorJsRuntime
     /// Drive one browser task under the shared task-budget watchdog. The
     /// long-lived server counterpart to bounded settling.
     /// </summary>
-    public async Task<bool> RunAutonomousEventLoopTurnAsync()
+    /// <param name="yieldTo">
+    /// Polled between the turn's tasks: when it answers true the turn stops after the task
+    /// that just ran and hands the rest back to their queues for the next turn.
+    /// </param>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-js (runtime.rs), whose turn runs every posted task and
+    /// every due timer before it returns, and only then lets the connection processor look
+    /// at its socket. Chromium services a DevTools message between any two tasks. On a page
+    /// whose timers each force a 200-700ms relayout (weather.com) one turn ran for seconds,
+    /// every CDP command queued behind it, and Playwright's five-command screenshot took
+    /// 22-30s, past the survey's 35s budget once. The CDP pump passes
+    /// <c>CdpContext.ConnectionHasWork</c>.
+    /// </remarks>
+    public async Task<bool> RunAutonomousEventLoopTurnAsync(Func<bool>? yieldTo = null)
+    {
+        _yieldTo = yieldTo;
+        try
+        {
+            return await RunAutonomousEventLoopTurnCoreAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _yieldTo = null;
+        }
+    }
+
+    private async Task<bool> RunAutonomousEventLoopTurnCoreAsync()
     {
         const ulong AutonomousTaskWatchdogMs = SynchronousTaskFloorMs + WatchdogSchedulingMarginMs;
 
@@ -356,7 +402,7 @@ public sealed partial class PocketCalculatorJsRuntime
         {
             throw new JsRuntimeException(error);
         }
-        if (tick != LoopTick.Idle && !ranTimers)
+        if (tick != LoopTick.Idle && !ranTimers && !YieldRequested())
         {
             await ParkAsync(TimeSpan.FromMilliseconds(50)).ConfigureAwait(false);
             // Rust's poll_fn re-polls after the wake and only then reports the
