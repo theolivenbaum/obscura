@@ -6657,14 +6657,17 @@ boxes matching: 1072/2030 before this work, 1217 after the rule above, then:
   `aspect-ratio: auto 1; width:120px` on the image is 120x28.8, was 120x120;
 - `input type=image` is laid out and painted as its image, without the field's padding, border
   and background (was an 8x6 empty field);
-- a flex item's min/max transfer through the ratio like the other layouts (`FlexboxLayout`).
+- a flex item's min/max transfer through the ratio like the other layouts (`FlexboxLayout`);
+- an atomic inline's percentage height resolves against the definite content height of the
+  block holding its line (`TaffyTreeInline`): capcut.com's card images (`height:100%` in a
+  104px box) are 176x104 as in Chromium, were 176x99.
 
-After all of these: 1922/2030.
+After all of these: 1929/2030. Also left: `getComputedStyle(img).objectFit` reads empty.
 
 Left: an inline `<svg>` without a width attribute is 100% of its containing block in Chromium
 (400x96 in a 400px block, 0x0 under a shrink-to-fit parent) and 300x72 here; an authored
 `aspect-ratio` on a ratio-less replaced box (video, iframe) makes Chromium stretch it to the
-available width; percentage heights of inline replaced boxes in a definite-height block.
+available width.
 
 ### Captures and op continuations hold the page isolate's lock
 

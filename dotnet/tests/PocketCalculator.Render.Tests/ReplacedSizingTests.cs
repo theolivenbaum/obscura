@@ -183,6 +183,33 @@ public class ReplacedSizingTests
     }
 
     /// <summary>
+    /// capcut.com's card images: an inline image's percentage height resolves against the
+    /// definite height of the block holding its line (Chromium 176x104; the port laid it out
+    /// at its ratio height, 99px). Padding comes off a border-box block's height.
+    /// </summary>
+    [Fact]
+    public void AnInlineImagesPercentageHeightResolvesAgainstItsBlock()
+    {
+        DomTree tree = Parse(
+            """
+            <style>html,body{margin:0}</style>
+            <div style="width:176px;height:104px;overflow:hidden"><img id=card src="a.png" style="width:100%;height:100%;object-fit:cover"></div>
+            <div style="width:400px;height:100px">text <img id=half src="a.png" style="height:50%"> tail</div>
+            <div style="width:400px;height:100px;box-sizing:border-box;padding:10px">text <img id=padded src="a.png" style="height:50%"></div>
+            """);
+        Dictionary<NodeId, (float Width, float Height)> intrinsic = [];
+        foreach (string id in new[] { "card", "half", "padded" })
+        {
+            intrinsic[Id(tree, id)] = (150f, 36f);
+        }
+
+        DomLayout laid = RenderDom.LayoutDomWithImages(tree, (1280f, 720f), intrinsic);
+        AssertSize(laid, tree, "card", 176f, 104f);
+        AssertSize(laid, tree, "half", 209f, 50f); // 208.33 from x 30.23, edges snapped
+        AssertSize(laid, tree, "padded", 167f, 40f); // 166.66, snapped
+    }
+
+    /// <summary>
     /// The same rule for a non-replaced box with an authored <c>aspect-ratio</c>: with both
     /// sizes definite the ratio is ignored (Chromium: 120x24, the port gave 120x60).
     /// </summary>
