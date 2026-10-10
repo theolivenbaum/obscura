@@ -69,6 +69,47 @@ public class Html5libTreeConstructionTests
         Assert.True(failures.Length == 0, failures.ToString());
     }
 
+    /// <summary>
+    /// The corpus's documents through <see cref="DocumentParser"/>, the parser of a document whose
+    /// scripts run while it is parsed: stopping at every script end tag and yielding after every
+    /// token changes nothing about the tree it builds.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Files))]
+    public void CorpusFileParsesTheSameThroughTheScriptedParser(string file)
+    {
+        var failures = new StringBuilder();
+        foreach (var testCase in Load(Path.Combine(CorpusDirectory(), file)))
+        {
+            if (testCase.ScriptOff || testCase.Fragment is not null)
+            {
+                continue;
+            }
+
+            var key = file + ":" + testCase.Index;
+            if (KnownFailures.ContainsKey(key))
+            {
+                continue;
+            }
+
+            var tree = new DomTree();
+            var parser = DocumentParser.Begin(tree, testCase.Data);
+            while (parser.Run(1, out _) != ParserStop.Finished)
+            {
+            }
+
+            var actual = Serialize(tree, fragment: false);
+            if (!string.Equals(actual, testCase.Expected, StringComparison.Ordinal))
+            {
+                failures.Append("### ").Append(key).Append('\n').Append(testCase.Data)
+                    .Append("\n--- expected\n").Append(testCase.Expected)
+                    .Append("\n--- actual\n").Append(actual).Append("\n\n");
+            }
+        }
+
+        Assert.True(failures.Length == 0, failures.ToString());
+    }
+
     [Fact]
     public void TheWholeCorpusRuns()
     {

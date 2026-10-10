@@ -984,6 +984,8 @@ internal sealed partial class HtmlTreeBuilder
         {
             _tree.AppendChild(location.Parent, node);
         }
+
+        LogInsertion(node);
     }
 
     private Rec CreateElement(string ns, string local, List<Attribute> attrs, out bool isTemplate)
@@ -1148,6 +1150,8 @@ internal sealed partial class HtmlTreeBuilder
         {
             _tree.AppendChild(_pendingTextParent, node);
         }
+
+        LogInsertion(node);
     }
 
     /// <summary>Add each attribute the element does not already have (the html and body merges).</summary>
