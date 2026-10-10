@@ -6771,7 +6771,7 @@ scripts ran in document order with no task between them, readystatechange never 
 script that a parser script inserted could only run once every parser and deferred script had.
 grammarly.com: Transcend's consent UI (ui.js, inserted by the parser-blocking airgap.js inside
 `#__next`) ran after Next.js hydration, which saw its extra `<script>` and fell back to a client
-render (React #418/#423; base build 1 load in 2, this build 0 in 5).
+render (React #418/#423 in 3 of 4 live loads of the base build, 0 of 7 with this one).
 
 The navigation now follows the HTML parser's script handling as Chromium 141 does it
 (`Page.DocumentLoad.cs`, `DocumentParser`, `HtmlTreeBuilder.Scripting.cs`):
@@ -6812,7 +6812,8 @@ The navigation now follows the HTML parser's script handling as Chromium 141 doe
   wait for them, as in Chromium.
 
 Measured with `scripts/script-order-conformance/probe.mjs` (local server, 150 ms document delay so
-the port's runtime is up): 7 of 12 pages log exactly what Chromium logs, from 0 of 12. The rest
+the port's runtime is up): 9 of 13 pages log exactly what Chromium logs (the first 9 pages: 0 of 9
+before). The rest
 differ only in timing (the port's first execution of bootstrap paths is slower, e.g. 50 ms for
 the first script insertion, so a 20 ms dynamic script or a 0 ms async fetch finishes in a
 different turn) and in custom elements: the parser stops right after inserting an element of a
