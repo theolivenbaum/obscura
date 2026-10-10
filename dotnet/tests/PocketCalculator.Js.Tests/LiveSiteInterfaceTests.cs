@@ -55,7 +55,7 @@ public sealed class LiveSiteInterfaceTests
                 e.isVisible, typeof e.time, e.target === document.getElementById('t')].join('|');
             }).observe(document.getElementById('t'));
             """);
-        await fixture.Runtime.RunEventLoopBoundedAsync(500);
+        await EventLoopWait.UntilAsync(fixture.Runtime, "globalThis.got !== undefined");
         Assert.Equal(
             "true|0|{}|[object DOMRectReadOnly]|true|[object DOMRectReadOnly]|[object DOMRectReadOnly]|false|number|true",
             Eval(fixture.Runtime, "String(globalThis.got)"));
@@ -164,7 +164,7 @@ public sealed class LiveSiteInterfaceTests
               globalThis.result = [a, b, c, d, e, f, x + ':fetchCalls=' + calls].join(' || ');
             })();
             """);
-        await fixture.Runtime.RunEventLoopBoundedAsync(1000);
+        await EventLoopWait.UntilAsync(fixture.Runtime, "globalThis.result !== undefined");
         Assert.Equal(
             "200:text/x-foo:8:blobtext:blob::basic"
             + " || 200:OK:text/plain;charset=utf-8:hello:data:text/plain;charset=utf-8;base64,aGVsbG8=:basic:content-type"
