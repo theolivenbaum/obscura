@@ -2193,7 +2193,8 @@ OM, TrustedTypes, Navigation API, ...), CompressionStream/DecompressionStream (n
 shim), TaskController/TaskSignal (postTask has no priority change), the HTML collections, and the
 members Chromium has only in secure contexts. The IndexedDB objects keep their members as own
 properties (the shim's request records assign to themselves). DOMParser and createHTMLDocument
-documents are still plain objects, not HTMLDocuments. Pinned by `GlobalInterfaceObjects`.
+documents are HTMLDocuments/XMLDocuments now (see "Documents without a browsing context").
+Pinned by `GlobalInterfaceObjects`.
 
 ### Live-site boot blockers (October 2026)
 
@@ -6228,10 +6229,65 @@ expectations are Chromium 141's.
 Known differences: the port parses the whole document before running scripts, so an element
 that follows a defining `<script>` in the markup is upgraded by `define()` (its constructor sees
 its children and attributes) rather than constructed by the parser, and `document.write`'s
-elements are upgraded on insertion; `adoptedCallback` never fires, because
-`createHTMLDocument()`/`DOMParser` documents are stand-ins over the page's own tree
-(`ownerDocument` never changes); `connectedMoveCallback` is read but `moveBefore` does not exist;
+elements are upgraded on insertion; `connectedMoveCallback` is read but `moveBefore` does not exist;
 reactions are per realm, so an isolated world's DOM writes do not reach the main world's callbacks.
+
+### Documents without a browsing context (dell.com)
+
+dell.com's bot detector (afcs.dellcdn.com detector-lazy.min.js) snapshots the page with
+`document.implementation.createHTMLDocument("cloner-doc").importNode(node, false)` and appends
+the copies into that document. The shim's createHTMLDocument and DOMParser documents were
+plain objects over a detached `<html>` of the page whose importNode/adoptNode returned their
+argument, so the page's own `<html>` moved into the cloner document about 20 s after load and
+screenshots went blank. DEVIATION from crates/obscura-js/js/bootstrap.js and
+crates/obscura-dom (one document per tree), measured against Chromium 141:
+
+- **Real documents.** createHTMLDocument, createDocument, DOMParser, `new Document()`,
+  Document.cloneNode and XHR's responseXML each make a native document node in the page's arena
+  (`DomTree.Documents.cs`, op_dom `create_document`/`parse_document`/`document_info`/
+  `owner_document`/`adopt_node`, `dotnet/docs/op-protocol.md`). It is never connected in the
+  native sense, so nothing in it renders, enters the page's id index, reaches page
+  MutationObservers or loads; its nodes are DOM-connected (`isConnected`), report it as
+  `ownerDocument` (cached per tree-mutation epoch), and run no scripts (a script inserted there
+  is marked already started) and upgrade no custom elements (custom ones still get
+  connected/disconnected/adoptedCallback). HTMLDocument/XMLDocument/Document interfaces as in
+  Chromium; URL about:blank (DOMParser's: the creating document's), readyState "loading" for
+  createHTMLDocument and "complete" otherwise, compatMode from the parse, hidden, no
+  defaultView/location/cookie/style sheets/focus, elementFromPoint null.
+- **importNode/adoptNode/cloneNode.** importNode clones into the target document (TypeError,
+  NotSupportedError for a document or shadow root); adoptNode removes the node from its parent
+  and adopts its shadow-including subtree (NotSupportedError for a document,
+  HierarchyRequestError for a shadow root), queueing adoptedCallback; insertion under another
+  document's node adopts natively. cloneNode keeps the source's document; a document's clone is
+  a new document of its type. Input/textarea clones carry the value and checkedness (HTML
+  cloning steps; the shim dropped a value set from script), and an input in the default or
+  default/on value mode sets its value attribute.
+- **Pre-insertion validity for documents**: a second element, a second doctype or a text node
+  under a document throws HierarchyRequestError (the native tree enforced none).
+- **XML.** DOMParser with an XML type and responseXML parse XML (`XmlParsing.cs`, in-box
+  `XmlReader`, DTD entities internal only and capped); a malformed input carries Chromium's
+  `<parsererror>` (the message text is XmlReader's, not libxml2's), and responseXML is null for
+  it. XMLSerializer, and innerHTML/outerHTML in an XML document, use DOM Parsing's XML
+  serialization (`DomTree.SerializeXml.cs`; `<br xmlns="http://www.w3.org/1999/xhtml" />`).
+  Element.prototype.prefix added.
+- **document.open/write/close** on such a document: open() empties it, each write is parsed at
+  once (the document holds what the input so far parses to), close() makes it "complete"; a
+  write without open() appends to the body while it is "loading".
+- **Node.prototype.ownerDocument on a document is null** (also for the page's document called
+  through Node.prototype's getter). Transcend's airgap.js reads it that way to find its
+  sanitizer sandbox's document and took the page.
+
+Known differences: template contents stay owned by the page's document (Chromium gives an
+imported template's content its own inert document); a CDATA section in parsed XML is text
+(the tree has no CDATA node kind); DOMParser parses with scripting enabled, so `<noscript>`
+content is raw text; Range.cloneContents is still a stub; getComputedStyle on an element of
+such a document answers its inline style where Chromium answers ""; an `<img>` there reports
+complete false. grammarly.com: with airgap.js no longer pathological, its consent UI (ui.js)
+now finishes after Next.js hydration in the port, which leaves an extra dynamically inserted
+`<script>` in `#__next` and React reports #418 and renders on the client (Chromium runs ui.js
+during parsing, before hydration). The page renders the same; the script scheduling race is
+separate from this work. Pinned by `ParsedDocumentTests` (Js), `SecondaryDocumentTests` (Dom)
+and `ParsedDocumentPageTests` (Browser).
 
 ### Interface members off Element.prototype, CharacterData textContent, slots, window.origin
 
@@ -6494,13 +6550,10 @@ instances.
   `prefix` member with `=== null`).
 - **SecurityPolicyViolationEvent** added (constructible, Chromium's fields and defaults; the
   shim fires none): airgap.js constructs one at load.
-- **Parsed documents**: DOMParser's and createHTMLDocument's documents are still plain
-  objects, and Document.prototype's members ignored `this`, so
+- **Parsed documents**: Document.prototype's members ignored `this`, so
   `Document.prototype.write.call(sandboxDoc, html)` (airgap's sanitizer, once it got that far)
-  rewrote grammarly.com's page. Document.prototype's members, and the Node.prototype members
-  such a document defines itself, now use the document's own member when `this` is one
-  (`_detachedDocuments`), and throw Illegal invocation when it has none; the parsed document
-  gained open/write/writeln/close.
+  rewrote grammarly.com's page. Superseded by real documents ("Documents without a browsing
+  context"): the members act on the document they are called on.
 
 Not done (counts from the same dump against Chromium 141 on a data: page): 3393 members
 Chromium has that the shim lacks (1349 on WebGL2RenderingContext, 739 on WebGLRenderingContext,

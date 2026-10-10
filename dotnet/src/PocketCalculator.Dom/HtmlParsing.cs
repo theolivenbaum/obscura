@@ -20,6 +20,18 @@ public static class HtmlParsing
         return tree;
     }
 
+    /// <summary>
+    /// Parse a whole document for a document without a browsing context (<c>DOMParser</c>,
+    /// <c>document.write</c> on one): declarative shadow roots stay templates, as
+    /// <c>parseFromString</c> leaves them in Chromium.
+    /// </summary>
+    public static DomTree ParseInertDocument(string html, long contentByteBudget)
+    {
+        var tree = new DomTree { ContentByteBudget = contentByteBudget };
+        HtmlTreeBuilder.ParseDocument(tree, html);
+        return tree;
+    }
+
     public static DomTree ParseFragment(string html) =>
         ParseFragmentWithContext(html, QualName.Html("body"));
 

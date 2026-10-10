@@ -173,7 +173,7 @@ public static class DomOps
                 // changes through title.textContent must be reflected by
                 // document.title, not hidden behind the navigation-time snapshot.
                 var title = string.Empty;
-                if (dom.TryQuerySelector("title", out var titleId, out _) && titleId is { } found)
+                if (dom.TryQuerySelectorFrom(DocumentArg(dom, arg1), "title", out var titleId, out _) && titleId is { } found)
                 {
                     var parts = dom.TextContent(found)
                         .Split(TitleWhitespace, StringSplitOptions.RemoveEmptyEntries);
@@ -217,12 +217,18 @@ public static class DomOps
             case "document_encoding":
                 return SerdeJson.String(gs.Encoding);
 
+            // Port addition: the document-level commands take an optional document node id in
+            // arg1, for the secondary documents below (DomTree.Documents.cs). Empty is the page.
             case "document_element":
             {
-                foreach (var cid in dom.Children(dom.Document))
+                var documentNode = DocumentArg(dom, arg1);
+                var anyElement = documentNode != dom.Document;
+                foreach (var cid in dom.Children(documentNode))
                 {
+                    // A secondary document's element child is its document element whatever
+                    // its name (an XML document's root); the page keeps the html-only lookup.
                     var element = dom.GetNode(cid)?.AsElement();
-                    if (element is not null && string.Equals(element.Name.Local, "html", StringComparison.Ordinal))
+                    if (element is not null && (anyElement || string.Equals(element.Name.Local, "html", StringComparison.Ordinal)))
                     {
                         return Expose(dom, cid);
                     }
@@ -233,7 +239,7 @@ public static class DomOps
 
             case "document_doctype":
             {
-                foreach (var cid in dom.Children(dom.Document))
+                foreach (var cid in dom.Children(DocumentArg(dom, arg1)))
                 {
                     if (dom.GetNode(cid)?.Data is DoctypeData doctype)
                     {
@@ -260,7 +266,14 @@ public static class DomOps
                 // best-effort: it only registers nodes at creation time and does not
                 // update on reparent, so it can point to a detached clone while the
                 // live node is elsewhere in the tree.
-                var doc = dom.Document;
+                var doc = DocumentArg(dom, arg2);
+                if (doc != dom.Document)
+                {
+                    return dom.TryQuerySelectorFrom(doc, IdSelector(arg1), out var inDocument, out _) && inDocument is { } hitInDocument
+                        ? Expose(dom, hitInDocument)
+                        : "-1";
+                }
+
                 var nid = dom.GetElementById(arg1);
                 if (nid is { } indexed && dom.Ancestors(indexed).Contains(doc))
                 {
@@ -268,9 +281,7 @@ public static class DomOps
                 }
 
                 // Fall back to full scan for the live document.
-                var selector = "[id=\"" + arg1.Replace("\\", "\\\\", StringComparison.Ordinal)
-                    .Replace("\"", "\\\"", StringComparison.Ordinal) + "\"]";
-                return dom.TryQuerySelector(selector, out var scanned, out _) && scanned is { } hit
+                return dom.TryQuerySelector(IdSelector(arg1), out var scanned, out _) && scanned is { } hit
                     ? Expose(dom, hit)
                     : "-1";
             }
@@ -392,7 +403,10 @@ public static class DomOps
                 var name = string.Empty;
                 if (element is not null)
                 {
+                    // An HTML element is upper-cased in an HTML document only: an XHTML element
+                    // of an XML document keeps its case (DOM "HTML-uppercased qualified name").
                     name = string.Equals(element.Name.Ns, Namespaces.Html, StringComparison.Ordinal)
+                        && !InXmlDocument(dom, ParseNodeOrZero(arg1))
                         ? element.Name.Local.ToUpperInvariant()
                         : element.Name.Prefix is { } prefix
                             ? prefix + ":" + element.Name.Local
@@ -494,11 +508,23 @@ public static class DomOps
                 return "true";
             }
 
+            // A node of an XML document serializes as XML (DOM Parsing's fragment
+            // serializing algorithm); everything else as HTML.
             case "inner_html":
-                return SerdeJson.String(dom.InnerHtml(ParseNodeOrZero(arg1)));
+            {
+                var nodeId = ParseNodeOrZero(arg1);
+                return SerdeJson.String(InXmlDocument(dom, nodeId) ? dom.InnerXml(nodeId) : dom.InnerHtml(nodeId));
+            }
 
             case "outer_html":
-                return SerdeJson.String(dom.OuterHtml(ParseNodeOrZero(arg1)));
+            {
+                var nodeId = ParseNodeOrZero(arg1);
+                return SerdeJson.String(InXmlDocument(dom, nodeId) ? dom.OuterXml(nodeId) : dom.OuterHtml(nodeId));
+            }
+
+            // Port addition: XMLSerializer.serializeToString.
+            case "outer_xml":
+                return SerdeJson.String(dom.OuterXml(ParseNodeOrZero(arg1)));
 
             case "append_child":
             {
@@ -800,6 +826,71 @@ public static class DomOps
                 return contents is { } id ? Expose(dom, id) : "-1";
             }
 
+            // Port addition (DomTree.Documents.cs): a document without a browsing context, empty
+            // (arg1 its content type) or parsed from arg2. HTML for text/html, XML otherwise.
+            // Scripts parsed into it are already started, so moving one into the page does
+            // not run it, as in Chromium.
+            case "create_document":
+                return Expose(dom, dom.CreateDocument(arg1.Length == 0 ? "application/xml" : arg1));
+
+            case "parse_document":
+            {
+                var contentType = arg1.Length == 0 ? "text/html" : arg1;
+                var html = string.Equals(contentType, "text/html", StringComparison.Ordinal);
+                var parsed = html
+                    ? HtmlParsing.ParseInertDocument(arg2, dom.ContentByteBudget)
+                    : XmlParsing.Parse(arg2, dom.ContentByteBudget);
+                EnsureFragmentFits(dom, parsed);
+                var document = dom.CreateDocument(contentType, html && parsed.IsQuirks);
+                dom.ImportChildrenFrom(document, parsed, parsed.Document);
+                foreach (var child in dom.Children(document))
+                {
+                    StateHelpers.MarkScriptSubtreeStarted(gs, child);
+                }
+
+                return Expose(dom, document);
+            }
+
+            // A secondary document's content type and mode, or null for any other node.
+            case "document_info":
+            {
+                var nodeId = ParseNodeOrZero(arg1);
+                if (dom.DocumentContentType(nodeId) is not { } type)
+                {
+                    return "null";
+                }
+
+                var sb = new StringBuilder(64);
+                sb.Append("{\"contentType\":");
+                SerdeJson.AppendString(sb, type);
+                sb.Append(",\"quirks\":");
+                sb.Append(Bool(dom.IsDocumentQuirks(nodeId)));
+                sb.Append('}');
+                return sb.ToString();
+            }
+
+            // Node.ownerDocument: a secondary document's id, -1 for the page's document, and
+            // -2 for a document node, which has none.
+            case "owner_document":
+            {
+                var owner = dom.OwnerDocumentOf(ParseNodeOrZero(arg1));
+                return owner is not { } ownerId ? "-2" : ownerId != dom.Document ? Expose(dom, ownerId) : "-1";
+            }
+
+            // DOM "adopt" after the shim removed the node from its parent: arg2 is the new
+            // node document, empty for the page's.
+            case "adopt_node":
+            {
+                var nodeId = ParseNodeOrZero(arg1);
+                if (dom.GetNode(nodeId) is null)
+                {
+                    return "false";
+                }
+
+                dom.AdoptSubtree(nodeId, DocumentArg(dom, arg2));
+                return "true";
+            }
+
             case "create_document_fragment":
                 return Expose(dom, dom.NewNode(NodeData.Document));
 
@@ -860,8 +951,19 @@ public static class DomOps
 
             // arg1 = name, arg2 = public_id. system_id is stored only in the JS
             // wrapper, since neither current WPT test reads it back from the tree.
+            // Port addition: arg2 may be "public_id\0system_id", which keeps the system id
+            // in the tree (DOMImplementation.createDocumentType).
             case "create_doctype":
-                return Expose(dom, dom.NewNode(NodeData.Doctype(arg1, arg2, string.Empty)));
+            {
+                var (publicId, systemId) = arg2.Contains('\0', StringComparison.Ordinal) ? SplitOnceNul(arg2) : (arg2, string.Empty);
+                return Expose(dom, dom.NewNode(NodeData.Doctype(arg1, publicId, systemId)));
+            }
+
+            case "doctype_system_id":
+            {
+                var doctype = dom.GetNode(ParseNodeOrZero(arg1))?.Data as DoctypeData;
+                return SerdeJson.String(doctype?.SystemId ?? string.Empty);
+            }
 
             case "pi_target":
             {
@@ -1405,6 +1507,22 @@ public static class DomOps
     }
 
     private static string Bool(bool value) => value ? "true" : "false";
+
+    /// <summary>The document a document-level command addresses: the page's unless a secondary document's id is given.</summary>
+    private static NodeId DocumentArg(DomTree dom, string arg) =>
+        arg.Length != 0 && uint.TryParse(arg, out var raw) && dom.IsSecondaryDocument(NodeId.New(raw))
+            ? NodeId.New(raw)
+            : dom.Document;
+
+    /// <summary>Whether a node belongs to a secondary document that is not an HTML document.</summary>
+    private static bool InXmlDocument(DomTree dom, NodeId node) =>
+        dom.HasSecondaryDocuments
+        && dom.NodeDocumentOf(node) is var document
+        && document != dom.Document
+        && !string.Equals(dom.DocumentContentType(document), "text/html", StringComparison.Ordinal);
+
+    private static string IdSelector(string id) =>
+        "[id=\"" + id.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal) + "\"]";
 
     /// <summary>
     /// The ancestors an event at <paramref name="start"/> propagates through (op_dom

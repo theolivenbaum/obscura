@@ -176,6 +176,33 @@ Port addition: `document_close` (no arguments, answers `"true"`). The C# shim's
 document; the host counts it so the CDP layer reports the reload's lifecycle events
 (`Dispatcher.DrainDocumentLoads`). The Rust shim's `close()` does nothing and never sends it.
 
+Port additions for documents without a browsing context (`DomTree.Documents.cs`,
+bootstrap.js `_parsedDocs`): createHTMLDocument, createDocument, DOMParser, `new Document()`,
+Document.cloneNode and XHR's responseXML each make a document node in the same arena, never
+connected to the page. The Rust shim stands them in as plain objects over a detached element
+and sends none of these.
+
+- `create_document` (arg1 content type, default `application/xml`): a new empty document's id.
+- `parse_document` (arg1 content type, arg2 markup): a new document holding arg2 parsed as a
+  whole document, HTML for `text/html` (declarative shadow roots left as templates, scripts
+  already started), XML otherwise (`XmlParsing.cs`; malformed input carries Chromium's
+  `<parsererror>`). Answers its id; `quota-exceeded` like `set_inner_html` when it cannot fit.
+- `document_info` (arg1 node): `{"contentType":...,"quirks":bool}` for such a document, else
+  `"null"`.
+- `owner_document` (arg1 node): the node document's id when it is such a document, `-1` when
+  it is the page's, `-2` when arg1 is itself a document.
+- `adopt_node` (arg1 node, arg2 document id or empty for the page's): makes arg2 the node
+  document of arg1's shadow-including subtree; `"true"`. The shim detaches the node first.
+  Inserting a node under another document's node (`append_child`, `insert_before`) adopts it
+  as well, natively.
+- `outer_xml` (arg1 node): DOM Parsing's XML serialization (`XMLSerializer`). `inner_html` and
+  `outer_html` answer it too for a node of an XML document.
+- `doctype_system_id` (arg1 doctype node), and `create_doctype` accepts arg2 as
+  `public_id\0system_id`.
+- `document_element`, `document_doctype` and `document_title` take an optional document id in
+  arg1, and `get_element_by_id` one in arg2; empty (as the Rust shim sends) is the page's. A
+  secondary document's document element is its first element child whatever its name.
+
 Port additions for shadow roots and slots (bootstrap.js `_shadowRootFromNid`, `HTMLSlotElement`,
 `assignedSlot`, `slotchange`; the Rust shim has none of them):
 
