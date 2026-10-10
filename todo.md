@@ -3436,6 +3436,13 @@ seeds); `AComputedStyleReadIsAnsweredWithoutARestyleWhenNothingOnItsChainChanges
 `LayoutReadCacheTests.ComputedStyleReadsAfterMutationsElsewhereAreAnsweredBeforeTheRestyle` (Js,
 values from Chromium 141) pin it.
 
+It also fails closed when a pending mutation inserts, removes, edits or re-attributes a
+`<style>` or `<link>`, or moves an element carrying fetched CSS (`TouchesStylesheets`). The
+planner never needs that test, because the restyle collects the sheets again and a changed
+source list misses the stylesheet cache, but a read answered before the restyle has no such
+backstop: removing a script-inserted `<link>` left its rules in the answer
+(`AScriptInsertedStylesheetLinkAppliesAndItsRemovalRevokesTheRules`, Browser).
+
 ### The retained planner learns a batch's sibling lists once
 
 DEVIATION from `crates/obscura-render/src/dom.rs`, which, for every insertion in a batch, lists

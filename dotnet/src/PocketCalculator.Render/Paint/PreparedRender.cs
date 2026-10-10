@@ -868,9 +868,86 @@ public sealed partial class PreparedRender
             return memo.Damage;
         }
 
-        HashSet<NodeId>? damage = RetainedStylePlanner.OwnStyleDamage(tree, sheet, pending);
+        HashSet<NodeId>? damage = TouchesStylesheets(tree, pending)
+            ? null
+            : RetainedStylePlanner.OwnStyleDamage(tree, sheet, pending);
         _ownDamageMemo = version is { } stored ? (pending, pending.Count, stored, damage) : null;
         return damage;
+    }
+
+    /// <summary>
+    /// Whether a pending mutation may change the document's stylesheets: a <c>&lt;style&gt;</c> or
+    /// <c>&lt;link&gt;</c> inserted, removed, edited or re-attributed, or an element carrying fetched
+    /// CSS moved.
+    /// </summary>
+    /// <remarks>
+    /// The retained planner never needs this, because the restyle it plans collects the sheets
+    /// again and a changed source list misses the stylesheet cache, which forces a full
+    /// recompute. A read answered before that restyle has no such backstop: removing a
+    /// script-inserted <c>&lt;link&gt;</c> otherwise left its rules applied to the answer.
+    /// </remarks>
+    private static bool TouchesStylesheets(DomTree tree, IReadOnlyList<RetainedStyleMutation> pending)
+    {
+        const int MaxWalk = 4096;
+        int walked = 0;
+        foreach (RetainedStyleMutation mutation in pending)
+        {
+            switch (mutation)
+            {
+                case RetainedStyleMutation.Attribute attribute when ContributesStylesheet(tree, attribute.Mutation.Node):
+                    return true;
+                case RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Text text }
+                    when ContributesStylesheet(tree, text.Parent ?? tree.GetNode(text.Node)?.Parent ?? text.Node):
+                    return true;
+                case RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Insert insert }:
+                    if (SubtreeContributesStylesheet(tree, insert.Node, ref walked, MaxWalk))
+                    {
+                        return true;
+                    }
+
+                    break;
+                case RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Remove remove }:
+                    if (SubtreeContributesStylesheet(tree, remove.Node, ref walked, MaxWalk))
+                    {
+                        return true;
+                    }
+
+                    break;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool SubtreeContributesStylesheet(DomTree tree, NodeId root, ref int walked, int maxWalk)
+    {
+        if (ContributesStylesheet(tree, root))
+        {
+            return true;
+        }
+
+        foreach (NodeId node in tree.Descendants(root))
+        {
+            if (++walked > maxWalk || ContributesStylesheet(tree, node))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ContributesStylesheet(DomTree tree, NodeId id)
+    {
+        if (tree.GetNode(id)?.AsElement() is not { } element)
+        {
+            return false;
+        }
+
+        string name = element.Name.Local;
+        return string.Equals(name, "style", StringComparison.Ordinal)
+            || string.Equals(name, "link", StringComparison.Ordinal)
+            || tree.ExternalStylesheetCss(id) is not null;
     }
 
     private (IReadOnlyList<RetainedStyleMutation> Pending, int Count, ulong Version, HashSet<NodeId>? Damage)? _ownDamageMemo;
