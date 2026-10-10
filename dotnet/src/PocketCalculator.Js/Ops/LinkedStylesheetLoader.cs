@@ -69,11 +69,12 @@ internal static partial class LinkedStylesheetLoader
             var referrer = policy is null ? null : FetchReferrer.Client with { Policy = policy };
             var loaded = await LoadAsync(transport, document, url, 0, new HashSet<string>(StringComparer.Ordinal), referrer)
                 .ConfigureAwait(false);
-            // This runs on whichever thread completed the load: installing the sheet writes the
-            // document and invalidates its retained render, so it holds the isolate lock
-            // (IsolateLock), which keeps page script and captures out.
-            if (!document.IsolateLock.Run(
-                    () => StylesheetOps.SetLoadedExternalStylesheet(document, ownerNid, loaded.Css, loaded.OriginClean)))
+            // Installing the sheet writes the document and invalidates its retained render, so it
+            // runs on the page's own loop between tasks (IsolateLock.RunOnPageAsync), as the
+            // reference's op does, not on whichever thread completed the load.
+            if (!await document.IsolateLock.RunOnPageAsync(
+                    () => StylesheetOps.SetLoadedExternalStylesheet(document, ownerNid, loaded.Css, loaded.OriginClean))
+                .ConfigureAwait(false))
             {
                 return """{"ok":false}""";
             }

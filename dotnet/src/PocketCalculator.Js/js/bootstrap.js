@@ -730,6 +730,13 @@ async function __runDynScriptTask(task, gen = task.gen || 0) {
   const stale = () => (abandoned = task.finished || (task.gen || 0) !== gen);
   try {
     if (task.isModule) {
+      // DEVIATION from crates/obscura-js/js/bootstrap.js: the graph is fetched first, off the
+      // page thread (op_prefetch_module_graph), so import() reads it from the loader's cache
+      // instead of fetching each module synchronously inside script with the isolate held.
+      // Chromium also fetches the whole graph before evaluating it. A failure here is the
+      // import's to report.
+      try { await __obscuraCore.ops.op_prefetch_module_graph(task.url); } catch (e) {}
+      if (stale()) return;
       await import(task.url);
       if (stale()) return;
     } else {

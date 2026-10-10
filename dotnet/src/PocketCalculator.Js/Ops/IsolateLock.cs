@@ -23,6 +23,14 @@ namespace PocketCalculator.Js.Ops;
 /// and its read.
 /// </para>
 /// <para>
+/// Op settlements and the op tails that touch page state now run on the page's own loop
+/// (<see cref="OpCompletionContext"/>, <see cref="RunOnPageAsync{T}"/>), so the page thread no
+/// longer races them and the lock is uncontended in the engine's own use. It is kept, held by
+/// captures, parser steps and the render-resource service step, because it costs a reentrant
+/// <c>Locker</c> on the thread that already owns the isolate and because an embedder may still
+/// call into the runtime from a thread of its own while a capture runs.
+/// </para>
+/// <para>
 /// The lock is V8's own <c>Locker</c>, which ClearScript takes for every call into an engine
 /// and which is reentrant on its thread, so the body may call into script and the ops it
 /// calls are unaffected. It is entered through a one-line trampoline function that calls the
@@ -33,15 +41,54 @@ namespace PocketCalculator.Js.Ops;
 public sealed class IsolateLock
 {
     /// <summary>No isolate: the body runs as it is (a state with no runtime, in tests).</summary>
-    public static IsolateLock None { get; } = new(null);
+    public static IsolateLock None { get; } = new(null, null);
 
     private readonly ScriptObject? _trampoline;
+    private readonly OpCompletionContext? _pageThread;
 
-    private IsolateLock(ScriptObject? trampoline) => _trampoline = trampoline;
+    private IsolateLock(ScriptObject? trampoline, OpCompletionContext? pageThread)
+    {
+        _trampoline = trampoline;
+        _pageThread = pageThread;
+    }
 
-    /// <summary>A lock on <paramref name="engine"/>'s isolate.</summary>
-    internal static IsolateLock For(V8ScriptEngine engine) =>
-        new((ScriptObject)engine.Evaluate("<isolate-lock>", true, "(function (body) { body(); })"));
+    /// <summary>
+    /// A lock on <paramref name="engine"/>'s isolate, whose page loop runs
+    /// <paramref name="pageThread"/>'s posts.
+    /// </summary>
+    internal static IsolateLock For(V8ScriptEngine engine, OpCompletionContext? pageThread = null) =>
+        new((ScriptObject)engine.Evaluate("<isolate-lock>", true, "(function (body) { body(); })"), pageThread);
+
+    /// <summary>
+    /// Run <paramref name="body"/> on the page's own event loop, between tasks, and complete the
+    /// returned task there: the place for an async op's tail that touches page state after its
+    /// <c>await</c>.
+    /// </summary>
+    /// <remarks>
+    /// This is what deno_core does for every op, and what the port did with <see cref="Run{T}"/>
+    /// from the thread that completed the op until op settlements moved to the page's loop
+    /// (<see cref="OpCompletionContext"/>): waiting for the isolate lock there parked a
+    /// thread-pool thread for as long as page script ran, which is how the pool starved. With
+    /// no page loop (a state with no runtime) the body runs under <see cref="Run{T}"/> as before.
+    /// Cancelled when the page goes away before the body runs.
+    /// </remarks>
+    public Task<T> RunOnPageAsync<T>(Func<T> body)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+        if (_pageThread is { } pageThread)
+        {
+            return pageThread.InvokeAsync(body);
+        }
+
+        try
+        {
+            return Task.FromResult(Run(body));
+        }
+        catch (Exception error)
+        {
+            return Task.FromException<T>(error);
+        }
+    }
 
     /// <summary>Run <paramref name="body"/> holding the isolate lock and return its result.</summary>
     /// <remarks>

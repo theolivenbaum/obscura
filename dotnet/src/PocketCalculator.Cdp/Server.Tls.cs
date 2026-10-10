@@ -256,8 +256,23 @@ public static partial class CdpServer
 
         public override Task FlushAsync(CancellationToken cancellationToken) => inner.FlushAsync(cancellationToken);
 
+        // A synchronous read stays synchronous: it used to block on ReadAsync, which holds a
+        // thread waiting on a continuation that needs another one.
         public override int Read(byte[] buffer, int offset, int count) =>
-            ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+            Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
+        {
+            if (_prefix.IsEmpty)
+            {
+                return inner.Read(buffer);
+            }
+
+            var n = Math.Min(buffer.Length, _prefix.Length);
+            _prefix.Span[..n].CopyTo(buffer);
+            _prefix = _prefix[n..];
+            return n;
+        }
 
         public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {

@@ -100,6 +100,15 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
     /// </summary>
     private readonly Dictionary<string, string> _canonicalHrefs = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Fetches in flight, by requested URL, so a prefetch and an evaluation share one request.
+    /// A failed one stays until an evaluation has reported it (<c>Consume</c>).
+    /// </summary>
+    private readonly Dictionary<string, Task<Document>> _loads = new(StringComparer.Ordinal);
+
+    /// <summary>The static requests scanned from each loaded module, by canonical URL.</summary>
+    private readonly Dictionary<string, string[]> _requests = new(StringComparer.Ordinal);
+
     private readonly PocketCalculatorHttpClient? _standaloneClient;
     private readonly Func<ModuleNetworkContext>? _pageNetwork;
     private int _staticGraphDepth;
@@ -247,20 +256,64 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
         return ImportMap.TryResolve(specifier, baseRecord, out resolved, out error);
     }
 
+    /// <summary>
+    /// The token a blocking module load observes: the isolate's script deadline, set by the
+    /// runtime, so a watchdog can stop a module graph waiting on the network. Null waits
+    /// without one.
+    /// </summary>
+    public Func<CancellationToken>? BlockingLoadCancellation { get; set; }
+
     /// <inheritdoc/>
+    /// <remarks>
+    /// <para>
+    /// V8 resolves a module graph synchronously, from inside the script that imports it, and
+    /// ClearScript gives the loader no asynchronous escape, so a document that is not loaded
+    /// yet is waited for here, on the page's thread, holding the isolate. Static graphs avoid
+    /// that: <see cref="PrefetchGraphAsync"/> loads the whole graph before it is evaluated, so
+    /// their loads are cache reads. What still waits is a dynamic <c>import()</c> the page
+    /// itself makes, and a graph whose prefetch ran out of budget.
+    /// </para>
+    /// <para>
+    /// The wait runs with no synchronization context, so it cannot wait on a continuation that
+    /// needs this thread, and the fetch's own continuations run on the thread pool, which no
+    /// longer fills up with op settlements parked on the isolate lock (see
+    /// <c>OpCompletionContext</c>). It observes <see cref="BlockingLoadCancellation"/>.
+    /// </para>
+    /// </remarks>
     public override Document LoadDocument(
         DocumentSettings settings,
         DocumentInfo? sourceInfo,
         string specifier,
         DocumentCategory category,
-        DocumentContextCallback contextCallback) =>
-        // V8 resolves a static graph synchronously and gives ClearScript no
-        // asynchronous escape, so the engine thread blocks here. The fetch itself
-        // runs on the thread pool with no synchronization context, so this cannot
-        // deadlock against its own continuation.
-        LoadDocumentAsync(settings, sourceInfo, specifier, category, contextCallback)
-            .GetAwaiter()
-            .GetResult();
+        DocumentContextCallback contextCallback)
+    {
+        var (url, load) = BeginLoad(sourceInfo, specifier, contextCallback);
+        if (!load.IsCompleted)
+        {
+            var token = BlockingLoadCancellation?.Invoke() ?? CancellationToken.None;
+            try
+            {
+                Ops.OpCompletionContext.WithoutContext(() =>
+                {
+                    load.Wait(token);
+                    return true;
+                });
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                throw new ModuleLoadException(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Failed to fetch module {0}: the script's deadline passed",
+                    url));
+            }
+            catch (AggregateException)
+            {
+                // The load failed; Consume rethrows its own exception.
+            }
+        }
+
+        return Consume(url, load);
+    }
 
     /// <inheritdoc/>
     public override async Task<Document> LoadDocumentAsync(
@@ -270,13 +323,158 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
         DocumentCategory category,
         DocumentContextCallback contextCallback)
     {
+        var (url, load) = BeginLoad(sourceInfo, specifier, contextCallback);
+        try
+        {
+            await load.ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Consume rethrows it.
+        }
+
+        return Consume(url, load);
+    }
+
+    /// <summary>
+    /// Fetch a module graph ahead of its evaluation: the module at <paramref name="url"/> and,
+    /// transitively and concurrently, every module its static <c>import</c> and
+    /// <c>export ... from</c> declarations request. Completes when the whole graph is in the
+    /// loader's cache (or failed, or <paramref name="cancellationToken"/> fired); never throws.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Chromium fetches a module script's whole graph before it evaluates any of it. ClearScript
+    /// fetches a graph from inside its evaluation, one module at a time, with the page thread
+    /// waiting on each fetch while it holds the isolate (<see cref="LoadDocument"/>). Prefetching
+    /// keeps the network off that thread: the evaluation's loads read the cache. Specifiers are
+    /// found with a scanner (<c>ScriptDeclarations.ModuleRequests</c>) and resolved through the
+    /// import map as the evaluation will resolve them; a module the scan misses is fetched
+    /// during evaluation, as before, and a load that fails here fails the evaluation with its
+    /// own error, once, without a second request.
+    /// </para>
+    /// <para>
+    /// Port addition: deno_core's <c>RecursiveModuleLoad</c> does the same before it
+    /// instantiates a graph, which ClearScript gives no hook for.
+    /// </para>
+    /// </remarks>
+    public async Task PrefetchGraphAsync(string url, bool dynamic, CancellationToken cancellationToken)
+    {
+        if (UrlRecord.Parse(url) is not { } root)
+        {
+            return;
+        }
+
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        try
+        {
+            await Visit(root, ".").WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // A prefetch reports nothing: the evaluation meets any failure itself.
+        }
+
+        async Task Visit(UrlRecord module, string referrer)
+        {
+            lock (visited)
+            {
+                if (!visited.Add(module.Href))
+                {
+                    return;
+                }
+            }
+
+            Document document;
+            try
+            {
+                document = await StartLoad(module, referrer, null, dynamic).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                return;
+            }
+
+            var href = CanonicalHref(document) ?? module.Href;
+            List<Task> children = [];
+            foreach (var dependency in Requests(href, document))
+            {
+                if (TryResolve(dependency, href, out var resolved, out _) && resolved is not null)
+                {
+                    children.Add(Visit(resolved, href));
+                }
+            }
+
+            await Task.WhenAll(children).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Prefetch the static graph of an inline module whose referrer is <paramref name="baseUrl"/>.</summary>
+    public Task PrefetchInlineGraphAsync(string source, string baseUrl, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        List<Task> graphs = [];
+        foreach (var dependency in Ops.ScriptDeclarations.ModuleRequests(source))
+        {
+            if (TryResolve(dependency, baseUrl, out var resolved, out _) && resolved is not null)
+            {
+                graphs.Add(PrefetchGraphAsync(resolved.Href, dynamic: false, cancellationToken));
+            }
+        }
+
+        return Task.WhenAll(graphs);
+    }
+
+    /// <summary>
+    /// Resolve and start (or join) the load <paramref name="specifier"/> names. Resolution
+    /// failures come back as a faulted load.
+    /// </summary>
+    private (string Url, Task<Document> Load) BeginLoad(
+        DocumentInfo? sourceInfo,
+        string specifier,
+        DocumentContextCallback? contextCallback)
+    {
         var referrerHref = ReferrerHref(sourceInfo);
         if (!TryResolve(specifier, referrerHref, out var resolved, out var resolveError)
             || resolved is null)
         {
-            throw new ModuleLoadException(resolveError ?? "Module specifier could not be resolved");
+            return (specifier, Task.FromException<Document>(
+                new ModuleLoadException(resolveError ?? "Module specifier could not be resolved")));
         }
 
+        return (resolved.Href, StartLoad(resolved, referrerHref, contextCallback, dynamic: !InStaticGraph));
+    }
+
+    /// <summary>
+    /// The outcome of a load an evaluation asked for. A failed load is forgotten once it has
+    /// been reported, so a later import of the same URL fetches again, as before prefetching.
+    /// </summary>
+    private Document Consume(string url, Task<Document> load)
+    {
+        if (!load.IsCompletedSuccessfully)
+        {
+            lock (_gate)
+            {
+                if (_loads.TryGetValue(url, out var registered) && ReferenceEquals(registered, load))
+                {
+                    _loads.Remove(url);
+                }
+            }
+        }
+
+        return load.GetAwaiter().GetResult();
+    }
+
+    /// <summary>
+    /// The load of <paramref name="resolved"/>: the cached document, the fetch already in
+    /// flight for it, or a new one.
+    /// </summary>
+    private Task<Document> StartLoad(
+        UrlRecord resolved,
+        string referrerHref,
+        DocumentContextCallback? contextCallback,
+        bool dynamic)
+    {
         var url = resolved.Href;
         lock (_gate)
         {
@@ -285,7 +483,12 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
             // LoadedSpecifiers matching what the Rust runtime observes.
             if (_documents.TryGetValue(url, out var cached))
             {
-                return cached;
+                return Task.FromResult(cached);
+            }
+
+            if (_loads.TryGetValue(url, out var inFlight))
+            {
+                return inFlight;
             }
         }
 
@@ -295,8 +498,114 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
         if (string.Equals(resolved.Scheme, "data", StringComparison.Ordinal)
             || string.Equals(resolved.Scheme, "blob", StringComparison.Ordinal))
         {
-            return LoadLocalDocument(resolved, url, contextCallback);
+            try
+            {
+                return Task.FromResult(LoadLocalDocument(resolved, url, contextCallback));
+            }
+            catch (Exception error)
+            {
+                return Task.FromException<Document>(error);
+            }
         }
+
+        Task<Document> load;
+        lock (_gate)
+        {
+            if (_documents.TryGetValue(url, out var cached))
+            {
+                return Task.FromResult(cached);
+            }
+
+            if (_loads.TryGetValue(url, out var inFlight))
+            {
+                return inFlight;
+            }
+
+            load = FetchDocumentAsync(resolved, referrerHref, contextCallback, dynamic);
+            if (!load.IsCompletedSuccessfully)
+            {
+                _loads[url] = load;
+            }
+        }
+
+        return load;
+    }
+
+    /// <summary>The specifiers <paramref name="document"/> requests, scanned once per module.</summary>
+    private string[] Requests(string href, Document document)
+    {
+        lock (_gate)
+        {
+            if (_requests.TryGetValue(href, out var known))
+            {
+                return known;
+            }
+        }
+
+        var source = document is StringDocument text ? text.StringContents : null;
+        var requests = source is null ? [] : Ops.ScriptDeclarations.ModuleRequests(source).ToArray();
+        lock (_gate)
+        {
+            _requests[href] = requests;
+        }
+
+        return requests;
+    }
+
+    private string? CanonicalHref(Document document)
+    {
+        if (document.Info.Uri is not { } uri)
+        {
+            return null;
+        }
+
+        lock (_gate)
+        {
+            return _canonicalHrefs.TryGetValue(uri.AbsoluteUri, out var href) ? href : null;
+        }
+    }
+
+    /// <summary>
+    /// Start fetching the static dependencies of a module that just loaded, so a graph an
+    /// evaluation reaches one module at a time (a dynamic <c>import()</c>) still has its
+    /// modules fetched concurrently. Chromium fetches them all before evaluating any. These
+    /// loads are not counted as dynamic-import activity (<see cref="Activity"/>): the load
+    /// that started them is, and an evaluation that needs one waits for it itself.
+    /// </summary>
+    private void PrefetchDependencies(string href, Document document)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        foreach (var dependency in Requests(href, document))
+        {
+            if (TryResolve(dependency, href, out var resolved, out _) && resolved is not null)
+            {
+                var load = StartLoad(resolved, href, null, dynamic: false);
+                if (!load.IsCompleted)
+                {
+                    _ = load.ContinueWith(
+                        static task => _ = task.Exception,
+                        CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default);
+                }
+            }
+        }
+    }
+
+    /// <summary>Fetch one module over the page's network context.</summary>
+    private async Task<Document> FetchDocumentAsync(
+        UrlRecord resolved,
+        string referrerHref,
+        DocumentContextCallback? contextCallback,
+        bool dynamic)
+    {
+        // Never resumes on the caller's context: this may be started from page script.
+        await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+        var url = resolved.Href;
 
         // Module-graph CORS and same-origin credentials are relative to the owning
         // document, not to the importing module. The importer remains the HTTP
@@ -328,7 +637,7 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
             LoadedSpecifiers.Add(url);
         }
 
-        using ModuleLoadGuard? activityGuard = InStaticGraph ? null : Activity.Begin();
+        using ModuleLoadGuard? activityGuard = dynamic ? Activity.Begin() : null;
 
         var network = _pageNetwork is not null
             ? Invoke(_pageNetwork)
@@ -422,8 +731,11 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
             _canonicalHrefs[info.Uri!.AbsoluteUri] = found.Href;
             _documents[url] = document;
             _documents[found.Href] = document;
+            // In the document cache now; the in-flight entry is only needed while fetching.
+            _loads.Remove(url);
         }
 
+        PrefetchDependencies(found.Href, document);
         return document;
     }
 
@@ -478,7 +790,7 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
     /// a JavaScript MIME type (Chromium's strict MIME check: <c>data:text/plain,...</c> and
     /// an untyped Blob are refused) and is UTF-8 decoded, as every module script is.
     /// </remarks>
-    private Document LoadLocalDocument(UrlRecord resolved, string url, DocumentContextCallback contextCallback)
+    private Document LoadLocalDocument(UrlRecord resolved, string url, DocumentContextCallback? contextCallback)
     {
         string? code = null;
         if (string.Equals(resolved.Scheme, "data", StringComparison.Ordinal))

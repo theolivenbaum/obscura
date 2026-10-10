@@ -57,12 +57,23 @@ public sealed partial class PocketCalculatorJsRuntime
         {
             throw new JsRuntimeException($"Invalid module URL {url}: relative URL without a base");
         }
+        var clock = Stopwatch.StartNew();
         var loadedStart = _moduleLoader.LoadedSpecifiers.Count;
         var source = await FetchModuleSourceAsync(specifier.ToString(), budgetMs, url).ConfigureAwait(false);
 
         var graphSpecifiers = SpecifiersSince(loadedStart).ToList();
         graphSpecifiers.Add(specifier.ToString());
         graphSpecifiers.Sort(StringComparer.Ordinal);
+
+        // The rest of the graph, before evaluation and off the page thread (see
+        // PocketCalculatorModuleLoader.PrefetchGraphAsync). Whatever the budget leaves
+        // unfetched is fetched by the evaluation, as before.
+        if (RemainingBudgetMs(clock, budgetMs) is { } prefetchMs)
+        {
+            using var prefetchBudget = new CancellationTokenSource(TimeSpan.FromMilliseconds(prefetchMs));
+            await _moduleLoader.PrefetchGraphAsync(specifier.ToString(), dynamic: false, prefetchBudget.Token)
+                .ConfigureAwait(false);
+        }
 
         var moduleId = _nextModuleId++;
         _preparedSources[moduleId] = source;
@@ -93,9 +104,9 @@ public sealed partial class PocketCalculatorJsRuntime
     /// Several inline modules deliberately share that URL; each keeps its own
     /// source and module id.
     /// </summary>
-    public Task<PreparedModule> PrepareInlineModuleAsync(string code, string baseUrl, ulong budgetMs)
+    public async Task<PreparedModule> PrepareInlineModuleAsync(string code, string baseUrl, ulong budgetMs)
     {
-        _ = budgetMs;
+        ArgumentNullException.ThrowIfNull(code);
         var specifier = Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)
             ? uri.ToString()
             : "about:blank";
@@ -104,14 +115,24 @@ public sealed partial class PocketCalculatorJsRuntime
         _preparedSources[moduleId] = code;
         var graphSpecifiers = SpecifiersSince(loadedStart).ToList();
         graphSpecifiers.Sort(StringComparer.Ordinal);
-        return Task.FromResult(new PreparedModule
+
+        // Its imports' graphs, before evaluation (see PrepareModuleAsync). Port addition: the
+        // reference fetched an inline module's imports during its evaluation.
+        if (budgetMs > 0)
+        {
+            using var prefetchBudget = new CancellationTokenSource(
+                TimeSpan.FromMilliseconds(Math.Min(budgetMs, int.MaxValue)));
+            await _moduleLoader.PrefetchInlineGraphAsync(code, specifier, prefetchBudget.Token).ConfigureAwait(false);
+        }
+
+        return new PreparedModule
         {
             ModuleId = moduleId,
             Description = "Inline module",
             EntrySpecifier = null,
             ModuleUrl = specifier,
             GraphSpecifiers = graphSpecifiers.Distinct(StringComparer.Ordinal).ToArray(),
-        });
+        };
     }
 
     /// <summary>

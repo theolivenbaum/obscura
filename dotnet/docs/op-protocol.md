@@ -381,6 +381,7 @@ so these are called unguarded:
 | `op_script_declarations` | fast | `source: String` | `String`: `{"s":strict,"v":[vars],"f":[functions],"l":[lexicals]}`, the script's top-level names |
 | `op_blob_script_register` | fast | `blob_url: String, source: String` | `(void)`; a JavaScript Blob's text, for `blob:` module imports |
 | `op_blob_script_revoke` | fast | `blob_url: String` | `(void)` |
+| `op_prefetch_module_graph` | async | `url: String` | `bool`: true once the module graph at `url` is in the loader's cache or failed (a dynamic module script, before its `import()`) |
 | `op_parser_write` | sync | `text: String, probe: bool` | `bool`: with `probe`, whether the document's parser has an insertion point (a parser-inserted script is running); otherwise whether the parser took `text` at its insertion point (and parsed what it could of it, running a written inline script) |
 
 `op_get_cookies` and `op_set_cookie` answer a document with an opaque origin (a frame

@@ -1460,9 +1460,10 @@ public static class RenderOps
         if (follower is not null)
         {
             await follower.Task.ConfigureAwait(false);
-            // Under the isolate lock: it reads the document (IsolateLock).
-            return shared.IsolateLock.Run(
-                () => FinishAsyncImageMetadata(shared, nodeId, documentGeneration, selectedUrl, profile));
+            // On the page's loop: it reads the document (IsolateLock.RunOnPageAsync).
+            return await shared.IsolateLock.RunOnPageAsync(
+                () => FinishAsyncImageMetadata(shared, nodeId, documentGeneration, selectedUrl, profile))
+                .ConfigureAwait(false);
         }
 
         bool settled = false;
@@ -1498,15 +1499,14 @@ public static class RenderOps
             }
 
             // Everything from here on reads or writes page state: the renderer cache, the
-            // retained render's pending mutations, the resolved scroll and the document. This
-            // runs on whichever thread completed the transport, so it holds the isolate lock,
-            // which keeps page script and captures out (IsolateLock), and the gate, which
-            // orders it against the other image requests (AsyncResourceGate). Rust resumes the
-            // reaction on the one thread that owns the state. Seeding, invalidating and
-            // handing the result to the waiters is one step: a follower released before the
-            // bytes are in the cache reads its own request back as unknown and reports a load
-            // error.
-            return shared.IsolateLock.Run(() =>
+            // retained render's pending mutations, the resolved scroll and the document. It runs
+            // on the page's own loop between tasks (IsolateLock.RunOnPageAsync), as Rust resumes
+            // the reaction on the one thread that owns the state, rather than on whichever
+            // thread completed the transport; the gate still orders it against the other image
+            // requests (AsyncResourceGate). Seeding, invalidating and handing the result to the
+            // waiters is one step: a follower released before the bytes are in the cache reads
+            // its own request back as unknown and reports a load error.
+            return await shared.IsolateLock.RunOnPageAsync(() =>
             {
                 List<TaskCompletionSource> pending = [];
                 string result;
@@ -1547,7 +1547,7 @@ public static class RenderOps
                 }
 
                 return result;
-            });
+            }).ConfigureAwait(false);
         }
         finally
         {

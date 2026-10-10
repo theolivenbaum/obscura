@@ -445,6 +445,140 @@ public static class ScriptDeclarations
         }
     }
 
+    /// <summary>
+    /// The specifiers a module's static <c>import</c> and <c>export ... from</c> declarations
+    /// request, in source order and without duplicates.
+    /// </summary>
+    /// <remarks>
+    /// Port addition, for fetching a module graph before it is evaluated (see
+    /// <c>PocketCalculatorModuleLoader.PrefetchGraphAsync</c>). Only declarations at depth zero
+    /// count; <c>import(...)</c> and <c>import.meta</c> do not. A specifier with an escape in
+    /// it is skipped. Like the declaration scan this is tolerant: a request it misses is
+    /// fetched when the graph is evaluated, as before, and one it invents costs a request.
+    /// </remarks>
+    public static List<string> ModuleRequests(string source)
+    {
+        var scanner = new Scanner(source ?? string.Empty);
+        var requests = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        Token previous = default;
+        while (true)
+        {
+            var token = scanner.Next();
+            if (token.Kind == Kind.End)
+            {
+                break;
+            }
+
+            var keyword = token.Kind == Kind.Word && token.Depth == 0
+                && !(previous.Kind == Kind.Punct && (scanner.IsPunct(previous, ".") || scanner.IsPunct(previous, "?.")))
+                ? scanner.Text(token)
+                : null;
+            previous = token;
+            if (keyword is "import")
+            {
+                var next = scanner.Peek();
+                if (next.Kind == Kind.String)
+                {
+                    scanner.Next();
+                    previous = next;
+                    AddRequest(scanner, next, requests, seen);
+                }
+                else if (next.Kind == Kind.Word || scanner.IsPunct(next, "{") || scanner.IsPunct(next, "*"))
+                {
+                    previous = ReadFromClause(scanner, requests, seen) ?? previous;
+                }
+            }
+            else if (keyword is "export")
+            {
+                var next = scanner.Peek();
+                if (scanner.IsPunct(next, "{") || scanner.IsPunct(next, "*"))
+                {
+                    previous = ReadFromClause(scanner, requests, seen) ?? previous;
+                }
+            }
+        }
+
+        return requests;
+    }
+
+    /// <summary>
+    /// Reads an import or export clause up to <c>from "specifier"</c>. Returns the last token
+    /// consumed, or null when nothing was.
+    /// </summary>
+    private static Token? ReadFromClause(Scanner scanner, List<string> requests, HashSet<string> seen)
+    {
+        Token? last = null;
+        var closed = false;
+        // An import clause is a handful of tokens outside its braces; the cap only bounds a
+        // misread on malformed input.
+        for (var budget = 4096; budget > 0; budget--)
+        {
+            var token = scanner.Peek();
+            if (token.Kind == Kind.End)
+            {
+                return last;
+            }
+
+            if (token.Depth == 0)
+            {
+                if (token.Kind == Kind.Word && scanner.Text(token) == "from")
+                {
+                    scanner.Next();
+                    last = token;
+                    var specifier = scanner.Peek();
+                    if (specifier.Kind == Kind.String)
+                    {
+                        scanner.Next();
+                        last = specifier;
+                        AddRequest(scanner, specifier, requests, seen);
+                    }
+
+                    return last;
+                }
+
+                // After the named list's closing brace only `from` may follow (`export { a };`
+                // ends there).
+                var clausePart = !closed
+                    && (token.Kind == Kind.Word
+                        || scanner.IsPunct(token, "{") || scanner.IsPunct(token, "}")
+                        || scanner.IsPunct(token, "*") || scanner.IsPunct(token, ","));
+                if (!clausePart)
+                {
+                    return last;
+                }
+
+                closed = scanner.IsPunct(token, "}");
+            }
+            else if (token.Kind is not (Kind.Word or Kind.String)
+                && !scanner.IsPunct(token, ",") && !scanner.IsPunct(token, "}"))
+            {
+                // Inside the braces only names, string names, commas and the close.
+                return last;
+            }
+
+            scanner.Next();
+            last = token;
+        }
+
+        return last;
+    }
+
+    private static void AddRequest(Scanner scanner, Token token, List<string> requests, HashSet<string> seen)
+    {
+        var text = scanner.Text(token);
+        if (text.Length < 2 || text[^1] != text[0] || text.Contains('\\') || text.Contains('\n'))
+        {
+            return;
+        }
+
+        var specifier = text[1..^1];
+        if (specifier.Length > 0 && seen.Add(specifier))
+        {
+            requests.Add(specifier);
+        }
+    }
+
     private static void Add(List<string> names, HashSet<string> seen, string name)
     {
         if (seen.Add(name))

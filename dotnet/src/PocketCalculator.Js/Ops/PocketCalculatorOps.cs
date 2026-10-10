@@ -73,6 +73,12 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
     public IAsyncOpTracker? AsyncOps { get; set; }
 
     /// <summary>
+    /// Fetches a module graph ahead of its evaluation (<c>op_prefetch_module_graph</c>); set by
+    /// the runtime that owns the module loader. Null makes the op a no-op.
+    /// </summary>
+    public Func<string, Task>? ModuleGraphPrefetcher { get; set; }
+
+    /// <summary>
     /// Cancelled by the isolate's watchdogs alongside the V8 interrupt. Every sync op
     /// runs under its token (<see cref="PocketCalculator.Dom.WorkCancellation"/>), so
     /// C# work inside an op stops when the deadline passes (SECURITY.md H8).
@@ -508,6 +514,21 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             (url, source) => OpGuard.Run("op_blob_script_register", () => Page.BlobScripts.Register(S(url), S(source)))));
         Bind(ops, "op_blob_script_revoke", (Action<object?>)(
             url => OpGuard.Run("op_blob_script_revoke", () => Page.BlobScripts.Revoke(S(url)))));
+        // Port addition: a dynamic module script's graph is fetched before its import()
+        // evaluates it, off the page thread (PocketCalculatorModuleLoader.PrefetchGraphAsync).
+        Bind(ops, "op_prefetch_module_graph", (Func<object?, Task<bool>>)(
+            url => OpGuard.RunAsync(
+                "op_prefetch_module_graph",
+                async () =>
+                {
+                    if (ModuleGraphPrefetcher is { } prefetch)
+                    {
+                        await prefetch(S(url)).ConfigureAwait(false);
+                    }
+
+                    return true;
+                },
+                false)));
         Bind(ops, "op_frame_same_origin", (Func<object?, double>)(
             frameId => OpGuard.Run("op_frame_same_origin", () => FrameSameOrigin(document, U32(frameId)), -1d)));
         if (!ReferenceEquals(document, Page))

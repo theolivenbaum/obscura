@@ -98,7 +98,28 @@ public sealed partial class PocketCalculatorJsRuntime
         // become events.
         _shim.FlushRejections();
 
-        // Posted tasks first: the shim treats op_posted_task as the task source
+        // Op completions first, as deno_core resolves the ops that are ready before it runs
+        // its macrotasks and timers: each one settles its promise, and the checkpoint after it
+        // runs the reactions. Only what was queued when the turn started; a completion that
+        // lands meanwhile belongs to the next turn. A watchdog interrupt ends the turn with
+        // the rest still queued (RunOne takes one at a time). DEVIATION from runtime.rs only
+        // in where the queue lives: see OpCompletionContext.
+        // Not while a termination is pending: ClearScript resolves the promise from inside a
+        // Task continuation, which swallows the interrupt and leaves the promise unsettled for
+        // good. The completions wait for the turn after CancelTermination instead.
+        var completions = _ops.Cancellation.Token.IsCancellationRequested ? 0 : _opCompletions.Pending;
+        var settledOps = 0;
+        while (settledOps < completions && _opCompletions.RunOne())
+        {
+            settledOps++;
+            PerformMicrotaskCheckpoint();
+            if (settledOps < completions && YieldRequested())
+            {
+                return LoopTick.Progressed;
+            }
+        }
+
+        // Posted tasks next: the shim treats op_posted_task as the task source
         // that must run before the next timer batch, which is what keeps a
         // rendering checkpoint ahead of the callbacks it schedules.
         //
@@ -170,7 +191,7 @@ public sealed partial class PocketCalculatorJsRuntime
             return LoopTick.Progressed;
         }
 
-        if (posted.Length > 0)
+        if (posted.Length > 0 || settledOps > 0)
         {
             return LoopTick.Progressed;
         }
@@ -244,7 +265,18 @@ public sealed partial class PocketCalculatorJsRuntime
         var delay = TimeSpan.FromMilliseconds(Math.Min(wanted, cap.TotalMilliseconds));
         if (delay > TimeSpan.Zero)
         {
-            await Task.Delay(delay).ConfigureAwait(false);
+            // An op completion wakes the park: deno_core's waker, which the poll-only loop
+            // used to stand in for with a timed wait (up to 50 ms late).
+            var posted = _opCompletions.WhenPosted();
+            if (!posted.IsCompleted)
+            {
+                using var cancel = new CancellationTokenSource();
+                var timer = Task.Delay(delay, cancel.Token);
+                if (await Task.WhenAny(posted, timer).ConfigureAwait(false) != timer)
+                {
+                    cancel.Cancel();
+                }
+            }
         }
         return LoopTick.Waiting;
     }

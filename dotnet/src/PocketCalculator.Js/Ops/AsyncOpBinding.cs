@@ -21,6 +21,12 @@ public interface IAsyncOpTracker
 
     /// <summary>The op's promise has settled and its reactions are running.</summary>
     void OpSettled();
+
+    /// <summary>
+    /// The context the op's promise is resolved on, current while the op is called; null
+    /// resolves it on the thread that completes the op (ClearScript's default).
+    /// </summary>
+    OpCompletionContext? Completions => null;
 }
 
 /// <summary>
@@ -87,21 +93,34 @@ internal static class AsyncOpBinding
         // any page script runs: a page that replaced `then` with one that never calls back
         // left every async op counted forever, so the realm never went idle and a frame's
         // timers (op_sleep continuations) never fired.
+        //
+        // `enter` makes the page's op completion context current for the call, which is when
+        // ClearScript captures the scheduler it resolves the promise on (OpCompletionContext);
+        // `leave` restores the thread's own context and counts the op once its reaction is
+        // attached. The promise only exists once `inner` has returned, so the context has to
+        // stay current across the whole call.
         var source = $$"""
-            (function (inner, started, settled) {
+            (function (inner, enter, leave, settled) {
                 var then = Promise.prototype.then, apply = Reflect.apply;
                 return function ({{parameters}}) {
-                    var promise = inner({{parameters}});
+                    enter();
+                    var promise;
+                    try {
+                        promise = inner({{parameters}});
+                    } catch (e) {
+                        leave(false);
+                        throw e;
+                    }
+                    // A reaction never runs synchronously, so counting after it is
+                    // attached cannot miss the settle; a non-promise throws here.
+                    var attached = false;
                     if (promise !== null && typeof promise === "object") {
-                        // A reaction never runs synchronously, so counting after it is
-                        // attached cannot miss the settle; a non-promise throws here.
-                        var attached = false;
                         try {
                             apply(then, promise, [function () { settled(); }, function () { settled(); }]);
                             attached = true;
                         } catch (e) {}
-                        if (attached) started();
                     }
+                    leave(attached);
                     return promise;
                 };
             })
@@ -112,11 +131,24 @@ internal static class AsyncOpBinding
             return false;
         }
 
+        var completions = tracker.Completions;
         ops.SetProperty(
             name,
             factory.InvokeAsFunction(
                 function,
-                (Action)(() => OpGuard.Run(name + " started", tracker.OpStarted)),
+                (Action)(() => completions?.Enter()),
+                (Action<bool>)(attached =>
+                {
+                    if (completions is not null)
+                    {
+                        OpCompletionContext.Leave();
+                    }
+
+                    if (attached)
+                    {
+                        OpGuard.Run(name + " started", tracker.OpStarted);
+                    }
+                }),
                 (Action)(() => OpGuard.Run(name + " settled", tracker.OpSettled))));
         return true;
     }
