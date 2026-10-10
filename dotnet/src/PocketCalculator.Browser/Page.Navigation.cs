@@ -904,11 +904,13 @@ public sealed partial class Page
     /// delivered and the owner should offer another turn after servicing any
     /// higher-priority automation commands.
     /// </remarks>
-    public async Task<bool> RunAutonomousEventLoopTurnAsync(CancellationToken cancellationToken = default)
+    public async Task<bool> RunAutonomousEventLoopTurnAsync(
+        CancellationToken cancellationToken = default,
+        Func<bool>? yieldTo = null)
     {
         QueuePendingRenderResources();
         bool reachedIdle = Js is { } js
-            ? await js.RunAutonomousEventLoopTurnAsync().ConfigureAwait(false)
+            ? await js.RunAutonomousEventLoopTurnAsync(yieldTo).ConfigureAwait(false)
             : true;
         // Dynamic iframe fetches finish on the page event loop, but their realms must
         // be built by Page between turns. Keep the autonomous CDP pump on the same

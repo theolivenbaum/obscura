@@ -2702,6 +2702,30 @@ public sealed partial class RuntimeTests
                 + "document.body.getAttribute('data-after-fixed-wait'))")!.GetValue<string>());
     }
 
+    /// <summary>
+    /// An autonomous turn stops after the task that was running when the host asked it to
+    /// yield, and the tasks it had taken run on the next turn in their order. weather.com's
+    /// timers each forced a slow relayout, one turn ran for seconds, and every CDP command
+    /// (Playwright's screenshot is five of them) waited for the whole turn.
+    /// </summary>
+    [Fact]
+    public async Task AutonomousTurnYieldsBetweenTasksWhenTheHostHasWork()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        var rt = fixture.Runtime;
+        rt.ExecuteScript(
+            "yielding-timers",
+            "globalThis.__ran = [];"
+            + "for (let i = 0; i < 4; i++) setTimeout(() => globalThis.__ran.push(i), 0);");
+        Thread.Sleep(20);
+
+        await rt.RunAutonomousEventLoopTurnAsync(yieldTo: () => true);
+        AssertJson("[0]", rt.Evaluate("globalThis.__ran"));
+
+        await rt.RunAutonomousEventLoopTurnAsync();
+        AssertJson("[0,1,2,3]", rt.Evaluate("globalThis.__ran"));
+    }
+
     [Fact]
     public async Task ZeroDelayIntervalCreatedByTimerYieldsToEmbedder()
     {
