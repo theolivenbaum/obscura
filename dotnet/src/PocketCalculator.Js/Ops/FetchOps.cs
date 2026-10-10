@@ -1090,6 +1090,8 @@ public static partial class FetchOps
                 // as the reference's op reaction does, rather than on whichever thread finished
                 // reading the body: 64 fetches finishing together corrupted the stored-body queue
                 // ("Operations that change non-concurrent collections must have exclusive access").
+                // The transport is done with: the next queued request need not wait for the loop.
+                slot.Dispose();
                 return await gs.IsolateLock.RunOnPageAsync(() =>
                 {
                     gs.NetworkResponseBodyCounter++;

@@ -106,6 +106,9 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
     /// </summary>
     private readonly Dictionary<string, Task<Document>> _loads = new(StringComparer.Ordinal);
 
+    /// <summary>Module fetches in flight at once (Chromium's six connections per host).</summary>
+    private readonly SemaphoreSlim _fetchSlots = new(6);
+
     /// <summary>The static requests scanned from each loaded module, by canonical URL.</summary>
     private readonly Dictionary<string, string[]> _requests = new(StringComparer.Ordinal);
 
@@ -658,6 +661,9 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
         request.ReferrerPolicy = network.ReferrerPolicy;
 
         Response response;
+        // A prefetched graph would otherwise open a connection per module at once; Chromium
+        // keeps six per host. The previous loader fetched one module at a time.
+        await _fetchSlots.WaitAsync().ConfigureAwait(false);
         try
         {
             // Fork from upstream: in stealth mode an ES module must be fetched over
@@ -687,6 +693,10 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
                 "Failed to fetch module {0}: {1}",
                 url,
                 ex.Message));
+        }
+        finally
+        {
+            _fetchSlots.Release();
         }
 
         if (response.Status is < 200 or > 299)
