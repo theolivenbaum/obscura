@@ -69,7 +69,11 @@ internal static partial class LinkedStylesheetLoader
             var referrer = policy is null ? null : FetchReferrer.Client with { Policy = policy };
             var loaded = await LoadAsync(transport, document, url, 0, new HashSet<string>(StringComparer.Ordinal), referrer)
                 .ConfigureAwait(false);
-            if (!StylesheetOps.SetLoadedExternalStylesheet(document, ownerNid, loaded.Css, loaded.OriginClean))
+            // This runs on whichever thread completed the load: installing the sheet writes the
+            // document and invalidates its retained render, so it holds the isolate lock
+            // (IsolateLock), which keeps page script and captures out.
+            if (!document.IsolateLock.Run(
+                    () => StylesheetOps.SetLoadedExternalStylesheet(document, ownerNid, loaded.Css, loaded.OriginClean)))
             {
                 return """{"ok":false}""";
             }

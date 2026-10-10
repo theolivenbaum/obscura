@@ -464,4 +464,19 @@ public sealed partial class Page
 
     /// <summary>Renderer-owned root scroll offset for document-space capture routing.</summary>
     public (float X, float Y) ScreenshotScrollOffset() => Js?.ScrollOffset ?? (0.0f, 0.0f);
+
+    /// <summary>
+    /// Run host-side work that reads or writes this page's document or layout while holding
+    /// its isolate's lock, so no script of the page runs at the same time.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-browser, where nothing else can run: ClearScript runs the
+    /// reaction to a completed async op on the thread that completed it. See
+    /// <c>PocketCalculator.Js.Ops.IsolateLock</c>.
+    /// </remarks>
+    public T WithPageLocked<T>(Func<T> work)
+    {
+        ArgumentNullException.ThrowIfNull(work);
+        return Js is { } js ? js.State.IsolateLock.Run(work) : work();
+    }
 }

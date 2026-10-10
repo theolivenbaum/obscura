@@ -234,6 +234,12 @@ public static class Dispatcher
             // A handler fault is still a protocol outcome; Rust's `Result` has no
             // third arm and a panic here would take the connection down.
             result = DomainResult.Err(ex.Message);
+            if (ex is not Domains.DomainError)
+            {
+                // Anything but a protocol error is a fault in the engine; its message alone
+                // ("Collection was modified ...") does not say where.
+                CdpLog.Warn($"{req.Method} failed: {ex}");
+            }
         }
         catch (OperationCanceledException) when (watchdog is not null)
         {
