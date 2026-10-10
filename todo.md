@@ -6829,7 +6829,8 @@ prefetch switched off, 30 s (the budget) and 25 s. Live, interleaved with the ba
 48-56 threads); reddit.com 5.8-9.0 s (12.3-14.9 s), nvidia.com 14.3-14.9 s (16.6-18.5 s),
 youtube.com 7.6-8.3 s (8.5-8.6 s), msn.com 16.9-19.2 s (16.6 s, 58-68 threads; 26-28 now),
 grammarly.com 14.0-14.1 s (13.4-15.3 s), cloudflare.com 14.1-20.3 s (21.6-25.6 s); element
-counts and page errors unchanged. A local 15,000-element page with 30 scripts, four 21-module
+counts and page errors unchanged; rechecked on the final build: github.com 5.9-6.1 s with 19-24
+threads (base 6.5-8.0 s, 48-53), reddit.com 5.4-6.2 s (7.5-11.5 s). A local 15,000-element page with 30 scripts, four 21-module
 graphs and 60 fetches behind 40 ms latency: 2.3-2.6 s (base 4.9-5.1 s); with no latency
 1.46-1.60 s (base 1.33-1.66 s). Pinned by `OpCompletionContextTests`,
 `OpCompletionStarvationTests`, `ModuleGraphLoadTests.APrefetched...`/`APrefetchFailure...`/
