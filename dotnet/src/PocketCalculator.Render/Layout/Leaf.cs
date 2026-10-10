@@ -33,6 +33,7 @@ public static class Leaf
         var pbSum = paddingBorder.SumAxes();
         var boxSizingAdjustment =
             style.BoxSizing == BoxSizing.ContentBox ? pbSum : GeometryExtensions.SizeZero;
+        var ratioAdjustment = style.AspectRatioUsesContentBox ? pbSum : boxSizingAdjustment;
 
         Size<float?> nodeSize;
         Size<float?> nodeMinSize;
@@ -51,8 +52,8 @@ public static class Leaf
             aspectRatio = style.AspectRatio;
             var styleSize = style.Size
                 .MaybeResolve(parentSize, resolveCalcValue)
-                .MaybeApplyAspectRatio(aspectRatio)
-                .MaybeAdd(boxSizingAdjustment);
+                .MaybeAdd(boxSizingAdjustment)
+                .MaybeApplyAspectRatio(aspectRatio, ratioAdjustment);
             var styleMinSize = style.MinSize
                 .MaybeResolve(parentSize, resolveCalcValue)
                 .TransferLimitThroughAspectRatio(
@@ -151,7 +152,8 @@ public static class Leaf
         {
             height = Sys.F32Max(
                 height,
-                (clampedSize.Width / ratio).MaybeClamp(nodeMinSize.Height, nodeMaxSize.Height));
+                ((Sys.F32Max(clampedSize.Width - ratioAdjustment.Width, 0.0f) / ratio) + ratioAdjustment.Height)
+                    .MaybeClamp(nodeMinSize.Height, nodeMaxSize.Height));
         }
 
         var size = new Size<float>(clampedSize.Width, height);

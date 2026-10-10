@@ -236,6 +236,7 @@ internal static partial class DomBuild
 
         // A loaded poster supplies <video>'s replaced-content dimensions before decoded video
         // metadata exists.
+        ReplacedIntrinsic? metadata = null;
         if (!(string.Equals(local, "video", StringComparison.Ordinal)
                 && style.ReplacedIntrinsic is not null))
         {
@@ -247,31 +248,42 @@ internal static partial class DomBuild
                     || (node.GetAttribute("src") is { } src && src.AsSpan().Trim().Length != 0));
             if (defaultIntrinsic is { } intrinsicSize)
             {
-                int replacedContext = context.Engine.RegisterReplaced(
-                    intrinsicSize.Width, intrinsicSize.Height, style);
-                TaffyNodeId replacedLeaf =
-                    context.TaffyTree.NewLeafWithContext(taffyStyle, replacedContext);
-                context.IdMap[replacedLeaf] = id;
-                return replacedLeaf;
+                // DEVIATION from crates/obscura-render/src/dom.rs, which registers these as
+                // a measured leaf with a 300x150 natural size and ratio and leaves an auto width
+                // to stretch. Only a canvas has a natural ratio; an iframe, embed, object, a
+                // video without metadata, audio and the meter/progress bars have a natural
+                // size and none (Chromium 141: `width: 120px` on a video is 120x150). And a
+                // block-level replaced box with an auto width takes its natural width rather
+                // than the containing block's (CSS 2.1 10.3.4): it takes the image path below,
+                // which does both. See "Known deviations" in todo.md.
+                metadata = new ReplacedIntrinsic(
+                    intrinsicSize.Width,
+                    intrinsicSize.Height,
+                    string.Equals(local, "canvas", StringComparison.Ordinal)
+                        ? intrinsicSize.Width / intrinsicSize.Height
+                        : null);
             }
         }
 
         // A replaced image is a measured leaf, even when CSS gives it a percentage width.
-        if (local is "img" or "video")
+        if (metadata is null && local is "img" or "video")
         {
-            ReplacedIntrinsic? metadata = style.ReplacedIntrinsic
+            metadata = style.ReplacedIntrinsic
                 ?? (style.IntrinsicSize is { } natural
                     ? ReplacedIntrinsic.FromDimensions(natural.Width, natural.Height)
                     : null);
+        }
+
+        {
             if (metadata is { } intrinsic)
             {
                 (float width, float height) = intrinsic.NaturalSize() ?? (300f, 150f);
-                float intrinsicRatio = intrinsic.Ratio ?? 2f;
-                float preferredRatio = style.AspectRatio is { } authored
+                float? authoredRatio = style.AspectRatio is { } authored
                     && float.IsFinite(authored)
                     && authored > 0f
                         ? authored
-                        : intrinsicRatio;
+                        : null;
+                float? transferRatio = authoredRatio ?? intrinsic.Ratio;
 
                 // Encode the equivalent min(preferred-width, percentage-max) function by
                 // swapping the two operands.
@@ -281,8 +293,8 @@ internal static partial class DomBuild
                     {
                         DimensionKind.Px => style.Width.Value,
                         DimensionKind.Auto => style.Height.Kind == DimensionKind.Px
-                            ? style.Height.Value * preferredRatio
-                            : Inline.ConstrainedAutoReplacedSize(width, height, style).Width,
+                            ? (transferRatio is { } ratio ? style.Height.Value * ratio : width)
+                            : Inline.ConstrainedAutoReplacedSize(intrinsic, style).Width,
                         _ => null,
                     };
                     if (preferredWidth is { } preferred)
@@ -331,7 +343,7 @@ internal static partial class DomBuild
                     && !DomStyleFixups.IsInFlowGridItem(tree, id, style, context.Styles))
                 {
                     Layout.Size<float> constrained =
-                        Inline.ConstrainedAutoReplacedSize(width, height, style);
+                        Inline.ConstrainedAutoReplacedSize(intrinsic, style);
                     Layout.Size<TaffyDimension> size = taffyStyle.Size;
                     size.Width = TaffyDimension.FromLength(constrained.Width);
                     if (hasDefiniteConstraint)

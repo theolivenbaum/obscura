@@ -274,6 +274,31 @@ public static class GeometryExtensions
     }
 
     /// <summary>
+    /// <see cref="MaybeApplyAspectRatio(Size{float?}, float?)"/> for an outer (border-box)
+    /// size whose ratio applies to the box <paramref name="adjustment"/> inside it: the
+    /// content box of a replaced element's natural ratio (CSS Sizing 4, `aspect-ratio: auto`).
+    /// </summary>
+    public static Size<float?> MaybeApplyAspectRatio(this Size<float?> s, float? aspectRatio, Size<float> adjustment)
+    {
+        if (aspectRatio is not { } ratio || !float.IsFinite(ratio) || ratio <= 0.0f)
+        {
+            return s;
+        }
+
+        if (s.Width is { } width && !s.Height.HasValue)
+        {
+            return new Size<float?>(width, (Sys.F32Max(width - adjustment.Width, 0.0f) / ratio) + adjustment.Height);
+        }
+
+        if (!s.Width.HasValue && s.Height is { } height)
+        {
+            return new Size<float?>((Sys.F32Max(height - adjustment.Height, 0.0f) * ratio) + adjustment.Width, height);
+        }
+
+        return s;
+    }
+
+    /// <summary>
     /// Transfer a min or max size constraint through the aspect ratio into the other axis, the
     /// way CSS Sizing 4 does it: only into an axis whose preferred size is auto, and a
     /// transferred minimum is capped by that axis's own maximum (a transferred maximum floored

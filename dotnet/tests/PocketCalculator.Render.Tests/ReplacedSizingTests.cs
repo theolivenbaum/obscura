@@ -58,6 +58,99 @@ public class ReplacedSizingTests
     }
 
     /// <summary>
+    /// Canvas, video, iframe, embed and object are inline by default, so they sit on the text
+    /// line after "text " (30.23px in 16px Liberation Sans) instead of starting a block.
+    /// </summary>
+    [Fact]
+    public void CanvasVideoAndIframeAreAtomicInlines()
+    {
+        DomTree tree = Parse(
+            """
+            <style>html,body{margin:0} body{font:16px/20px 'Liberation Sans'} .w{width:400px}</style>
+            <div class=w>text <canvas id=canvas></canvas> tail</div>
+            <div class=w>text <video id=video></video> tail</div>
+            <div class=w>text <iframe id=iframe></iframe> tail</div>
+            <div class=w>text <object id=object></object> tail</div>
+            <div class=w>text <audio id=audio></audio> tail</div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
+        foreach ((string id, float width, float height) in new[]
+        {
+            ("canvas", 300f, 150f), ("video", 300f, 150f), ("iframe", 304f, 154f), ("object", 300f, 150f),
+        })
+        {
+            Rect rect = laid.Rects[Id(tree, id)];
+            Assert.True(MathF.Abs(rect.X - 30.23f) < 0.5f, $"{id} x: {rect.X}");
+            AssertSize(laid, tree, id, width, height);
+        }
+
+        // audio:not([controls]) { display: none }
+        Assert.False(laid.Rects.TryGetValue(Id(tree, "audio"), out Rect audio) && audio.Width > 0f);
+    }
+
+    /// <summary>
+    /// A video without metadata and an iframe have a natural size but no natural ratio: a
+    /// definite width keeps the natural 150px height. A canvas has one (its 300x150 bitmap),
+    /// so a height or a percentage width transfers. A block-level replaced box with an auto
+    /// width takes its natural width, not the containing block's.
+    /// </summary>
+    [Fact]
+    public void NaturalRatiosOfVideoIframeAndCanvas()
+    {
+        DomTree tree = Parse(
+            """
+            <style>html,body{margin:0} .w{width:400px} .w > *{display:block}</style>
+            <div class=w><video id=videoW style="width:120px"></video></div>
+            <div class=w><iframe id=iframeW style="width:120px"></iframe></div>
+            <div class=w><video id=videoMaxH style="max-height:20px"></video></div>
+            <div class=w><iframe id=iframeAttrs width=120 height=24 style="width:60px;height:auto"></iframe></div>
+            <div class=w><canvas id=canvasAuto></canvas></div>
+            <div class=w><canvas id=canvasH style="height:24px"></canvas></div>
+            <div class=w><canvas id=canvasPct style="width:50%"></canvas></div>
+            <div class=w style="display:flex"><video id=flexVideoW style="width:120px;display:block"></video></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
+        AssertSize(laid, tree, "videoW", 120f, 150f);
+        AssertSize(laid, tree, "iframeW", 124f, 154f);
+        AssertSize(laid, tree, "videoMaxH", 300f, 20f);
+        AssertSize(laid, tree, "iframeAttrs", 64f, 154f);
+        AssertSize(laid, tree, "canvasAuto", 300f, 150f);
+        AssertSize(laid, tree, "canvasH", 48f, 24f);
+        AssertSize(laid, tree, "canvasPct", 200f, 100f);
+        AssertSize(laid, tree, "flexVideoW", 120f, 150f);
+    }
+
+    /// <summary>
+    /// A natural ratio applies to the content box: <c>height:24px; box-sizing:border-box;
+    /// padding:3px</c> on a 150x36 image is (24 - 6) x 150/36 + 6 = 81 wide. And min/max
+    /// constraints transfer only into an auto axis, a transferred minimum capped by that
+    /// axis's maximum.
+    /// </summary>
+    [Fact]
+    public void TheNaturalRatioAppliesToTheContentBoxAndLimitsTransferOnlyIntoAutoAxes()
+    {
+        DomTree tree = Parse(
+            """
+            <style>html,body{margin:0} .w{width:400px} img{display:block}</style>
+            <div class=w><img id=borderBox src="a.png" style="height:24px;box-sizing:border-box;padding:3px"></div>
+            <div class=w><img id=minWMaxH src="a.png" style="min-width:200px;max-height:20px"></div>
+            <div class=w><img id=whMinW src="a.png" style="width:120px;height:24px;min-width:200px"></div>
+            <div class=w><img id=wMaxH src="a.png" style="width:120px;max-height:20px"></div>
+            """);
+        Dictionary<NodeId, (float Width, float Height)> intrinsic = [];
+        foreach (string id in new[] { "borderBox", "minWMaxH", "whMinW", "wMaxH" })
+        {
+            intrinsic[Id(tree, id)] = (150f, 36f);
+        }
+
+        DomLayout laid = RenderDom.LayoutDomWithImages(tree, (1280f, 720f), intrinsic);
+        AssertSize(laid, tree, "borderBox", 81f, 24f);
+        AssertSize(laid, tree, "minWMaxH", 200f, 20f);
+        AssertSize(laid, tree, "whMinW", 200f, 24f);
+        AssertSize(laid, tree, "wMaxH", 120f, 20f);
+    }
+
+    /// <summary>
     /// The same rule for a non-replaced box with an authored <c>aspect-ratio</c>: with both
     /// sizes definite the ratio is ignored (Chromium: 120x24, the port gave 120x60).
     /// </summary>
