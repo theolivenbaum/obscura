@@ -6226,10 +6226,10 @@ definition has `disconnectedCallback`) make one `ce_candidates` crossing that wa
 natively. Pinned by `CustomElementReactionsTests` (Js) and `CustomElementStateTests` (Dom), whose
 expectations are Chromium 141's.
 
-Known differences: the port parses the whole document before running scripts, so an element
-that follows a defining `<script>` in the markup is upgraded by `define()` (its constructor sees
-its children and attributes) rather than constructed by the parser, and `document.write`'s
-elements are upgraded on insertion; `connectedMoveCallback` is read but `moveBefore` does not exist;
+Known differences: the parser does not construct a defined custom element itself; it stops
+right after inserting one and the realm upgrades it there (see "Scripts run while the document
+is parsed"), so its constructor sees no children, as in Chromium, but already sees its
+attributes and is connected; `connectedMoveCallback` is read but `moveBefore` does not exist;
 reactions are per realm, so an isolated world's DOM writes do not reach the main world's callbacks.
 
 ### Documents without a browsing context (dell.com)
@@ -6282,11 +6282,9 @@ imported template's content its own inert document); a CDATA section in parsed X
 (the tree has no CDATA node kind); DOMParser parses with scripting enabled, so `<noscript>`
 content is raw text; Range.cloneContents is still a stub; getComputedStyle on an element of
 such a document answers its inline style where Chromium answers ""; an `<img>` there reports
-complete false. grammarly.com: with airgap.js no longer pathological, its consent UI (ui.js)
-now finishes after Next.js hydration in the port, which leaves an extra dynamically inserted
-`<script>` in `#__next` and React reports #418 and renders on the client (Chromium runs ui.js
-during parsing, before hydration). The page renders the same; the script scheduling race is
-separate from this work. Pinned by `ParsedDocumentTests` (Js), `SecondaryDocumentTests` (Dom)
+complete false. grammarly.com's consent UI (ui.js) finishing after Next.js hydration (React
+#418/#423) was the script scheduling model, fixed by "Scripts run while the document is
+parsed". Pinned by `ParsedDocumentTests` (Js), `SecondaryDocumentTests` (Dom)
 and `ParsedDocumentPageTests` (Browser).
 
 ### Interface members off Element.prototype, CharacterData textContent, slots, window.origin
@@ -6763,3 +6761,73 @@ the bench's single `className` write + `offsetWidth` read went from ~300ms (4eed
 `POCKETCALCULATOR_NO_COLD_PASS_GC=1` turns it off. Peak RSS stays ~40MB above 4eedc89: the shape
 cache now stays under its 8,192-entry cap (7.9k slices and paragraphs with their layout memos)
 where the old path overflowed and cleared it mid-pass; not a leak.
+
+### Scripts run while the document is parsed
+
+DEVIATION from crates/obscura-browser (page.rs), which parses the whole response, fetches every
+script, and then runs them back to back before DOMContentLoaded. An inline script saw every
+element after it, `document.write` output was inserted behind the script by DOM insertion, async
+scripts ran in document order with no task between them, readystatechange never fired, and a
+script that a parser script inserted could only run once every parser and deferred script had.
+grammarly.com: Transcend's consent UI (ui.js, inserted by the parser-blocking airgap.js inside
+`#__next`) ran after Next.js hydration, which saw its extra `<script>` and fell back to a client
+render (React #418/#423 in 3 of 4 live loads of the base build, 0 of 7 with this one).
+
+The navigation now follows the HTML parser's script handling as Chromium 141 does it
+(`Page.DocumentLoad.cs`, `DocumentParser`, `HtmlTreeBuilder.Scripting.cs`):
+
+- **The parser stops at each script end tag** (HTML and SVG). An inline script runs there once
+  the parser-inserted style sheets before it have loaded; an external parser-blocking script holds
+  the parser while the event loop runs (posted tasks, timers, loaded async scripts, dynamic
+  scripts); async scripts run as soon as they load, in load order; deferred classic and module
+  scripts run in document order after readyState `interactive`, then DOMContentLoaded; the load
+  event waits for async and load-delaying scripts. The parser yields to the event loop every 4,096
+  tokens (Blink's chunk size) or 50 ms of parsing, and once after the end of the input, as
+  Chromium's network "finished" task does (a 0 ms timer the last script set fires before
+  readystatechange). External parser scripts fire `load`/`error`; `nomodule` classic scripts no
+  longer run (parser or inserted).
+- **document.write at the insertion point.** While a parser-inserted script runs the parser has an
+  insertion point (`op_parser_write`); written text goes into the tokenizer's input there, a
+  written inline script runs inside `write()`, a written external script blocks the parser and
+  later writes wait behind it, a tag split across writes is parsed once complete, and a nested
+  script's writes go right after it. Elsewhere (timers, async scripts, after parsing) `write()`
+  keeps the shim's own stream, as before.
+- **The realm hears about parsed nodes** before its script runs again
+  (`PocketCalculatorJsRuntime.ParserInserted`, `__obscura_host.parserInserted`): tree caches and
+  epochs, layout invalidation, window named access, one MutationObserver record per insertion,
+  isolated worlds, iframes and preload links (loaded on insertion), and parser-inserted scripts
+  are marked started. Parser steps run under the isolate lock.
+- **A preload scanner** (`PreloadScanner`) reads the whole response for external classic scripts
+  (skipping comments, raw text and templates, with `<base>` and `<meta name=referrer>` before
+  each) and starts their fetches at once, at most 16 in flight; the parser takes the response from
+  that fetch.
+- **The page's runtime is created while its response is fetched** (`Page.PrewarmRuntime`; a V8
+  isolate and bootstrap.js take ~90 ms, which otherwise delayed the first script by as much;
+  `POCKETCALCULATOR_NO_RUNTIME_PREWARM=1` turns it off), and the thread pool keeps 64 workers:
+  op settlements wait on the isolate lock on pool threads, and with GitHub's preload links in
+  flight they parked every pool thread while a module graph fetched its dependencies
+  synchronously, one module taking 12 s instead of 0.3 s.
+- **No render-resource warm-up before scripts.** The old engine waited up to 1 s for images and
+  fonts before running any script; they now start loading when parsing ends and scripts do not
+  wait for them, as in Chromium.
+
+Measured with `scripts/script-order-conformance/probe.mjs` (local server, 150 ms document delay so
+the port's runtime is up): 9 of 13 pages log exactly what Chromium logs (the first 9 pages: 0 of 9
+before). The rest
+differ only in timing (the port's first execution of bootstrap paths is slower, e.g. 50 ms for
+the first script insertion, so a 20 ms dynamic script or a 0 ms async fetch finishes in a
+different turn) and in custom elements: the parser stops right after inserting an element of a
+defined name and the realm upgrades it there, so its constructor sees no children as in Chromium
+but sees its attributes and is connected (Chromium constructs it before either). Load times
+(CLI, interleaved, local): a 15,000-element page with 70 scripts 1.5-1.8 s (base 1.9-2.2 s), the
+hydration page 0.84-0.95 s (base 1.23-1.33 s). Pinned by `ScriptOrderTests` (Browser),
+`ParserInsertionTests` (Js), `DocumentParserTests`, `PreloadScannerTests` and the html5lib corpus
+run through `DocumentParser` with a yield after every token (Dom).
+
+Known differences: frame documents (`FrameRealm`) are still parsed whole before their scripts
+run; module graphs load when their turn comes, not speculatively, and the parser waits on nothing
+for them; an async module runs at the parser's next yield or wait, not the moment it has loaded;
+there is no speculative parser past a blocked script beyond the up-front script scan, so a
+style sheet or image after a parser-blocking script is fetched when the parser reaches it; a load
+abandoned at its deadline parses the rest of the document without running its scripts, where
+Chromium would go on loading.

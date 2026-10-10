@@ -147,7 +147,7 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
     }
 
     /// <summary>The owning document's URL. Relative specifiers resolve against it.</summary>
-    public string BaseUrl { get; }
+    public string BaseUrl { get; internal set; }
 
     /// <summary>Proxy URL threaded through to every dynamic ES-module fetch.</summary>
     public string? ProxyUrl { get; }

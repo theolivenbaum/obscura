@@ -948,6 +948,7 @@ internal sealed partial class HtmlTreeBuilder
                 }
 
                 _tree.AppendChild(replacement.Id, lastNode.Id);
+                LogInsertion(lastNode.Id);
                 lastNode = replacement;
             }
 
@@ -965,6 +966,7 @@ internal sealed partial class HtmlTreeBuilder
             }
 
             _tree.AppendChild(furthest.Id, clone.Id);
+            LogInsertion(clone.Id);
 
             // The list of active formatting elements: the clone takes the formatting element's
             // place, or the bookmark's.
@@ -1024,9 +1026,17 @@ internal sealed partial class HtmlTreeBuilder
                 Reprocess(_originalMode, t);
                 return;
             case TokKind.EndTag:
+            {
+                var current = CurrentNode;
                 Pop();
                 _mode = _originalMode;
+                if (current is not null && current.IsHtml(HtmlTag.Script))
+                {
+                    PauseAtScriptEnd(current);
+                }
+
                 return;
+            }
         }
     }
 

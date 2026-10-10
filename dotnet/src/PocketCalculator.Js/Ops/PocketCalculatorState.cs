@@ -555,6 +555,19 @@ public sealed class PocketCalculatorState
     public DocumentWriteStream? WriteStream { get; set; }
 
     /// <summary>
+    /// The document's parser while it runs, which takes <c>document.write()</c> text at its
+    /// insertion point (port addition: the Rust engine parses the document before running
+    /// any of its scripts). Null once parsing has finished, and in frame realms.
+    /// </summary>
+    public IDocumentWriteTarget? ParserWriter { get; set; }
+
+    /// <summary>
+    /// The custom element names defined in this realm (op_dom <c>ce_define</c>), for the parser
+    /// to stop after inserting one (port addition).
+    /// </summary>
+    public HashSet<string> DefinedCustomElements { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>
     /// How many times <c>document.close()</c> has ended a parser <c>document.open()</c>
     /// started on a loaded document since the CDP layer last looked. Each one is a load
     /// of the document Chromium reports with lifecycle events.

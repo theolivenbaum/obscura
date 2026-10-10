@@ -502,7 +502,7 @@ public sealed partial class Page : IDisposable
         // Thread the BrowserContext's proxy through to the ES-module loader and
         // op_fetch_url so dynamic imports and JS fetch() honour the configured
         // upstream proxy. A null proxy is a direct connection.
-        var rt = PocketCalculatorJsRuntime.WithBaseUrlAndProxy(UrlString(), Context.ProxyUrl);
+        var rt = TakePrewarmedRuntime() ?? PocketCalculatorJsRuntime.WithBaseUrlAndProxy(UrlString(), Context.ProxyUrl);
         rt.State.AnimationClock = AnimationClock;
         rt.SetUrl(UrlString());
         rt.SetEncoding(Encoding);
@@ -550,6 +550,71 @@ public sealed partial class Page : IDisposable
         TryExecute(rt, "<device-metrics>", DevicePixelRatioScript());
 
         Js = rt;
+    }
+
+    /// <summary>A runtime being created while the navigation that will use it is fetched.</summary>
+    private Task<PocketCalculatorJsRuntime>? _runtimePrewarm;
+
+    private static readonly bool RuntimePrewarmDisabled =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_NO_RUNTIME_PREWARM") == "1";
+
+    /// <summary>
+    /// Start creating the next document's runtime now, on another thread, while its response
+    /// is fetched. Creating one (a V8 isolate and bootstrap.js) takes about 90 ms, which
+    /// otherwise delays the document's first script by as much once the response is in.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-browser, which creates the runtime once the document has
+    /// been parsed. <c>POCKETCALCULATOR_NO_RUNTIME_PREWARM=1</c> turns it off.
+    /// </remarks>
+    private void PrewarmRuntime(string url)
+    {
+        DiscardPrewarmedRuntime();
+        if (RuntimePrewarmDisabled)
+        {
+            return;
+        }
+
+        string? proxy = Context.ProxyUrl;
+        _runtimePrewarm = Task.Run(() => PocketCalculatorJsRuntime.WithBaseUrlAndProxy(url, proxy));
+    }
+
+    /// <summary>The runtime <see cref="PrewarmRuntime"/> started, once it exists; null without one.</summary>
+    private PocketCalculatorJsRuntime? TakePrewarmedRuntime()
+    {
+        if (Interlocked.Exchange(ref _runtimePrewarm, null) is not { } pending)
+        {
+            return null;
+        }
+
+        try
+        {
+            PocketCalculatorJsRuntime runtime = pending.GetAwaiter().GetResult();
+            runtime.RebaseModuleLoader(UrlString());
+            return runtime;
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // Created here instead, which reports the failure the usual way.
+            return null;
+        }
+    }
+
+    /// <summary>A navigation that will not use the runtime it started disposes it.</summary>
+    private void DiscardPrewarmedRuntime()
+    {
+        if (Interlocked.Exchange(ref _runtimePrewarm, null) is { } pending)
+        {
+            _ = pending.ContinueWith(
+                task =>
+                {
+                    if (task.IsCompletedSuccessfully)
+                    {
+                        task.Result.Dispose();
+                    }
+                },
+                TaskScheduler.Default);
+        }
     }
 
     /// <summary>
@@ -727,6 +792,7 @@ public sealed partial class Page : IDisposable
             return;
         }
         _disposed = true;
+        DiscardPrewarmedRuntime();
         _pendingFrameWork.Clear();
         Frames.Clear();
         Js = null;

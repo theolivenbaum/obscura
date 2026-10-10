@@ -460,6 +460,15 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
     /// </summary>
     private void BindDocumentOps(ScriptObject ops, PocketCalculatorState document)
     {
+        // Port addition: document.write() into the running parser at its insertion point.
+        // False when the document has no parser with an insertion point, and the shim falls
+        // back to its own input stream.
+        Bind(ops, "op_parser_write", (Func<object?, object?, bool>)(
+            (text, probe) => OpGuard.Run(
+                "op_parser_write",
+                () => document.ParserWriter is { } writer
+                    && (B(probe) ? writer.HasInsertionPoint : writer.TryWrite(S(text))),
+                false)));
         var engine = ops.Engine;
         BindFetch(ops, document);
         Bind(ops, "op_storage", (Func<object?, object?, object?, object?, string>)(

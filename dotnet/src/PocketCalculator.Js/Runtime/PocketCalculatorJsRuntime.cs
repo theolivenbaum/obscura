@@ -74,8 +74,37 @@ public sealed partial class PocketCalculatorJsRuntime
     /// <summary>Whether this runtime has been disposed (its page navigated or closed).</summary>
     internal bool IsDisposed => _disposed;
 
+    /// <summary>
+    /// Enough thread-pool workers that page work waiting for the isolate cannot starve the
+    /// work the isolate is waiting for.
+    /// </summary>
+    /// <remarks>
+    /// ClearScript settles an async op's promise on the thread that completed the op, which
+    /// blocks on the isolate lock while script runs. A module graph's dependencies are fetched
+    /// synchronously inside that script (ClearScript's loader), and the fetch's own
+    /// continuations need pool threads. With twenty page fetches settling during one module
+    /// evaluation (GitHub's home page: its preload links start loading while the document is
+    /// parsed), every pool thread was parked on the lock and each dependency waited for the
+    /// pool to grow by one thread every half second: one module took 12 s instead of 0.3 s.
+    /// Port addition: deno_core settles ops on the isolate's own thread.
+    /// </remarks>
+    private static readonly bool PoolSized = SizeThreadPool();
+
+    private static bool SizeThreadPool()
+    {
+        const int MinimumWorkers = 64;
+        ThreadPool.GetMinThreads(out var workers, out var io);
+        if (workers < MinimumWorkers)
+        {
+            ThreadPool.SetMinThreads(MinimumWorkers, io);
+        }
+
+        return true;
+    }
+
     private PocketCalculatorJsRuntime(string baseUrl, string? proxyUrl)
     {
+        _ = PoolSized;
         // A process over POCKETCALCULATOR_MAX_PROCESS_BYTES takes no new page (M7).
         ProcessMemoryGuard.Default.ThrowIfOverLimit();
 

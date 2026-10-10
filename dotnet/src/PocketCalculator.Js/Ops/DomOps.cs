@@ -1031,6 +1031,12 @@ public static class DomOps
             case "ce_candidates":
                 return CustomElementCandidates(dom, ParseNodeOrZero(arg1));
 
+            // Port addition: customElements.define() registered arg1, so the document's parser
+            // stops after inserting such an element and the realm upgrades it there.
+            case "ce_define":
+                gs.DefinedCustomElements.Add(arg1);
+                return "true";
+
             // Port addition: the custom element state ("custom", "failed") for :defined.
             case "ce_state":
             {

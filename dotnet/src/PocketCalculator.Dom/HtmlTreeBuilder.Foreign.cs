@@ -114,10 +114,15 @@ internal sealed partial class HtmlTreeBuilder
             }
         }
 
-        InsertElement(ns, local, t.Attrs);
+        var element = InsertElement(ns, local, t.Attrs);
         if (t.SelfClosing)
         {
             Pop();
+            // A self-closing SVG script is handled as its end tag would be.
+            if (isSvg && string.Equals(local, "script", StringComparison.Ordinal))
+            {
+                PauseAtScriptEnd(element);
+            }
         }
     }
 
@@ -130,6 +135,16 @@ internal sealed partial class HtmlTreeBuilder
 
         // The walk from the current node matches foreign elements by lowercased name and stops
         // at the first HTML element, which hands the token to the insertion mode.
+        // An SVG script's end tag pops it and runs it, as the HTML script end tag does.
+        if (string.Equals(t.Name, "script", StringComparison.Ordinal)
+            && CurrentNode is { Ns: ElemNs.Svg } svgScript
+            && string.Equals(svgScript.Local, "script", StringComparison.Ordinal))
+        {
+            Pop();
+            PauseAtScriptEnd(svgScript);
+            return;
+        }
+
         var match = _topForeign.GetValueOrDefault(t.Name);
         var html = _topHtml?.Index ?? -1;
         if (match is not null && match.Index > html)

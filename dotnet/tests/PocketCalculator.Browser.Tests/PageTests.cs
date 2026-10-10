@@ -1478,8 +1478,14 @@ public sealed class PageTests
         PageFixtures.AssertJson("\"rejected\"", page.Js!.Evaluate("globalThis.__classic_before_map"));
     }
 
+    /// <summary>
+    /// An async classic script runs once it has loaded, as a task: the parser has registered the
+    /// import map that follows it by then. Chromium 141 resolves the async script's import()
+    /// through it (scripts/script-order-conformance, page importMap). The port used to run every
+    /// fetched async script in document order before parsing went on, and it was rejected.
+    /// </summary>
     [Fact]
-    public async Task ReadyAsyncClassicScriptRunsBeforeALaterParserImportMap()
+    public async Task AsyncClassicScriptSeesALaterParserImportMap()
     {
         using TestHttpServer server = SpawnParserImportMapServer();
         using Page page = PageFixtures.ImportMapTestPage(
@@ -1493,9 +1499,8 @@ public sealed class PageTests
             """);
         await page.ExecuteScriptsAsync(CancellationToken.None);
         await page.SettleForDurationAsync(500);
-        PageFixtures.AssertJson("\"rejected\"", page.Js!.Evaluate("globalThis.__async_before_map"));
+        PageFixtures.AssertJson("\"later-map\"", page.Js!.Evaluate("globalThis.__async_before_map"));
         Assert.Equal("/app/async.js", server.NextPath(RequestTimeout));
-        Assert.False(server.TryNextPath(TimeSpan.FromMilliseconds(50), out _));
     }
 
     // BLOCKED on a bug in PocketCalculator.Js, not on this port: `PocketCalculatorJsRuntime` builds
