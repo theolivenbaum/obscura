@@ -17,11 +17,16 @@ namespace PocketCalculator.Js.Runtime;
 /// script the host runs.
 /// </para>
 /// <para>
-/// The one deno_core behavior that does not survive: a <c>Poll::Pending</c>
-/// parked on a real waker. The port cannot register a waker inside V8, so a
-/// loop with only future work parks on a timed wait sized to the next timer.
-/// A page with no timers and no in-flight ops is idle immediately, which is the
-/// same answer, reached by polling rather than by being woken.
+/// Async ops settle here too, as in deno_core: ClearScript resolves an op's promise on
+/// the context that was current when the op was called, which is the page's
+/// <see cref="PocketCalculator.Js.Ops.OpCompletionContext"/>, and each turn runs the
+/// completions queued when it started before its posted tasks and timers.
+/// </para>
+/// <para>
+/// What survives of deno_core's waker: an op completion wakes a parked loop
+/// (<see cref="PocketCalculator.Js.Ops.OpCompletionContext.WhenPosted"/>); anything else
+/// with only future work parks on a timed wait sized to the next timer. A page with
+/// no timers and no in-flight ops is idle immediately, which is the same answer.
 /// </para>
 /// </remarks>
 public sealed partial class PocketCalculatorJsRuntime

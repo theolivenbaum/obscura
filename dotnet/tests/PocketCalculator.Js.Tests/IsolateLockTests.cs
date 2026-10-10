@@ -1,7 +1,7 @@
 // No Rust counterpart: deno_core runs every op reaction on the thread that owns the isolate.
-// ClearScript resolves a Task-returning op's promise on the thread that completed the Task,
-// so page script can run beside host code; IsolateLock is what keeps captures and op
-// continuations from interleaving with it. See "Known deviations" in todo.md.
+// The port now does too (OpCompletionContext), but script entered from another thread (an
+// embedder's) can still run beside host code; IsolateLock is what keeps captures from
+// interleaving with it. See "Known deviations" in todo.md.
 using PocketCalculator.Js.Ops;
 using Xunit;
 

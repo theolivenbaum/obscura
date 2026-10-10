@@ -155,7 +155,7 @@ public sealed class OpCompletionContextTests
         rt.ExecuteScript(
             "op-completion-deferred",
             "globalThis.__opDelivered = false;"
-            + "__obscura_test_ops.op_sleep(5).then(() => { globalThis.__opDelivered = true; });");
+            + "__obscura_test_ops.op_sleep(50).then(() => { globalThis.__opDelivered = true; });");
 
         // The op's task completes on a pool thread long before this; ClearScript used to
         // resolve the promise there, entering V8 beside whatever the page thread was doing.
@@ -177,7 +177,7 @@ public sealed class OpCompletionContextTests
         rt.ExecuteScript(
             "op-completion-order",
             "globalThis.__log = [];"
-            + "__obscura_test_ops.op_sleep(1).then(() => __log.push('op'));"
+            + "__obscura_test_ops.op_sleep(50).then(() => __log.push('op'));"
             + "setTimeout(() => __log.push('timer'), 0);");
         Assert.True(
             SpinWait.SpinUntil(() => rt.OpCompletions.Pending > 0, TimeSpan.FromSeconds(10)),
@@ -214,7 +214,7 @@ public sealed class OpCompletionContextTests
         var rt = fixture.Runtime;
         rt.ExecuteScript(
             "op-completion-dispose",
-            "__obscura_test_ops.op_sleep(1).then(() => { globalThis.__x = 1; });");
+            "__obscura_test_ops.op_sleep(50).then(() => { globalThis.__x = 1; });");
         Assert.True(
             SpinWait.SpinUntil(() => rt.OpCompletions.Pending > 0, TimeSpan.FromSeconds(10)),
             "the op's completion should be queued for the loop");
@@ -330,12 +330,17 @@ public sealed class OpCompletionStarvationTests : IDisposable
         return fixture;
     }
 
+    /// <summary>
+    /// Page fetches (six at a time, FetchConcurrency) and as many other ops settling at once
+    /// (op_sleep standing in for GitHub's preload and image loads, which are not capped).
+    /// </summary>
     private static void StartFetches(PocketCalculatorJsRuntime rt) =>
         rt.ExecuteScript(
             "settling-fetches",
-            "globalThis.__fetched = 0;"
-            + $"for (let i = 0; i < {ConcurrentFetches}; i++) "
-            + "fetch('/slow?i=' + i).then(r => r.text()).then(() => { globalThis.__fetched++; }, e => { (globalThis.__errors ??= []).push(String(e)); });");
+            "globalThis.__fetched = 0; globalThis.__slept = 0;"
+            + $"for (let i = 0; i < {ConcurrentFetches}; i++) {{"
+            + "fetch('/slow?i=' + i).then(r => r.text()).then(() => { globalThis.__fetched++; }, e => { (globalThis.__errors ??= []).push(String(e)); });"
+            + $"__obscura_test_ops.op_sleep({FetchDelayMs} + i).then(() => {{ globalThis.__slept++; }}); }}");
 
     private async Task ServeAsync()
     {
