@@ -6667,3 +6667,99 @@ its "Page settings" label in a `max-width: 0; overflow: hidden` span beside a 24
 Chromium 141 sizes it 40px, the port 132px, which widened the header until its overflow
 logic hid the Sign in button. Percentage max-widths are not applied. Pinned by
 `FormControlDisplayTests.ButtonIntrinsicWidthHonoursADescendantMaxWidth`.
+
+### A definite size wins over the aspect ratio; min/max transfer only into an auto axis
+
+`vendor/taffy` floors a leaf's height at `width / aspect-ratio` even when the height is
+definite (`compute/leaf.rs`), and transfers min and max sizes through the ratio into both axes
+(`maybe_apply_aspect_ratio` on min/max in leaf, block, flexbox, grid and the absolute-position
+pass). capcut.com's 150x36 logo with `width:120px; height:24px; object-fit:contain` laid out
+120x28.8 (Chromium 141: 120x24), and a div with `aspect-ratio:2; width:120px; height:24px`
+120x60. The ratio now fills only an auto axis (`Leaf.cs`), and
+`GeometryExtensions.TransferLimitThroughAspectRatio` transfers a limit only into an axis whose
+preferred size is auto, a transferred minimum capped by that axis's maximum (and a maximum
+floored by its minimum): `width:120px; height:24px; max-height:20px` is 120x20 (was 83x20),
+`min-width:200px; max-height:20px` on an auto/auto image 200x20 (was 200x48). Pinned by
+`ReplacedSizingTests`.
+
+### Replaced elements: inline by default, natural ratios, content-box ratios, image buttons
+
+Measured against Chromium 141 on `render-repros/replaced-sizing/` (70 pages from
+`scripts/replaced-sizing-conformance/gen-pages.mjs`: png, ratio-only svg image, inline svg,
+canvas, video, iframe and `input type=image`, each through 33 sizing combinations in ten
+formatting contexts; compare element sizes and offsets in their wrapper at 0.5px). Element
+boxes matching: 1072/2030 before this work, 1217 after the rule above, then:
+
+- `canvas`, `video`, `iframe`, `embed`, `object` and `audio` are `inline` (Rust's UA makes
+  every element but `img` a block): an atomic inline on the text line, 300x150 by default;
+  `audio:not([controls])` is `display: none` (Chromium's rule is `!important`; here an author
+  `display` still wins);
+- only a canvas has a natural ratio (its bitmap's, 300x150 for a missing attribute); an iframe,
+  embed, object, a video without metadata, audio and meter/progress have a natural size and no
+  ratio (`ReplacedItem.NoRatio`), so `width:120px` on a video is 120x150, not 120x60;
+- `width`/`height` attributes map to `aspect-ratio` only on img, canvas, video, input and svg
+  (Rust maps them on every element: an iframe with width=120 height=24 and `width:60px;
+  height:auto` was 64x16, Chromium 64x154);
+- a block-level replaced box with an auto width takes its natural width (CSS 2.1 10.3.4): these
+  elements now take the image path in `DomBuildCore`, which sizes auto/auto boxes (block canvas
+  300 wide, was 400);
+- a natural ratio applies to the content box in block, leaf and absolute layout as flex and grid
+  already did (`AspectRatioUsesContentBox`): `height:24px; box-sizing:border-box; padding:3px`
+  on a 150x36 image is 81x24, was 100x24;
+- `aspect-ratio: auto <ratio>` keeps the natural ratio where there is one (Rust drops `auto`):
+  `aspect-ratio: auto 1; width:120px` on the image is 120x28.8, was 120x120;
+- `input type=image` is laid out and painted as its image, without the field's padding, border
+  and background (was an 8x6 empty field);
+- a flex item's min/max transfer through the ratio like the other layouts (`FlexboxLayout`);
+- an atomic inline's percentage height resolves against the definite content height of the
+  block holding its line (`TaffyTreeInline`): capcut.com's card images (`height:100%` in a
+  104px box) are 176x104 as in Chromium, were 176x99.
+
+After all of these: 1929/2030. Also left: `getComputedStyle(img).objectFit` reads empty.
+
+Left: an inline `<svg>` without a width attribute is 100% of its containing block in Chromium
+(400x96 in a 400px block, 0x0 under a shrink-to-fit parent) and 300x72 here; an authored
+`aspect-ratio` on a ratio-less replaced box (video, iframe) makes Chromium stretch it to the
+available width.
+
+### Captures and op continuations hold the page isolate's lock
+
+No Rust counterpart: deno_core runs every op reaction on the thread that owns the isolate.
+ClearScript resolves a Task-returning op's promise on the thread that completed the Task, and
+the reaction's script runs there under the isolate lock, while host code on the page thread
+(a CDP capture's layout and paint, an op's continuation after its `await`) ran without it.
+samsung.com's `Page.captureScreenshot` failed with "Collection was modified" (`DomTree.Count`
+under the painter, nodes appended by a fetch reaction) and eset.com/samsung.com's with "the page
+has no retained DOM surface to render" (the retained render or resolved scroll cleared between
+the capture's check and its read). `Ops.IsolateLock` runs host code through a trampoline
+function so V8's reentrant Locker excludes page script; `Page.captureScreenshot`'s synchronous
+body (`Page.WithPageLocked`), the runtime's captures, the render-resource service step and the
+continuations of `op_load_image_metadata` and `op_load_stylesheet` (which seeded the renderer
+cache, installed sheets and invalidated from thread-pool threads) hold it. A page whose fetch and
+image reactions append nodes failed 5 of 327 back-to-back captures, 0 of 1,356 after. Other
+host-side readers (CDP DOM/geometry handlers outside a capture) do not take it yet. Pinned by
+`IsolateLockTests`.
+
+### An autonomous CDP turn yields to a waiting command between tasks
+
+`RunAutonomousEventLoopTurn` in Rust runs every posted task and due timer before the
+connection processor reads its socket. Chromium serves a DevTools message between any two tasks.
+On weather.com each timer forces a 200-700ms relayout, so one turn ran for seconds and each of
+Playwright's five screenshot commands queued behind one: `page.screenshot` took 22-32s and once
+passed the survey's 35s budget. The CDP pump passes `CdpContext.ConnectionHasWork`; the turn
+stops after the task that is running and hands the rest back to their queues in order:
+2.4-4.0s. Pinned by `RuntimeTests.AutonomousTurnYieldsBetweenTasksWhenTheHostHasWork`.
+
+### A heavy cold layout pass ends with the collection it made due
+
+Port-only (the Rust engine has no tracing GC). The CLI runs workstation GC with concurrent
+collection off, so a gen2 collection is a blocking pause (~150ms over the ~120MB live heap of a
+2,000-item grid). Line carrying (b9768da) cut the cold pass's allocation from 383MB to 266MB, so
+that collection stopped falling inside the cold pass and landed in the first retained relayout:
+the bench's single `className` write + `offsetWidth` read went from ~300ms (4eedc89) to
+450-550ms while the cold pass got faster by more. `PaintApi.CollectAfterColdPass` forces a gen0
+(which the GC escalates to the generation that is due) at the end of a cold pass that allocated
+128MB or more: single relayout 334-363ms, cold pass 1.98-2.12s (4eedc89: 2.16-2.31s).
+`POCKETCALCULATOR_NO_COLD_PASS_GC=1` turns it off. Peak RSS stays ~40MB above 4eedc89: the shape
+cache now stays under its 8,192-entry cap (7.9k slices and paragraphs with their layout memos)
+where the old path overflowed and cleared it mid-pass; not a leak.

@@ -66,10 +66,25 @@ internal static class DomCascade
                 AllAsciiDigits(height) ? $"height: {height}px" : $"height: {height}");
         }
 
-        if (style.AspectRatio is null)
+        // HTML maps width and height to aspect-ratio for img, canvas, video and an image
+        // button only; an inline svg's width and height give it its natural ratio. DEVIATION from crates/obscura-render/src/dom.rs, which maps them on
+        // every element: an iframe with width=120 height=24 and `width: 60px; height: auto`
+        // was 64x16; Chromium 141 keeps its natural 150px height (64x154).
+        if (style.AspectRatio is null
+            && node.AsElement()?.Name.Local is "img" or "canvas" or "video" or "input" or "svg")
         {
             float? aw = ParseFloat(node.GetAttribute("width"));
             float? ah = ParseFloat(node.GetAttribute("height"));
+            if (node.AsElement()?.Name.Local is "canvas")
+            {
+                // A canvas's natural size is its bitmap's, 300x150 for a missing attribute, so it
+                // always has a natural ratio (Chromium 141: `height: 24px` on a bare canvas is
+                // 48x24, `width: 50%` of 400px is 200x100). DEVIATION from
+                // crates/obscura-render/src/dom.rs, which maps a ratio only from both attributes.
+                aw ??= 300f;
+                ah ??= 150f;
+            }
+
             if (aw is { } w && ah is { } h && w > 0f && h > 0f)
             {
                 style.AspectRatio = w / h;
@@ -601,6 +616,23 @@ internal static class DomCascade
                         style.Color = null;
                         style.BackgroundColor = null;
                         break;
+                    case "image":
+                        // DEVIATION from crates/obscura-render/src/dom.rs, which sizes an image
+                        // button as an empty text field (8x6 in Chromium's field padding and
+                        // border). Chromium lays it out and paints it as its image: no padding,
+                        // border or field background, sized like an <img> (a 150x36 source is
+                        // 150x36, `width:120px; height:24px` 120x24). See "Known deviations".
+                        style.Padding = Edges.Zero;
+                        style.Border = Edges.Zero;
+                        style.BorderModel = style.BorderModel with
+                        {
+                            SpecifiedWidths = Sides<float>.All(0f),
+                            Styles = Sides<BorderStyle>.All(BorderStyle.None),
+                        };
+                        style.BackgroundColor = null;
+                        style.NativeControlAppearance = false;
+                        style.Cursor = "pointer";
+                        break;
                     case "range":
                     case "color":
                         style.Margin = new Edges(2f, 2f, 2f, 2f);
@@ -629,6 +661,15 @@ internal static class DomCascade
             // the author cascade so a matching author `display` still wins.
             if (node.GetAttribute("hidden") is { } hidden
                 && !string.Equals(hidden, "until-found", StringComparison.OrdinalIgnoreCase))
+            {
+                style.Display = Display.None;
+            }
+
+            // UA rule `audio:not([controls]) { display: none }`. Chromium marks it !important;
+            // here an author `display` still wins, as for the other UA rules in this method.
+            if (!isSvgNamespace
+                && string.Equals(node.AsElement()?.Name.Local, "audio", StringComparison.Ordinal)
+                && node.GetAttribute("controls") is null)
             {
                 style.Display = Display.None;
             }

@@ -421,7 +421,9 @@ public static partial class CdpServer
             return true;
         }
 
-        return await page.RunAutonomousEventLoopTurnAsync().ConfigureAwait(false);
+        // A command that arrives mid-turn is served after the task running then, not after
+        // every task the turn took (PocketCalculatorJsRuntime.RunAutonomousEventLoopTurnAsync).
+        return await page.RunAutonomousEventLoopTurnAsync(yieldTo: ctx.ConnectionHasWork).ConfigureAwait(false);
     }
 
     private static void SyncLivePageNetworkEvents(CdpContext ctx)

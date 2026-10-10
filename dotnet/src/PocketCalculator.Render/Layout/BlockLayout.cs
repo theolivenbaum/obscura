@@ -400,20 +400,29 @@ public static class BlockLayout
         var paddingBorderSize = padding.Add(border).SumAxes();
         var boxSizingAdjustment =
             style.BoxSizing == BoxSizing.ContentBox ? paddingBorderSize : GeometryExtensions.SizeZero;
+        var ratioAdjustment = style.AspectRatioUsesContentBox ? paddingBorderSize : boxSizingAdjustment;
 
         var minSize = style.MinSize
             .MaybeResolve(parentSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                style.Size.MaybeResolve(parentSize, calc),
+                style.MaxSize.MaybeResolve(parentSize, calc),
+                isMinimum: true)
             .MaybeAdd(boxSizingAdjustment);
         var maxSize = style.MaxSize
             .MaybeResolve(parentSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                style.Size.MaybeResolve(parentSize, calc),
+                style.MinSize.MaybeResolve(parentSize, calc),
+                isMinimum: false)
             .MaybeAdd(boxSizingAdjustment);
         var clampedStyleSize = inputs.SizingMode == SizingMode.InherentSize
             ? style.Size
                 .MaybeResolve(parentSize, calc)
-                .MaybeApplyAspectRatio(aspectRatio)
                 .MaybeAdd(boxSizingAdjustment)
+                .MaybeApplyAspectRatio(aspectRatio, ratioAdjustment)
                 .MaybeClamp(minSize, maxSize)
             : GeometryExtensions.SizeNone;
 
@@ -491,24 +500,33 @@ public static class BlockLayout
 
         var boxSizingAdjustment =
             style.BoxSizing == BoxSizing.ContentBox ? paddingBorderSize : GeometryExtensions.SizeZero;
+        var ratioAdjustment = style.AspectRatioUsesContentBox ? paddingBorderSize : boxSizingAdjustment;
         var size = style.Size
             .MaybeResolve(parentSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
-            .MaybeAdd(boxSizingAdjustment);
+            .MaybeAdd(boxSizingAdjustment)
+            .MaybeApplyAspectRatio(aspectRatio, ratioAdjustment);
         var minSize = style.MinSize
             .MaybeResolve(parentSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                style.Size.MaybeResolve(parentSize, calc),
+                style.MaxSize.MaybeResolve(parentSize, calc),
+                isMinimum: true)
             .MaybeAdd(boxSizingAdjustment);
         var maxSize = style.MaxSize
             .MaybeResolve(parentSize, calc)
-            .MaybeApplyAspectRatio(aspectRatio)
+            .TransferLimitThroughAspectRatio(
+                aspectRatio,
+                style.Size.MaybeResolve(parentSize, calc),
+                style.MinSize.MaybeResolve(parentSize, calc),
+                isMinimum: false)
             .MaybeAdd(boxSizingAdjustment);
 
         // css-sizing-4: a definite size in one axis transfers through `aspect-ratio` to make the
         // other definite. Only a newly-filled axis is adopted (and clamped); an incoming known size
         // is left as the parent resolved it.
         {
-            var derived = knownDimensions.MaybeApplyAspectRatio(aspectRatio).MaybeClamp(minSize, maxSize);
+            var derived = knownDimensions.MaybeApplyAspectRatio(aspectRatio, ratioAdjustment).MaybeClamp(minSize, maxSize);
             knownDimensions = new Size<float?>(
                 knownDimensions.Width ?? derived.Width,
                 knownDimensions.Height ?? derived.Height);
@@ -795,6 +813,7 @@ public static class BlockLayout
             var pbSum = padding.Add(border).SumAxes();
             var boxSizingAdjustment =
                 childStyle.BoxSizing == BoxSizing.ContentBox ? pbSum : GeometryExtensions.SizeZero;
+            var ratioAdjustment = childStyle.AspectRatioUsesContentBox ? pbSum : boxSizingAdjustment;
 
             var position = childStyle.Position;
             var overflow = childStyle.Overflow;
@@ -819,15 +838,23 @@ public static class BlockLayout
                 Clear = childStyle.Clear,
                 Size = childStyle.Size
                     .MaybeResolve(nodeInnerSize, calc)
-                    .MaybeApplyAspectRatio(aspectRatio)
-                    .MaybeAdd(boxSizingAdjustment),
+                    .MaybeAdd(boxSizingAdjustment)
+                    .MaybeApplyAspectRatio(aspectRatio, ratioAdjustment),
                 MinSize = childStyle.MinSize
                     .MaybeResolve(nodeInnerSize, calc)
-                    .MaybeApplyAspectRatio(aspectRatio)
+                    .TransferLimitThroughAspectRatio(
+                        aspectRatio,
+                        childStyle.Size.MaybeResolve(nodeInnerSize, calc),
+                        childStyle.MaxSize.MaybeResolve(nodeInnerSize, calc),
+                        isMinimum: true)
                     .MaybeAdd(boxSizingAdjustment),
                 MaxSize = childStyle.MaxSize
                     .MaybeResolve(nodeInnerSize, calc)
-                    .MaybeApplyAspectRatio(aspectRatio)
+                    .TransferLimitThroughAspectRatio(
+                        aspectRatio,
+                        childStyle.Size.MaybeResolve(nodeInnerSize, calc),
+                        childStyle.MinSize.MaybeResolve(nodeInnerSize, calc),
+                        isMinimum: false)
                     .MaybeAdd(boxSizingAdjustment),
                 Overflow = overflow,
                 ScrollbarWidth = childStyle.ScrollbarWidth,
@@ -1902,6 +1929,7 @@ public static class BlockLayout
             var paddingBorderSum = padding.Add(border).SumAxes();
             var boxSizingAdjustment =
                 childStyle.BoxSizing == BoxSizing.ContentBox ? paddingBorderSum : GeometryExtensions.SizeZero;
+            var ratioAdjustment = childStyle.AspectRatioUsesContentBox ? paddingBorderSum : boxSizingAdjustment;
 
             // Resolve inset
             float? left = childStyle.Inset.Left.MaybeResolve(areaWidth, calc);
@@ -1912,17 +1940,25 @@ public static class BlockLayout
             // Compute known dimensions from min/max/inherent size styles
             var styleSize = childStyle.Size
                 .MaybeResolve(areaSize, calc)
-                .MaybeApplyAspectRatio(aspectRatio)
-                .MaybeAdd(boxSizingAdjustment);
+                .MaybeAdd(boxSizingAdjustment)
+                .MaybeApplyAspectRatio(aspectRatio, ratioAdjustment);
             var minSize = childStyle.MinSize
                 .MaybeResolve(areaSize, calc)
-                .MaybeApplyAspectRatio(aspectRatio)
+                .TransferLimitThroughAspectRatio(
+                    aspectRatio,
+                    childStyle.Size.MaybeResolve(areaSize, calc),
+                    childStyle.MaxSize.MaybeResolve(areaSize, calc),
+                    isMinimum: true)
                 .MaybeAdd(boxSizingAdjustment)
                 .Or(paddingBorderSum.AsOptions())
                 .MaybeMax(paddingBorderSum);
             var maxSize = childStyle.MaxSize
                 .MaybeResolve(areaSize, calc)
-                .MaybeApplyAspectRatio(aspectRatio)
+                .TransferLimitThroughAspectRatio(
+                    aspectRatio,
+                    childStyle.Size.MaybeResolve(areaSize, calc),
+                    childStyle.MinSize.MaybeResolve(areaSize, calc),
+                    isMinimum: false)
                 .MaybeAdd(boxSizingAdjustment);
             var knownDimensions = styleSize.MaybeClamp(minSize, maxSize);
 
@@ -1932,7 +1968,7 @@ public static class BlockLayout
                 float newWidthRaw = areaWidth.MaybeSub(margin.Left).MaybeSub(margin.Right)
                     - left.Value - right.Value;
                 knownDimensions.Width = Sys.F32Max(newWidthRaw, 0.0f);
-                knownDimensions = knownDimensions.MaybeApplyAspectRatio(aspectRatio).MaybeClamp(minSize, maxSize);
+                knownDimensions = knownDimensions.MaybeApplyAspectRatio(aspectRatio, ratioAdjustment).MaybeClamp(minSize, maxSize);
             }
 
             // Fill in height from top/bottom and reapply aspect ratio
@@ -1941,7 +1977,7 @@ public static class BlockLayout
                 float newHeightRaw = areaHeight.MaybeSub(margin.Top).MaybeSub(margin.Bottom)
                     - top.Value - bottom.Value;
                 knownDimensions.Height = Sys.F32Max(newHeightRaw, 0.0f);
-                knownDimensions = knownDimensions.MaybeApplyAspectRatio(aspectRatio).MaybeClamp(minSize, maxSize);
+                knownDimensions = knownDimensions.MaybeApplyAspectRatio(aspectRatio, ratioAdjustment).MaybeClamp(minSize, maxSize);
             }
 
             var childAvailableSpace = new Size<AvailableSpace>(

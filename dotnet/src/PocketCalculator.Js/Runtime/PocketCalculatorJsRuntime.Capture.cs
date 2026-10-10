@@ -48,7 +48,10 @@ public sealed partial class PocketCalculatorJsRuntime
         bool previous = state.RenderResources.SetSyncLoadingEnabled(false);
         try
         {
-            return capture(state);
+            // Under the isolate lock: a promise reaction ClearScript runs on another thread
+            // must not create nodes or drop the retained render while this lays out and
+            // paints (IsolateLock).
+            return state.IsolateLock.Run(() => capture(state));
         }
         finally
         {

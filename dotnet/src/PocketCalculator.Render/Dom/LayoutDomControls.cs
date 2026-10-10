@@ -230,6 +230,12 @@ public static partial class RenderDom
                 continue;
             }
 
+            if (string.Equals(inputType, "image", StringComparison.Ordinal))
+            {
+                // An image button is a replaced element sized by its image (DomBuildCore).
+                continue;
+            }
+
             float inputFontSize = F32.Max(style.FontSize ?? 13.333333f, 1f);
             float inputHorizontalEdges = style.Padding.Left
                 + style.Padding.Right
@@ -285,10 +291,6 @@ public static partial class RenderDom
                         defaultHeight);
                     break;
                 }
-
-                case "image":
-                    intrinsic = (inputHorizontalEdges, inputVerticalEdges);
-                    break;
 
                 // DEVIATION from crates/obscura-render/src/dom.rs, which sizes a date/time
                 // control from the `size` attribute like a text field and so makes it both too

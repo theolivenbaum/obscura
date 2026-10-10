@@ -472,6 +472,12 @@ public sealed class PocketCalculatorState
     public object AsyncResourceGate { get; } = new();
 
     /// <summary>
+    /// The page isolate's lock, for host code that touches page state outside script (see
+    /// the <c>IsolateLock</c> class). Shared by reference with child frames.
+    /// </summary>
+    public IsolateLock IsolateLock { get; set; } = IsolateLock.None;
+
+    /// <summary>
     /// Page-transport loads for resources that cache-only layout or paint missed
     /// (upstream 97ff86d). The owning runtime applies results at its own event-loop
     /// turns and promise waits; a new document retires the set.

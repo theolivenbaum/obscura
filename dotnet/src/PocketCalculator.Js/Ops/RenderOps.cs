@@ -1460,97 +1460,116 @@ public static class RenderOps
         if (follower is not null)
         {
             await follower.Task.ConfigureAwait(false);
-            lock (shared.AsyncResourceGate)
-            {
-                return FinishAsyncImageMetadata(shared, nodeId, documentGeneration, selectedUrl, profile);
-            }
+            // Under the isolate lock: it reads the document (IsolateLock).
+            return shared.IsolateLock.Run(
+                () => FinishAsyncImageMetadata(shared, nodeId, documentGeneration, selectedUrl, profile));
         }
 
-        shared.PageInFlight.Increment();
+        bool settled = false;
         try
         {
-            var parsedUrl = TryUri(selectedUrl);
-            Response? response = null;
-            if (!blocked && parsedUrl is not null)
+            byte[]? bytes = null;
+            shared.PageInFlight.Increment();
+            try
             {
-                try
+                var parsedUrl = TryUri(selectedUrl);
+                if (!blocked && parsedUrl is not null)
                 {
-                    response = stealthClient is { IsAvailable: true }
-                        ? await stealthClient
-                            .FetchResourceWithCallbacksAsync(parsedUrl, resourceRequest, shared.Callbacks)
-                            .ConfigureAwait(false)
-                        : await httpClient!
-                            .FetchResourceWithCallbacksAsync(parsedUrl, resourceRequest, shared.Callbacks)
-                            .ConfigureAwait(false);
-                }
-                catch (Exception ex) when (ex is not OutOfMemoryException)
-                {
-                    response = null;
-                }
-            }
-
-            var bytes = response is { Status: >= 200 and < 300 } ok ? ok.Body : null;
-
-            // Everything from here on reads or writes page state, and concurrent image
-            // requests get here on different thread-pool threads. Rust resumes each
-            // reaction on the one thread that owns the state; the gate is the port's
-            // equivalent. Seeding, invalidating and handing the result to the waiters
-            // is one step: a follower released before the bytes are in the cache reads
-            // its own request back as unknown and reports a load error.
-            List<TaskCompletionSource> pending = [];
-            string result;
-            lock (shared.AsyncResourceGate)
-            {
-                if (shared.DocumentGeneration == documentGeneration)
-                {
-                    if (bytes is not null && RenderPaint.ImageIntrinsicDimensions(bytes) is not null)
+                    try
                     {
-                        shared.RenderResources.SeedImage(selectedUrl, profile, bytes);
-                        // The leader owns the unknown-to-known cache transition. Followers
-                        // only observe this result and must not invalidate again.
-                        RenderInvalidation.InvalidateRenderResourceGeometry(shared);
+                        Response? response = stealthClient is { IsAvailable: true }
+                            ? await stealthClient
+                                .FetchResourceWithCallbacksAsync(parsedUrl, resourceRequest, shared.Callbacks)
+                                .ConfigureAwait(false)
+                            : await httpClient!
+                                .FetchResourceWithCallbacksAsync(parsedUrl, resourceRequest, shared.Callbacks)
+                                .ConfigureAwait(false);
+                        bytes = response is { Status: >= 200 and < 300 } ok ? ok.Body : null;
                     }
-                    else
+                    catch (Exception ex) when (ex is not OutOfMemoryException)
                     {
-                        shared.RenderResources.SeedImageMissing(selectedUrl, profile);
+                        bytes = null;
                     }
                 }
+            }
+            finally
+            {
+                shared.PageInFlight.Decrement();
+            }
 
-                if (shared.RenderImageInFlight.Remove(requestKey, out var registered))
+            // Everything from here on reads or writes page state: the renderer cache, the
+            // retained render's pending mutations, the resolved scroll and the document. This
+            // runs on whichever thread completed the transport, so it holds the isolate lock,
+            // which keeps page script and captures out (IsolateLock), and the gate, which
+            // orders it against the other image requests (AsyncResourceGate). Rust resumes the
+            // reaction on the one thread that owns the state. Seeding, invalidating and
+            // handing the result to the waiters is one step: a follower released before the
+            // bytes are in the cache reads its own request back as unknown and reports a load
+            // error.
+            return shared.IsolateLock.Run(() =>
+            {
+                List<TaskCompletionSource> pending = [];
+                string result;
+                lock (shared.AsyncResourceGate)
                 {
-                    pending = registered;
+                    if (shared.DocumentGeneration == documentGeneration)
+                    {
+                        if (bytes is not null && RenderPaint.ImageIntrinsicDimensions(bytes) is not null)
+                        {
+                            shared.RenderResources.SeedImage(selectedUrl, profile, bytes);
+                            // The leader owns the unknown-to-known cache transition. Followers
+                            // only observe this result and must not invalidate again.
+                            RenderInvalidation.InvalidateRenderResourceGeometry(shared);
+                        }
+                        else
+                        {
+                            shared.RenderResources.SeedImageMissing(selectedUrl, profile);
+                        }
+                    }
+
+                    if (shared.RenderImageInFlight.Remove(requestKey, out var registered))
+                    {
+                        pending = registered;
+                    }
+
+                    settled = true;
+                    try
+                    {
+                        result = FinishAsyncImageMetadata(shared, nodeId, documentGeneration, selectedUrl, profile);
+                    }
+                    finally
+                    {
+                        foreach (var waiter in pending)
+                        {
+                            waiter.TrySetResult();
+                        }
+                    }
                 }
 
-                result = FinishAsyncImageMetadata(shared, nodeId, documentGeneration, selectedUrl, profile);
-            }
-
-            foreach (var waiter in pending)
-            {
-                waiter.TrySetResult();
-            }
-
-            return result;
+                return result;
+            });
         }
         finally
         {
-            // A leader that failed after registering still owns every waiter on its key.
-            // Leaving them registered strands each follower's op on a promise nothing can
+            // A leader that failed before it settled its key still owns every waiter on its
+            // key. Leaving them registered strands each follower's op on a promise nothing can
             // settle, and the element never completes.
-            List<TaskCompletionSource> abandoned = [];
-            lock (shared.AsyncResourceGate)
+            if (!settled)
             {
-                if (shared.RenderImageInFlight.Remove(requestKey, out var registered))
+                List<TaskCompletionSource> abandoned = [];
+                lock (shared.AsyncResourceGate)
                 {
-                    abandoned = registered;
+                    if (shared.RenderImageInFlight.Remove(requestKey, out var registered))
+                    {
+                        abandoned = registered;
+                    }
+                }
+
+                foreach (var waiter in abandoned)
+                {
+                    waiter.TrySetResult();
                 }
             }
-
-            foreach (var waiter in abandoned)
-            {
-                waiter.TrySetResult();
-            }
-
-            shared.PageInFlight.Decrement();
         }
     }
 

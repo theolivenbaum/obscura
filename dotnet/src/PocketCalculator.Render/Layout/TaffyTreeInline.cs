@@ -69,6 +69,29 @@ public sealed partial class TaffyTree<TNodeContext>
             var sizes = new Size<float>[children.Count];
             var margins = new Rect<float>[children.Count];
 
+            // DEVIATION from crates/obscura-render (no inline layout of atomics; its flex
+            // stand-in resolved them against the row): a percentage height on an atomic inline
+            // resolves against the block that holds the line, when its height is definite.
+            // capcut.com's card images (`height: 100%` in a 104px box, object-fit: cover) were
+            // laid out at their ratio height, 99px; Chromium 141: 104px.
+            float? heightBasis = null;
+            {
+                float widthBasis = layoutInputs.ParentSize.Width ?? 0.0f;
+                var ownPadding = style.Padding.ResolveOrZero((float?)widthBasis, calc);
+                var ownBorder = style.Border.ResolveOrZero((float?)widthBasis, calc);
+                float edges = ownPadding.Top + ownPadding.Bottom + ownBorder.Top + ownBorder.Bottom;
+                if (layoutInputs.KnownDimensions.Height is { } knownHeight)
+                {
+                    heightBasis = Sys.F32Max(knownHeight - edges, 0.0f);
+                }
+                else if (style.Size.Height.MaybeResolve(layoutInputs.ParentSize.Height, calc) is { } styled)
+                {
+                    heightBasis = style.BoxSizing == BoxSizing.BorderBox
+                        ? Sys.F32Max(styled - edges, 0.0f)
+                        : styled;
+                }
+            }
+
             void SizeAtomics(Size<AvailableSpace> available)
             {
                 AvailableSpace width = available.Width;
@@ -85,7 +108,7 @@ public sealed partial class TaffyTree<TNodeContext>
                     {
                         // CSS 2.1 10.3.9: an auto-width atomic is shrink-to-fit,
                         // min(max(min-content, available), max-content).
-                        Size<float?> parentSize = new(basis, null);
+                        Size<float?> parentSize = new(basis, heightBasis);
                         float maxContent = tree.MeasureChildSize(
                             child,
                             GeometryExtensions.SizeNone,
@@ -119,7 +142,7 @@ public sealed partial class TaffyTree<TNodeContext>
                     LayoutOutput output = tree.PerformChildLayout(
                         child,
                         new Size<float?>(knownWidth, null),
-                        new Size<float?>(basis, null),
+                        new Size<float?>(basis, heightBasis),
                         new Size<AvailableSpace>(childAvailable, AvailableSpace.MaxContent),
                         SizingMode.InherentSize,
                         GeometryExtensions.LineFalse);

@@ -1255,7 +1255,7 @@ internal static class PaintDomPainter
 
             PaintBorders.PaintCssOutline(pixmap, rect, style, elementClipMask, rasterScale);
 
-            if (boxOnSurface && localName is "img" or "video"
+            if (boxOnSurface && (localName is "img" or "video" || PaintImages.IsImageButton(node))
                 && pass.SelectedImages.TryGetValue(nid, out SelectedImage? source))
             {
                 bool painted = PaintImages.PaintImage(

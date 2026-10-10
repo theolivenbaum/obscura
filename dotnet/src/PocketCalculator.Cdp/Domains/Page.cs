@@ -1575,6 +1575,15 @@ public static partial class Page
         BrowserPage page = ctx.GetSessionPageMut(sessionId)
             ?? throw new DomainError("No page for session");
         await PrepareCaptureResourcesIfRequestedAsync(page).ConfigureAwait(false);
+
+        // Everything from here on is synchronous and reads the page's layout: hold the
+        // isolate lock, so page script a promise reaction runs on another thread cannot
+        // mutate the document or drop the retained render under the capture.
+        return page.WithPageLocked(() => CaptureScreenshotLocked(options, page));
+    }
+
+    private static JsonObject CaptureScreenshotLocked(ScreenshotOptions options, BrowserPage page)
+    {
         AnimationSample animationSample = page.LiveAnimationSample();
         (float Width, float Height) viewport = page.Viewport;
         double deviceScaleFactor = page.DeviceScaleFactor;
