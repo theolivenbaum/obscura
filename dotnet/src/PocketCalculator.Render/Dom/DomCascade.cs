@@ -1358,7 +1358,7 @@ internal static class DomCascade
                 }
             }
 
-            sheets[root] = cache.GetOrParseShadow(tree, sources);
+            sheets[root] = cache.GetOrParseShadow(tree, sources, root);
         }
 
         cache.EndShadowPass();

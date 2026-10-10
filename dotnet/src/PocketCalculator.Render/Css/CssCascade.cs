@@ -320,6 +320,7 @@ public sealed class StylesheetCache
         if (viewportBits != _shadowViewportBits || mediaType != _shadowMediaType)
         {
             _shadow.Clear();
+            _shadowByRoot.Clear();
             _shadowBytes = 0;
             _shadowViewportBits = viewportBits;
             _shadowMediaType = mediaType;
@@ -341,12 +342,36 @@ public sealed class StylesheetCache
     /// would have parsed to the same one; a sheet is immutable once parsed and holds no
     /// root, which is supplied as the scope at match time.
     /// </remarks>
-    internal Stylesheet GetOrParseShadow(DomTree tree, List<string> sources)
+    internal Stylesheet GetOrParseShadow(DomTree tree, List<string> sources, NodeId? root = null)
     {
+        // DEVIATION from crates/obscura-render (which parses every root's sheet on every pass):
+        // a root whose sources are the very strings it had last pass gets its sheet without
+        // joining and hashing them. A <style> with one text child hands its text node's string
+        // out unchanged, so on reddit.com's 170 roots each pass no longer copied and hashed
+        // every component's whole stylesheet (about a third of a forced read there).
+        if (root is { } owner
+            && _shadowByRoot.TryGetValue(owner, out RootShadow? known)
+            && known.Sources.Length == sources.Count)
+        {
+            bool same = true;
+            for (int index = 0; index < sources.Count && same; index++)
+            {
+                same = ReferenceEquals(known.Sources[index], sources[index]);
+            }
+
+            if (same)
+            {
+                known.LastPass = _shadowPass;
+                known.Entry.LastPass = _shadowPass;
+                return known.Entry.Sheet;
+            }
+        }
+
         string key = sources.Count == 1 ? sources[0] : string.Join('\0', sources);
         if (_shadow.TryGetValue(key, out ShadowEntry? entry))
         {
             entry.LastPass = _shadowPass;
+            RememberRoot(root, sources, entry);
             return entry.Sheet;
         }
 
@@ -356,16 +381,55 @@ public sealed class StylesheetCache
         var sheet = Stylesheet.ParseForViewportAndMedia(tree, sources, viewport, _shadowMediaType);
         if (_shadowBytes + key.Length <= MaxShadowSourceBytes)
         {
-            _shadow[key] = new ShadowEntry(sheet, key.Length) { LastPass = _shadowPass };
+            ShadowEntry added = new(sheet, key.Length) { LastPass = _shadowPass };
+            _shadow[key] = added;
             _shadowBytes += key.Length;
+            RememberRoot(root, sources, added);
         }
 
         return sheet;
     }
 
+    private sealed class RootShadow(string[] sources, ShadowEntry entry)
+    {
+        public string[] Sources { get; } = sources;
+
+        public ShadowEntry Entry { get; } = entry;
+
+        public long LastPass { get; set; }
+    }
+
+    /// <summary>Each root's sources (by reference) and their entry, as of the last pass that saw it.</summary>
+    private readonly Dictionary<NodeId, RootShadow> _shadowByRoot = [];
+
+    private void RememberRoot(NodeId? root, List<string> sources, ShadowEntry entry)
+    {
+        if (root is { } owner)
+        {
+            _shadowByRoot[owner] = new RootShadow([.. sources], entry) { LastPass = _shadowPass };
+        }
+    }
+
     /// <summary>Drop the source sets the pass that just ended did not use.</summary>
     internal void EndShadowPass()
     {
+        List<NodeId>? gone = null;
+        foreach ((NodeId root, RootShadow known) in _shadowByRoot)
+        {
+            if (known.LastPass != _shadowPass)
+            {
+                (gone ??= []).Add(root);
+            }
+        }
+
+        if (gone is not null)
+        {
+            foreach (NodeId root in gone)
+            {
+                _shadowByRoot.Remove(root);
+            }
+        }
+
         List<string>? stale = null;
         foreach ((string key, ShadowEntry entry) in _shadow)
         {

@@ -3502,6 +3502,20 @@ shadow stylesheet, 30 class toggles each followed by a read, three runs: allocat
 `::part`, inherited custom properties, a nested host; 60 seeds clean) and
 `AShadowRootPageRestylesOnlyWhatAMutationReaches`.
 
+### A shadow root's sheet is found by its sources' identity
+
+DEVIATION from `crates/obscura-render` (which parses every shadow root's sheet on every pass) and
+from the port's own content-keyed cache before it: every pass joined each root's sources into one
+key string and hashed it, so on reddit.com's ~170 roots a pass copied and hashed every component's
+whole stylesheet again, 13-37ms of each forced read (a third of a retained pass there).
+`StylesheetCache.GetOrParseShadow` now remembers, per root, the source strings it was given and
+their entry; a root whose sources are the very same strings (a `<style>` with one text child hands
+its text node's string out unchanged) gets its sheet without the join. Anything else takes the
+content key as before, so roots sharing sources still share a sheet, and the per-root records of
+roots a pass did not see are dropped with it. reddit.com (`fetch`, layout profile, two runs each):
+the `sheets` phase of a retained pass 12-47ms -> ~1ms; summed over the load, 1.75-2.05s
+(4eedc89) -> 1.21-1.31s, the rest being the cold parses of new sheets.
+
 ### A split paragraph's lines are taken from the line they were cut from
 
 DEVIATION from `crates/obscura-render/src/inline.rs` (`shape_with_text_indent`), which shapes and
