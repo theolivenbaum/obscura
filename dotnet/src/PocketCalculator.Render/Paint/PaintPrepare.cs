@@ -43,6 +43,41 @@ internal static class PaintApi
                 animationTimeline,
                 reusable));
 
+    /// <summary>Allocation by a cold pass above which it ends with a collection.</summary>
+    internal const long ColdPassCollectionBytes = 128L << 20;
+
+    /// <summary>Diagnostic: <c>POCKETCALCULATOR_NO_COLD_PASS_GC=1</c> leaves every collection to the GC.</summary>
+    internal static readonly bool ColdPassCollectionDisabled =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_NO_COLD_PASS_GC") == "1";
+
+    /// <summary>
+    /// Run the collection a heavy cold pass has made due at its end, rather than inside the next
+    /// forced layout read.
+    /// </summary>
+    /// <remarks>
+    /// PORT NOTE (no Rust counterpart; the Rust engine has no tracing GC). A cold pass over a large
+    /// document allocates hundreds of megabytes, most of it dead by the time the pass returns,
+    /// and promotes the layout it keeps. The process runs workstation GC with concurrent
+    /// collection off, so the gen2 collection that promotion makes due is a blocking pause
+    /// (about 150ms over the ~120MB live heap of a 2,000-item grid). It used to land inside the
+    /// cold pass, which allocated enough to trigger it; once line carrying (b9768da) cut that
+    /// pass's allocation from 383MB to 266MB it moved into the next GC, which is the first
+    /// retained relayout: `el.className = ...; el.offsetWidth` went from ~300ms to 450-550ms,
+    /// while the cold pass got faster by more than that. A gen0 collection forced here, while
+    /// the pass's temporaries are already dead, is escalated by the GC to whichever generation
+    /// is due, so the pause is paid where the cold pass already pays for its allocation and the
+    /// forced read that follows stays at ~310-340ms. Passes allocating less than
+    /// <see cref="ColdPassCollectionBytes"/> leave collection to the GC.
+    /// </remarks>
+    private static void CollectAfterColdPass(long allocatedBefore)
+    {
+        if (!ColdPassCollectionDisabled
+            && GC.GetTotalAllocatedBytes() - allocatedBefore >= ColdPassCollectionBytes)
+        {
+            GC.Collect(0, GCCollectionMode.Forced, blocking: true);
+        }
+    }
+
     private static PreparedRender? PrepareInternalCore(
         DomTree tree,
         (float Width, float Height) viewport,
@@ -64,6 +99,7 @@ internal static class PaintApi
         }
 
         LayoutPhaseProfile.Begin();
+        long allocatedBefore = GC.GetTotalAllocatedBytes();
         using DomTraversal.DocumentWalkScope walk = DomTraversal.ShareDocumentWalk(tree);
         // Fetch <img> bytes up front to learn intrinsic sizes for layout. This seeds the same
         // cache the paint pass reads, so each URL is still fetched at most once.
@@ -178,6 +214,11 @@ internal static class PaintApi
         }
 
         LayoutPhaseProfile.End(retained is not null ? $"retained mut={mutations?.Count ?? 0}" : "full");
+        if (retained is null)
+        {
+            CollectAfterColdPass(allocatedBefore);
+        }
+
         return new PreparedRender
         {
             ViewportSize = viewport,
