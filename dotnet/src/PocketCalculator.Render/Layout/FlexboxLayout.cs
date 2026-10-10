@@ -574,18 +574,19 @@ public static class FlexboxLayout
             var aspectRatioAdjustment =
                 childStyle.AspectRatioUsesContentBox ? pbSum : boxSizingAdjustment;
 
-            var size = MaybeApplyPreferredAspectRatio(
-                rawSize.MaybeResolve(percentBasis, calc).MaybeAdd(boxSizingAdjustment),
-                aspectRatio,
-                aspectRatioAdjustment);
-            var minSize = MaybeApplyPreferredAspectRatio(
-                childStyle.MinSize.MaybeResolve(percentBasis, calc).MaybeAdd(boxSizingAdjustment),
-                aspectRatio,
-                aspectRatioAdjustment);
-            var maxSize = MaybeApplyPreferredAspectRatio(
-                childStyle.MaxSize.MaybeResolve(percentBasis, calc).MaybeAdd(boxSizingAdjustment),
-                aspectRatio,
-                aspectRatioAdjustment);
+            var resolvedSize = rawSize.MaybeResolve(percentBasis, calc).MaybeAdd(boxSizingAdjustment);
+            var resolvedMinSize = childStyle.MinSize.MaybeResolve(percentBasis, calc).MaybeAdd(boxSizingAdjustment);
+            var resolvedMaxSize = childStyle.MaxSize.MaybeResolve(percentBasis, calc).MaybeAdd(boxSizingAdjustment);
+            var size = MaybeApplyPreferredAspectRatio(resolvedSize, aspectRatio, aspectRatioAdjustment);
+
+            // DEVIATION from vendor/taffy: a min or max size transfers through the ratio only
+            // into an axis whose preferred size is auto, capped by that axis's own limit
+            // (GeometryExtensions.TransferLimitThroughAspectRatio). A flex item image with
+            // `width:120px; height:24px; max-height:20px` was 83x20; Chromium 141: 120x20.
+            var minSize = resolvedMinSize.TransferLimitThroughAspectRatio(
+                aspectRatio, resolvedSize, resolvedMaxSize, isMinimum: true, aspectRatioAdjustment);
+            var maxSize = resolvedMaxSize.TransferLimitThroughAspectRatio(
+                aspectRatio, resolvedSize, resolvedMinSize, isMinimum: false, aspectRatioAdjustment);
 
             items.Add(new FlexItem
             {

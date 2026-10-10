@@ -616,6 +616,23 @@ internal static class DomCascade
                         style.Color = null;
                         style.BackgroundColor = null;
                         break;
+                    case "image":
+                        // DEVIATION from crates/obscura-render/src/dom.rs, which sizes an image
+                        // button as an empty text field (8x6 in Chromium's field padding and
+                        // border). Chromium lays it out and paints it as its image: no padding,
+                        // border or field background, sized like an <img> (a 150x36 source is
+                        // 150x36, `width:120px; height:24px` 120x24). See "Known deviations".
+                        style.Padding = Edges.Zero;
+                        style.Border = Edges.Zero;
+                        style.BorderModel = style.BorderModel with
+                        {
+                            SpecifiedWidths = Sides<float>.All(0f),
+                            Styles = Sides<BorderStyle>.All(BorderStyle.None),
+                        };
+                        style.BackgroundColor = null;
+                        style.NativeControlAppearance = false;
+                        style.Cursor = "pointer";
+                        break;
                     case "range":
                     case "color":
                         style.Margin = new Edges(2f, 2f, 2f, 2f);

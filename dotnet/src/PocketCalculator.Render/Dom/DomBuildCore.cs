@@ -266,7 +266,7 @@ internal static partial class DomBuild
         }
 
         // A replaced image is a measured leaf, even when CSS gives it a percentage width.
-        if (metadata is null && local is "img" or "video")
+        if (metadata is null && (local is "img" or "video" || PaintImages.IsImageButton(node)))
         {
             metadata = style.ReplacedIntrinsic
                 ?? (style.IntrinsicSize is { } natural

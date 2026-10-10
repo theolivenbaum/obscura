@@ -1614,11 +1614,32 @@ public static partial class ComputedStyle
                 return true;
 
             case "aspect-ratio":
-                style.AspectRatio = ParseAspectRatio(value);
+            {
+                // DEVIATION from crates/obscura-render/src/style.rs, which takes the ratio
+                // of `auto <ratio>` and drops `auto`. `auto` means the natural ratio wins
+                // where the box has one, and the given ratio is only the fallback: Chromium
+                // 141 lays a 150x36 image with `aspect-ratio: auto 1; width: 120px` out at
+                // 120x28.8, not 120x120. A natural ratio already mapped (a canvas's bitmap,
+                // an svg's or an image's width and height) is kept; one that arrives with
+                // the image replaces the fallback (AspectRatioIsMapped). See "Known
+                // deviations" in todo.md.
+                bool auto = false;
+                foreach (string token in value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    auto |= CssText.EqualsAscii(token, "auto");
+                }
+
                 style.AspectRatioSpecified = SerializeAspectRatio(value);
-                style.AspectRatioIsMapped = false;
+                if (auto && style.AspectRatioIsIntrinsic && style.AspectRatio is not null)
+                {
+                    return true;
+                }
+
+                style.AspectRatio = ParseAspectRatio(value);
+                style.AspectRatioIsMapped = auto && style.AspectRatio is not null;
                 style.AspectRatioIsIntrinsic = false;
                 return true;
+            }
 
             case "margin":
                 ApplyMarginShorthand(style, value);

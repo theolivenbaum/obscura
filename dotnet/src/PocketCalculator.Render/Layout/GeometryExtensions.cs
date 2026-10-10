@@ -317,14 +317,16 @@ public static class GeometryExtensions
     /// <param name="preferred">The resolved preferred size, before any transfer.</param>
     /// <param name="opposite">The resolved max size for a minimum, or min size for a maximum.</param>
     /// <param name="isMinimum">Whether <paramref name="limit"/> is a minimum.</param>
+    /// <param name="adjustment">The edges between the sizes given and the box the ratio applies to.</param>
     public static Size<float?> TransferLimitThroughAspectRatio(
         this Size<float?> limit,
         float? aspectRatio,
         Size<float?> preferred,
         Size<float?> opposite,
-        bool isMinimum)
+        bool isMinimum,
+        Size<float> adjustment = default)
     {
-        if (aspectRatio is not { } ratio)
+        if (aspectRatio is not { } ratio || !float.IsFinite(ratio) || ratio <= 0.0f)
         {
             return limit;
         }
@@ -333,13 +335,13 @@ public static class GeometryExtensions
         float? height = limit.Height;
         if (width is null && preferred.Width is null && limit.Height is { } fromHeight)
         {
-            float transferred = fromHeight * ratio;
+            float transferred = (Sys.F32Max(fromHeight - adjustment.Height, 0.0f) * ratio) + adjustment.Width;
             width = isMinimum ? transferred.MaybeMin(opposite.Width) : transferred.MaybeMax(opposite.Width);
         }
 
         if (height is null && preferred.Height is null && limit.Width is { } fromWidth)
         {
-            float transferred = fromWidth / ratio;
+            float transferred = (Sys.F32Max(fromWidth - adjustment.Width, 0.0f) / ratio) + adjustment.Height;
             height = isMinimum ? transferred.MaybeMin(opposite.Height) : transferred.MaybeMax(opposite.Height);
         }
 

@@ -151,6 +151,38 @@ public class ReplacedSizingTests
     }
 
     /// <summary>
+    /// A flex item's min/max transfer only into its auto axes; <c>aspect-ratio: auto 1</c>
+    /// keeps the natural ratio; an image button is sized as its image.
+    /// </summary>
+    [Fact]
+    public void FlexLimitsAutoRatioAndImageButtons()
+    {
+        DomTree tree = Parse(
+            """
+            <style>html,body{margin:0} .w{width:400px}</style>
+            <div class=w style="display:flex;align-items:flex-start"><img id=flexMaxH src="a.png" style="width:120px;height:24px;max-height:20px"></div>
+            <div class=w style="display:flex;align-items:flex-start"><img id=flexMinW src="a.png" style="width:120px;height:24px;min-width:200px"></div>
+            <div class=w><img id=autoRatio src="a.png" style="display:block;aspect-ratio:auto 1;width:120px"></div>
+            <div class=w><canvas id=canvasAutoRatio style="display:block;aspect-ratio:auto 1;width:120px"></canvas></div>
+            <div class=w><input type=image id=button src="a.png"></div>
+            <div class=w><input type=image id=buttonSized src="a.png" style="width:120px;height:24px"></div>
+            """);
+        Dictionary<NodeId, (float Width, float Height)> intrinsic = [];
+        foreach (string id in new[] { "flexMaxH", "flexMinW", "autoRatio", "button", "buttonSized" })
+        {
+            intrinsic[Id(tree, id)] = (150f, 36f);
+        }
+
+        DomLayout laid = RenderDom.LayoutDomWithImages(tree, (1280f, 720f), intrinsic);
+        AssertSize(laid, tree, "flexMaxH", 120f, 20f);
+        AssertSize(laid, tree, "flexMinW", 200f, 24f);
+        AssertSize(laid, tree, "autoRatio", 120f, 29f); // 28.8, snapped
+        AssertSize(laid, tree, "canvasAutoRatio", 120f, 60f);
+        AssertSize(laid, tree, "button", 150f, 36f);
+        AssertSize(laid, tree, "buttonSized", 120f, 24f);
+    }
+
+    /// <summary>
     /// The same rule for a non-replaced box with an authored <c>aspect-ratio</c>: with both
     /// sizes definite the ratio is ignored (Chromium: 120x24, the port gave 120x60).
     /// </summary>
