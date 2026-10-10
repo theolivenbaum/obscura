@@ -21,9 +21,10 @@ namespace PocketCalculator.Js.Ops;
 /// </para>
 /// <para>
 /// The runtime creates its engines with <c>V8ScriptEngineFlags.UseSynchronizationContexts</c>
-/// and makes this context current while an async op is called (<see cref="AsyncOpBinding"/>),
-/// which is when ClearScript captures <c>TaskScheduler.FromCurrentSynchronizationContext()</c>
-/// for the promise. The resolution is then posted here, and the event loop runs it as a task of
+/// and converts each async op's task to its promise with this context current
+/// (<see cref="AsyncOpBinding"/>), which is when ClearScript captures
+/// <c>TaskScheduler.FromCurrentSynchronizationContext()</c> for it; the context is current for
+/// that call only. The resolution is then posted here, and the event loop runs it as a task of
 /// its own (<c>PocketCalculatorJsRuntime.PumpTick</c>), ahead of posted tasks and timers as
 /// deno_core resolves ops ahead of its macrotasks. Host code an op needs to run against page
 /// state after its <c>await</c> comes here too (<see cref="InvokeAsync{T}"/>).
@@ -42,9 +43,6 @@ public sealed class OpCompletionContext : SynchronizationContext, IDisposable
     private readonly Queue<Item> _items = new();
     private TaskCompletionSource? _signal;
     private bool _disposed;
-
-    [ThreadStatic]
-    private static Stack<SynchronizationContext?>? t_saved;
 
     /// <summary>Items posted and not yet run.</summary>
     public int Pending
@@ -169,22 +167,21 @@ public sealed class OpCompletionContext : SynchronizationContext, IDisposable
     }
 
     /// <summary>
-    /// Make this context current on the calling thread until the matching <see cref="Leave"/>.
-    /// Nests; the two must pair on one thread with no <c>await</c> between them.
+    /// Make this context current on the calling thread until the result is disposed, which
+    /// restores the one it replaced. Dispose on the same thread, with no <c>await</c> between.
     /// </summary>
-    public void Enter()
+    public Scope MakeCurrent()
     {
-        (t_saved ??= new Stack<SynchronizationContext?>()).Push(Current);
+        var previous = Current;
         SetSynchronizationContext(this);
+        return new Scope(previous);
     }
 
-    /// <summary>Restore the context <see cref="Enter"/> replaced.</summary>
-    public static void Leave()
+    /// <summary>A context made current by <see cref="MakeCurrent"/>.</summary>
+    public readonly struct Scope(SynchronizationContext? previous) : IDisposable
     {
-        if (t_saved is { Count: > 0 } saved)
-        {
-            SetSynchronizationContext(saved.Pop());
-        }
+        /// <summary>Restore the context that was current before.</summary>
+        public void Dispose() => SetSynchronizationContext(previous);
     }
 
     /// <summary>

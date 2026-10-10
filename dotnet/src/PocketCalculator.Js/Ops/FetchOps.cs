@@ -339,7 +339,8 @@ public static partial class FetchOps
         string mode,
         string credentials,
         bool internalLoad = false,
-        PocketCalculatorState? document = null)
+        PocketCalculatorState? document = null,
+        bool tailOnPageLoop = false)
     {
         bool frameDocument = internalLoad && string.Equals(mode, "navigate", StringComparison.Ordinal);
         if (frameDocument)
@@ -354,7 +355,7 @@ public static partial class FetchOps
             // (FetchReferrer.Parse); anything else means the defaults.
             return await FetchUrlAsync(
                     state, document ?? state, url, method, headersJson, body, mode, credentials, internalLoad,
-                    referrer: FetchReferrer.Parse(origin))
+                    referrer: FetchReferrer.Parse(origin), tailOnPageLoop: tailOnPageLoop)
                 .ConfigureAwait(false);
         }
         catch (OpException)
@@ -389,7 +390,8 @@ public static partial class FetchOps
         string credentials,
         bool internalLoad,
         bool hostConsumesBody = false,
-        FetchReferrer? referrer = null)
+        FetchReferrer? referrer = null,
+        bool tailOnPageLoop = false)
     {
         ArgumentNullException.ThrowIfNull(gs);
         ArgumentNullException.ThrowIfNull(document);
@@ -1090,9 +1092,11 @@ public static partial class FetchOps
                 // as the reference's op reaction does, rather than on whichever thread finished
                 // reading the body: 64 fetches finishing together corrupted the stored-body queue
                 // ("Operations that change non-concurrent collections must have exclusive access").
+                // Only when called as an op (tailOnPageLoop): a host caller awaiting this directly
+                // drives no loop, and the tail then runs where the body was read, as before.
                 // The transport is done with: the next queued request need not wait for the loop.
                 slot.Dispose();
-                return await gs.IsolateLock.RunOnPageAsync(() =>
+                Func<string> finish = () =>
                 {
                     gs.NetworkResponseBodyCounter++;
                     var requestId = "fetch-" + gs.NetworkResponseBodyCounter.ToString(CultureInfo.InvariantCulture);
@@ -1185,7 +1189,10 @@ public static partial class FetchOps
                         redirected,
                         opaque,
                         scriptHeaders);
-                }).ConfigureAwait(false);
+                };
+                return tailOnPageLoop
+                    ? await gs.IsolateLock.RunOnPageAsync(finish).ConfigureAwait(false)
+                    : finish();
             }
             finally
             {

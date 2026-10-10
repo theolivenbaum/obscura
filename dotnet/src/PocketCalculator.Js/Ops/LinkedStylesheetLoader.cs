@@ -106,7 +106,7 @@ internal static partial class LinkedStylesheetLoader
 
         var raw = await FetchOps.FetchUrlAsync(
                 transport, document, url, "GET", "{}", [], "no-cors", "same-origin",
-                internalLoad: true, hostConsumesBody: true, referrer: referrer)
+                internalLoad: true, hostConsumesBody: true, referrer: referrer, tailOnPageLoop: true)
             .ConfigureAwait(false);
         var load = TakeLoad(document, raw)
             ?? throw new InvalidOperationException("Stylesheet fetch failed: " + url);

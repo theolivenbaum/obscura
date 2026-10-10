@@ -102,20 +102,16 @@ public sealed class OpCompletionContextTests
     public void ATaskSchedulerFromTheContextQueuesWorkInsteadOfRunningItInline()
     {
         // ClearScript's own path: TaskScheduler.FromCurrentSynchronizationContext() captured
-        // while the op is called, and a continuation completed on a pool thread.
+        // while the op's task is converted, and a continuation completed on a pool thread.
         using var context = new OpCompletionContext();
-        context.Enter();
+        var original = SynchronizationContext.Current;
         TaskScheduler scheduler;
-        try
+        using (context.MakeCurrent())
         {
             scheduler = TaskScheduler.FromCurrentSynchronizationContext();
         }
-        finally
-        {
-            OpCompletionContext.Leave();
-        }
 
-        Assert.Null(SynchronizationContext.Current);
+        Assert.Same(original, SynchronizationContext.Current);
         var source = new TaskCompletionSource();
         var ran = 0;
         var continuation = source.Task.ContinueWith(
@@ -130,19 +126,46 @@ public sealed class OpCompletionContextTests
     }
 
     [Fact]
-    public void EnterAndLeaveNestAndSendIsRefused()
+    public void ScopesNestAndRestoreAndSendIsRefused()
     {
         using var outer = new OpCompletionContext();
         using var inner = new OpCompletionContext();
-        outer.Enter();
-        inner.Enter();
-        Assert.Same(inner, SynchronizationContext.Current);
-        OpCompletionContext.Leave();
-        Assert.Same(outer, SynchronizationContext.Current);
-        OpCompletionContext.Leave();
-        Assert.Null(SynchronizationContext.Current);
+        var original = SynchronizationContext.Current;
+        using (outer.MakeCurrent())
+        {
+            using (inner.MakeCurrent())
+            {
+                Assert.Same(inner, SynchronizationContext.Current);
+            }
 
+            Assert.Same(outer, SynchronizationContext.Current);
+        }
+
+        Assert.Same(original, SynchronizationContext.Current);
         Assert.Throws<NotSupportedException>(() => outer.Send(_ => { }, null));
+    }
+
+    [Fact]
+    public void AnOpCallLeavesNoContextBehindEvenWhenItsScriptIsTerminated()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        var rt = fixture.Runtime;
+        var original = SynchronizationContext.Current;
+        rt.ExecuteScript("op-call-context", "__obscura_test_ops.op_sleep(10).then(() => {});");
+        Assert.Same(original, SynchronizationContext.Current);
+
+        // A watchdog terminating script right after an op call: nothing in script runs to
+        // restore anything, so nothing in script may have set anything.
+        var interrupter = Task.Run(async () =>
+        {
+            await Task.Delay(200);
+            rt.Engine.Interrupt();
+        });
+        Assert.ThrowsAny<Exception>(() => rt.ExecuteScript(
+            "op-call-terminated",
+            "while (true) { __obscura_test_ops.op_sleep(10000); }"));
+        interrupter.Wait();
+        Assert.Same(original, SynchronizationContext.Current);
     }
 
     // ------------------------------------------------------------- in the runtime

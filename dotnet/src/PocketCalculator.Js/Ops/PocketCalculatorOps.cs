@@ -699,7 +699,7 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         Bind(ops, "op_fetch_url", (Func<object?, object?, object?, object?, object?, object?, object?, object?, Task<string>>)(
             (url, method, headers, body, origin, mode, credentials, internalLoad) => FetchOps.OpFetchUrlAsync(
                 RealmState(), S(url), S(method), S(headers), Bytes(body), S(origin), S(mode), S(credentials),
-                B(internalLoad), document)));
+                B(internalLoad), document, tailOnPageLoop: true)));
 
     private void Bind(ScriptObject ops, string name, object function)
     {
