@@ -2485,8 +2485,11 @@ its deadline. nvidia.com: a page task of forced layout reads runs past the 5.5 s
 while OneTrust's `otBannerSdk.js` arrives (fetched in 85 ms), and one goto in two to seven took
 the full 30 s cap; the loss showed up both as an op promise that never settled and as a settled
 one whose reactions were gone. Chromium never terminates a task. Now
-`PocketCalculatorJsRuntime.CancelTermination` marks the runtime, the next JavaScript task calls
-`__obscura_redriveDynamicScripts` in each realm, and bootstrap.js starts every unfinished dynamic
+`PocketCalculatorJsRuntime.CancelTermination` marks the runtime, the next JavaScript task posts a
+task that calls `__obscura_redriveDynamicScripts` in each realm (posted, so the restarted
+continuations, load handlers among them, run in a turn under the task watchdog; run directly they
+re-ran the terminated page work with no deadline, and weather.com hung), and `POCKETCALCULATOR_NO_SCRIPT_REDRIVE=1`
+turns it off. bootstrap.js starts every unfinished dynamic
 script task again under a new generation: a stale runner stops at its next await without
 firing events or releasing counters, the fetch result is read again from the settled op, or
 raced against a fresh request when the op is not known to have settled, the in-order queue is
@@ -2497,6 +2500,18 @@ stranded without the redrive). Page promise chains lost to the same termination 
 recovered, and an op whose delivery was cut short stays counted in the async-op tracker, so a
 settle waits out its budget after one; what makes the page task run 5 s at all is the forced
 layout cost (`clientWidth` ~55 ms a read on nvidia.com), which is the open layout work.
+
+### A frame realm's script runs under the task watchdog
+
+DEVIATION from `crates/obscura-js/src/frame.rs`, which runs a frame's scripts (its document
+scripts, load handlers, host scripts and evaluations) with no deadline of their own. The microtask
+checkpoint that ends one is the isolate's, so it also drains whatever the page realm has queued,
+and nothing was armed: a page task that the watchdog stops everywhere else ran unbounded there
+(weather.com: CDP stopped answering for good with the isolate held inside a frame's
+`RunDocumentScripts`, one run in three with the dynamic script redrive and a 20 s stall without
+it). `FrameRealm.Run` now arms the page runtime's watchdog for the task budget
+(`SynchronousTaskFloorMs` plus the scheduling margin); the isolate is shared, so it ends the frame's
+script as well.
 
 ### An idle verdict during an explicit settle is confirmed against the page
 

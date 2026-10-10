@@ -47,6 +47,10 @@ public sealed partial class PocketCalculatorJsRuntime
     // fixed-wait path while retaining an absolute backstop for infinite script.
     private const ulong SynchronousTaskFloorMs = 5_000;
     private const ulong WatchdogSchedulingMarginMs = 500;
+
+    /// <summary>The deadline of one frame-realm script run (see <c>FrameRealm.Run</c>).</summary>
+    internal static readonly TimeSpan FrameScriptBudget =
+        TimeSpan.FromMilliseconds(SynchronousTaskFloorMs + WatchdogSchedulingMarginMs);
     private const long HeapLimitRecoveryHeadroomBytes = 64 * 1024 * 1024;
 
     private readonly V8Runtime _v8;
@@ -627,6 +631,10 @@ public sealed partial class PocketCalculatorJsRuntime
 
     private int _redriveDynamicScripts;
 
+    /// <summary><c>POCKETCALCULATOR_NO_SCRIPT_REDRIVE=1</c> turns <see cref="RedriveDynamicScripts"/> off.</summary>
+    private static readonly bool RedriveDisabled =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_NO_SCRIPT_REDRIVE") == "1";
+
     /// <summary>
     /// Restart the dynamic script tasks a watchdog termination may have stranded.
     /// </summary>
@@ -642,21 +650,32 @@ public sealed partial class PocketCalculatorJsRuntime
     /// </remarks>
     private void RedriveDynamicScripts()
     {
-        if (Interlocked.Exchange(ref _redriveDynamicScripts, 0) == 0 || _disposed)
+        if (Interlocked.Exchange(ref _redriveDynamicScripts, 0) == 0 || _disposed || RedriveDisabled)
         {
             return;
         }
 
-        const string Redrive = "__obscura_host.vars.__obscura_redriveDynamicScripts?.();";
-        try
+        // Posted, not run here: the restart's continuations (a script's load handlers
+        // among them) run in the checkpoint that follows it, which must be a turn under
+        // the task watchdog. Run from here, a page whose handler is the long task that
+        // was terminated ran it again with no deadline at all (weather.com hung).
+        lock (_postedTasks)
         {
-            InvokeHostScript("<redrive-dynamic-scripts>", HostScript.WrapStatements(Redrive));
+            _postedTasks.Enqueue(_ => RunRedrive());
         }
-        catch (JsRuntimeException)
+    }
+
+    private void RunRedrive()
+    {
+        const string Redrive = "__obscura_host.vars.__obscura_redriveDynamicScripts?.();";
+        if (_disposed)
         {
-            // Nothing to restart, or the realm is going away.
+            return;
         }
 
+        // ClearScript's own exceptions reach PumpTick, which handles an interrupt here
+        // as it does for any posted task.
+        HostScript.Invoke(_engine, _shim.HostHelpers, "<redrive-dynamic-scripts>", HostScript.WrapStatements(Redrive));
         foreach (var realm in _realms.ToArray())
         {
             try

@@ -568,6 +568,13 @@ public sealed class FrameRealm : IDisposable
     {
         var previous = _parent.RealmStates.Current;
         _parent.RealmStates.Current = State;
+        // DEVIATION from crates/obscura-js/src/frame.rs, which runs a frame's scripts with no
+        // deadline of their own. The microtask checkpoint that ends a frame script is the
+        // isolate's, so it also runs whatever the page realm has queued; with nothing armed a
+        // page task that a watchdog would have stopped ran with no bound (weather.com: CDP
+        // stopped answering for good inside a frame's document scripts). The same task budget
+        // as a page task; the isolate is shared, so the page runtime's watchdog ends it.
+        var watchdog = _parent.ArmWatchdog(PocketCalculatorJsRuntime.FrameScriptBudget);
         try
         {
             var value = evaluate();
@@ -588,6 +595,7 @@ public sealed class FrameRealm : IDisposable
         }
         finally
         {
+            _parent.DisarmWatchdog(watchdog);
             _parent.RealmStates.Current = previous;
         }
     }
