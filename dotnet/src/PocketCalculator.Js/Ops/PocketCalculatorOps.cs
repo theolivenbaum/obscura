@@ -359,6 +359,8 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             nid => RenderOps.OpLayoutGeometry(Page, S(nid))));
         Bind(ops, "op_layout_offset", (Func<object?, string>)(
             nid => RenderOps.OpLayoutOffset(Page, S(nid))));
+        Bind(ops, "op_layout_offset_parent", (Func<object?, string>)(
+            nid => RenderOps.OpLayoutOffsetParent(Page, S(nid))));
         Bind(ops, "op_hit_test", (Func<object?, object?, object?, object?, string>)(
             (x, y, scope, all) => RenderOps.OpHitTest(Page, D(x), D(y), D(scope), B(all))));
         Bind(ops, "op_range_rects", (Func<object?, object?, object?, object?, string>)(
@@ -375,6 +377,10 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         // is given a pseudo-element.
         Bind(ops, "op_computed_style_pseudo", (Func<object?, object?, string>)(
             (nid, pseudo) => RenderOps.OpComputedStylePseudo(Page, S(nid), S(pseudo))));
+        // Additive: the layout-independent part of the snapshot, answered before pending
+        // mutations are restyled when they cannot change it (RenderOps.OpComputedStyleStatic).
+        Bind(ops, "op_computed_style_static", (Func<object?, string>)(
+            nid => RenderOps.OpComputedStyleStatic(Page, S(nid))));
         // Additive as well: innerText for a whole subtree in one call (RenderOps.OpInnerText).
         Bind(ops, "op_inner_text", (Func<object?, string>)(
             nid => RenderOps.OpInnerText(Page, S(nid))));
@@ -529,6 +535,8 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             nid => RenderOps.OpLayoutGeometry(document, S(nid))));
         Bind(ops, "op_layout_offset", (Func<object?, string>)(
             nid => RenderOps.OpLayoutOffset(document, S(nid))));
+        Bind(ops, "op_layout_offset_parent", (Func<object?, string>)(
+            nid => RenderOps.OpLayoutOffsetParent(document, S(nid))));
         Bind(ops, "op_hit_test", (Func<object?, object?, object?, object?, string>)(
             (x, y, scope, all) => RenderOps.OpHitTest(document, D(x), D(y), D(scope), B(all))));
         Bind(ops, "op_range_rects", (Func<object?, object?, object?, object?, string>)(
@@ -541,6 +549,8 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             nid => RenderOps.OpComputedStyle(document, S(nid))));
         Bind(ops, "op_computed_style_pseudo", (Func<object?, object?, string>)(
             (nid, pseudo) => RenderOps.OpComputedStylePseudo(document, S(nid), S(pseudo))));
+        Bind(ops, "op_computed_style_static", (Func<object?, string>)(
+            nid => RenderOps.OpComputedStyleStatic(document, S(nid))));
         Bind(ops, "op_inner_text", (Func<object?, string>)(
             nid => RenderOps.OpInnerText(document, S(nid))));
         Bind(ops, "op_layout_metrics", (Func<string>)(() => RenderOps.OpLayoutMetrics(document)));

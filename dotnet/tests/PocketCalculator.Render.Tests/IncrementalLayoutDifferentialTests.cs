@@ -166,11 +166,69 @@ public class IncrementalLayoutDifferentialTests
         <div id=a5><div id=af class=flt>float</div><span id=k9 class=ib style="width:150px">beside</span> <span id=k10 style="display:inline-flex;gap:3px"><b id=k11>x</b><i id=k12>y</i></span> text after the float wraps</div>
         </body></html>
         """,
+
+        // Shadow trees: one stylesheet shared by two hosts, :host and ::slotted rules, named
+        // and default slots, ::part from the document, custom properties inherited from the
+        // light tree, a nested host.
+        """
+        <!doctype html><html><head><style>{CSS}
+        x-card::part(title){font-weight:bold}
+        x-card.big::part(title){font-size:20px}
+        .dark{--fg:#336;--pad:9px}
+        </style></head><body>
+        <div id=wrap class=b>
+        <x-card id=k1 class=a><template shadowrootmode=open><style>
+        :host{display:block;border:1px solid;padding:var(--pad,2px);margin:2px 0}
+        :host(.wide){width:70%}
+        :host(.c) .title{letter-spacing:2px}
+        :host(.hide) .body{display:none}
+        .title{color:var(--fg,#000)}
+        .title.big{font-size:19px}
+        ::slotted(.hl){margin-left:6px}
+        ::slotted(p){font-size:15px}
+        .body > span{padding:0 3px}
+        .body .flex{display:flex;gap:3px}
+        slot[name=head]{display:block;font-style:italic}
+        </style><div class=title part=title id=t1>Card title <span>one</span></div><div class=body id=y1><span>shadow text</span> <slot name=head></slot><slot></slot><div class=flex><i>f1</i><i>f2</i></div></div></template><span slot=head id=s1>head span</span><p id=kp1>light paragraph in card</p><b id=kb1 class=hl>bold</b></x-card>
+        <x-card id=k2><template shadowrootmode=open><style>
+        :host{display:block;border:1px solid;padding:var(--pad,2px);margin:2px 0}
+        :host(.wide){width:70%}
+        :host(.c) .title{letter-spacing:2px}
+        :host(.hide) .body{display:none}
+        .title{color:var(--fg,#000)}
+        .title.big{font-size:19px}
+        ::slotted(.hl){margin-left:6px}
+        ::slotted(p){font-size:15px}
+        .body > span{padding:0 3px}
+        .body .flex{display:flex;gap:3px}
+        slot[name=head]{display:block;font-style:italic}
+        </style><div class=title part=title id=t2>Second <x-inner id=in1><template shadowrootmode=open><style>:host{display:inline-block;padding:2px}b{color:var(--fg,red)}</style><b>inner</b> <slot></slot></template><em id=ie>slotted inner</em></x-inner></div><div class=body id=y2><slot></slot></div></template><p id=kp2>second card text that wraps a little</p></x-card>
+        <p id=after>After the cards.</p>
+        </div>
+        </body></html>
+        """,
+
+        // Container queries: styles that depend on a container's size, beside ones that do not.
+        """
+        <!doctype html><html><head><style>{CSS}
+        .cq{container-type:inline-size}
+        @container (min-width:250px){.cqi{color:#a00;padding-left:6px}.cqi b{font-size:19px}}
+        @container (max-width:249px){.cqi{display:flex;gap:2px}}
+        </style></head><body>
+        <div id=cq1 class=cq><p id=q1 class=cqi>Inside <b id=qb>bold</b> container text</p><p id=q2>plain <i>words</i></p></div>
+        <div id=cq2 class="cq b" style="width:200px"><p id=q3 class=cqi>narrow <b>x</b></p><div id=q4 class=a>box</div></div>
+        <p id=q5>outside the containers</p>
+        </body></html>
+        """,
     ];
 
     private static readonly string[] Classes =
         ["a", "b", "c", "hide", "wide", "pad", "flt", "fltr", "abs", "rel", "flex", "grid", "big", "inl", "clr", "ovf", "pre", "nw", "grow", "cnt", "aft",
          "sib", "hl", "sec", "bfr"];
+
+    // The shadow fixture also toggles the classes its shadow and ::part rules key on. The other
+    // fixtures keep the pool above, so their random sequences are unchanged.
+    private static readonly string[] ShadowClasses = [.. Classes, "dark", "title", "body"];
 
     private static readonly string[] Declarations =
     [
@@ -450,6 +508,88 @@ public class IncrementalLayoutDifferentialTests
     /// every forced read, and each removal re-cascaded the document).
     /// </summary>
     [Fact]
+    public void AnInsertionReachesOnlyTheStructuralAndHasRulesWhoseKeysItCanMeet()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss
+            + " .hide-empty:not(:has(> *)){display:none} .list > :last-child{margin:0}"
+            + " .list :not(:first-child){color:red}</style></head><body><div id=wrap>"
+            + "<div id=he class=hide-empty></div><ul id=list class=list><li id=li1>a</li></ul><div id=big>");
+        for (int i = 0; i < 30; i++)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"<p id=p{i}>paragraph {i}</p>");
+        }
+
+        html.Append("</div></div></body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender previous = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+        Css.Stylesheet sheet = previous.Layout.DocumentSheet!;
+        NodeId wrap = tree.GetElementById("wrap")!.Value;
+        NodeId body = tree.GetNode(wrap)!.Parent!.Value;
+
+        HashSet<NodeId> Insert(string parentId, string tag, out NodeId node)
+        {
+            NodeId parent = tree.GetElementById(parentId)!.Value;
+            node = tree.NewNode(NodeData.Element(QualName.Html(tag)));
+            tree.AppendChild(parent, node);
+            List<RetainedStyleMutation> mutations = [RetainedStyleMutation.From(new TreeStyleMutation.Insert(node, null, parent))];
+            HashSet<NodeId> damage = RetainedStylePlanner.OwnStyleDamage(tree, sheet, mutations)!;
+            previous = RenderPaint.PrepareDomWithRetainedStyles(tree, Viewport, null, resources, [], cache, previous, mutations)!;
+            Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, previous));
+            return damage;
+        }
+
+        // A paragraph appended to an unkeyed container meets neither rule: the :has() anchor
+        // must be `.hide-empty` and the last child's parent `.list`.
+        HashSet<NodeId> paragraph = Insert("big", "p", out NodeId added);
+        Assert.Equal([added], paragraph);
+
+        // An item appended to the list makes the old last item lose `:last-child`.
+        HashSet<NodeId> item = Insert("list", "li", out NodeId li2);
+        Assert.Contains(tree.GetElementById("li1")!.Value, item);
+        Assert.Contains(li2, item);
+        Assert.DoesNotContain(body, item);
+        Assert.DoesNotContain(wrap, item);
+
+        // A child of the empty container changes its :has() state.
+        HashSet<NodeId> child = Insert("he", "span", out _);
+        Assert.Contains(tree.GetElementById("he")!.Value, child);
+        Assert.DoesNotContain(wrap, child);
+    }
+
+    [Fact]
+    public void PlanningAppendsToALongListDoesNotRevisitTheList()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss
+            + " li:last-child{margin:0} li:nth-child(odd){color:red}</style></head><body><ul id=list>");
+        for (int i = 0; i < 3000; i++)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"<li>item {i}</li>");
+        }
+
+        html.Append("</ul></body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        PreparedRender previous = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, new RenderResourceCache(), [], new StylesheetCache())!;
+        NodeId list = tree.GetElementById("list")!.Value;
+        List<RetainedStyleMutation> mutations = [];
+        for (int i = 0; i < 400; i++)
+        {
+            NodeId node = tree.NewNode(NodeData.Element(QualName.Html("li")));
+            tree.AppendChild(list, node);
+            mutations.Add(RetainedStyleMutation.From(new TreeStyleMutation.Insert(node, null, list)));
+        }
+
+        // Every insertion's candidates are the list's children, which the plan lists once; with
+        // two insertions or more every child is a boundary candidate, once.
+        System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
+        HashSet<NodeId> damage = RetainedStylePlanner.OwnStyleDamage(tree, previous.Layout.DocumentSheet!, mutations)!;
+        watch.Stop();
+        Assert.True(damage.Count >= 400);
+        Assert.True(watch.ElapsedMilliseconds < 2000, $"planned in {watch.ElapsedMilliseconds}ms");
+    }
+
+    [Fact]
     public void ARemovalReachesOnlyTheHasRulesItsSubtreeCanMatch()
     {
         StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss
@@ -621,6 +761,166 @@ public class IncrementalLayoutDifferentialTests
         Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, third));
     }
 
+    /// <summary>
+    /// A lazy loader inserts an image into a component and reads the component's offsetParent:
+    /// the previous render answers it without a layout, for a component in a hidden slide (no
+    /// box) and in a visible one (its positioned ancestor), and not for the inserted image.
+    /// </summary>
+    [Fact]
+    public void AComputedStyleReadIsAnsweredWithoutARestyleWhenNothingOnItsChainChanges()
+    {
+        string html = "<!doctype html><html><head><style>" + SharedCss
+            + " .cq{container-type:inline-size} @container (min-width:100px){.inq{color:red}}"
+            + " .slot{position:relative;display:flex;padding:5%}</style></head><body>"
+            + "<div id=ad class=slot><span id=adi>ad</span></div><ul id=list><li>one</li><li>two</li></ul>"
+            + "<div id=box class=cq><p id=inq class=inq>in</p><p id=plain>plain</p></div></body></html>";
+        DomTree tree = HtmlParsing.ParseHtml(html);
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender previous = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+        NodeId ad = tree.GetElementById("ad")!.Value;
+        NodeId list = tree.GetElementById("list")!.Value;
+
+        // Items appended to a list elsewhere cannot restyle the slot: its layout-independent
+        // style is answered from the render the appends have not reached, and agrees with the
+        // render that does reach them.
+        List<RetainedStyleMutation> mutations = [];
+        for (int i = 0; i < 40; i++)
+        {
+            NodeId item = tree.NewNode(NodeData.Element(QualName.Html("li")));
+            tree.AppendChild(list, item);
+            mutations.Add(RetainedStyleMutation.From(new TreeStyleMutation.Insert(item, null, list)));
+            Dictionary<string, string>? answered = previous.TryRetainedComputedStyle(
+                tree, mutations, ad, false, null, (ulong)i, out string[] omitted);
+            Assert.NotNull(answered);
+            Assert.Equal("flex", answered["display"]);
+            Assert.Equal("relative", answered["position"]);
+            Assert.False(answered.ContainsKey("padding-left"));
+            Assert.Contains("padding-left", omitted);
+            Assert.Contains("width", omitted);
+        }
+
+        // An element inside a query container whose rules a container query selects, and any
+        // element whose chain a pending mutation restyles, is left to the full snapshot.
+        Assert.Null(previous.TryRetainedComputedStyle(tree, mutations, tree.GetElementById("inq")!.Value, false, null, 100, out _));
+        Assert.NotNull(previous.TryRetainedComputedStyle(tree, mutations, tree.GetElementById("plain")!.Value, false, null, 100, out _));
+        tree.GetNode(ad)!.SetAttribute("class", "slot c");
+        mutations.Add(RetainedStyleMutation.From(new AttributeStyleMutation(ad, "class", "slot", "slot c")));
+        Assert.Null(previous.TryRetainedComputedStyle(tree, mutations, tree.GetElementById("adi")!.Value, false, null, 101, out _));
+
+        // A running animation on the chain keeps a later timeline sample from being answered.
+        previous = RenderPaint.PrepareDomWithRetainedStyles(tree, Viewport, null, resources, [], cache, previous, mutations)!;
+        Assert.Equal("18px", previous.ComputedStyle(tree.GetElementById("adi")!.Value)!["font-size"]);
+        Assert.NotNull(previous.TryRetainedComputedStyle(tree, [], ad, true, null, 102, out _));
+        Assert.Null(previous.TryRetainedComputedStyle(tree, [], ad, true, node => node == ad, 102, out _));
+    }
+
+    [Fact]
+    public void AnOffsetParentReadIsAnsweredWithoutALayoutWhenNothingOnItsChainChanges()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss
+            + " .slide{display:none} .slide.on{display:block}</style></head><body><div id=car class=rel>");
+        for (int s = 0; s < 3; s++)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"<div class='slide{(s == 0 ? " on" : "")}'>");
+            for (int i = 0; i < 3; i++)
+            {
+                html.Append(CultureInfo.InvariantCulture, $"<div id=c{s}{i} class=a><a id=l{s}{i}><noscript>x</noscript>card {s}.{i}</a></div>");
+            }
+
+            html.Append("</div>");
+        }
+
+        html.Append("</div></body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender previous = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+        NodeId carousel = tree.GetElementById("car")!.Value;
+        foreach (string card in new[] { "00", "21" })
+        {
+            NodeId component = tree.GetElementById("c" + card)!.Value;
+            NodeId link = tree.GetElementById("l" + card)!.Value;
+            NodeId image = tree.NewNode(NodeData.Element(QualName.Html("img")));
+            tree.GetNode(image)!.SetAttribute("src", Images[0]);
+            List<RetainedStyleMutation> mutations =
+            [
+                RetainedStyleMutation.From(new AttributeStyleMutation(component, "data-cmp-is", null, "image")),
+                RetainedStyleMutation.From(new TreeStyleMutation.Insert(image, null, link)),
+            ];
+            tree.GetNode(component)!.SetAttribute("data-cmp-is", "image");
+            tree.AppendChild(link, image);
+
+            bool visible = card == "00";
+            Assert.True(previous.TryRetainedOffsetParent(tree, mutations, component, out bool hasBox, out NodeId? parent));
+            Assert.Equal(visible, hasBox);
+            Assert.Equal(visible ? carousel : null, parent);
+
+            // The image is new: in the hidden slide it has no box all the same, in the visible
+            // one only a layout can say.
+            Assert.Equal(!visible, previous.TryRetainedOffsetParent(tree, mutations, image, out bool imageBox, out _));
+            Assert.False(imageBox);
+
+            previous = RenderPaint.PrepareDomWithRetainedStyles(tree, Viewport, null, resources, [], cache, previous, mutations)!;
+            Assert.Equal(visible ? carousel : null, previous.OffsetMetrics(tree, component)?.Parent);
+            Assert.Equal(visible, previous.OffsetMetrics(tree, component) is not null);
+        }
+    }
+
+    private static string DescribeChain(DomTree tree, PreparedRender before, PreparedRender after, NodeId node)
+    {
+        StringBuilder text = new();
+        for (NodeId? current = node; current is { } id; current = tree.GetNode(id)?.Parent)
+        {
+            string tag = tree.GetNode(id)?.AsElement()?.Name.Local ?? "#";
+            string old = before.Layout.Styles.TryGetValue(id, out LayoutStyle? a) ? a.Display.ToString() : "-";
+            string now = after.Layout.Styles.TryGetValue(id, out LayoutStyle? b) ? b.Display.ToString() : "-";
+            text.Append(CultureInfo.InvariantCulture, $"#{id}<{tag}> {old}->{now} ");
+        }
+
+        return text.ToString();
+    }
+
+    /// <summary>
+    /// A document whose shadow roots carry stylesheets keeps its retained styles and layout
+    /// across a mutation (it used to restyle and lay out the whole document), and restyles a
+    /// host's shadow tree when the host changes.
+    /// </summary>
+    [Fact]
+    public void AShadowRootPageRestylesOnlyWhatAMutationReaches()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss + "</style></head><body>");
+        for (int i = 0; i < 40; i++)
+        {
+            html.Append(CultureInfo.InvariantCulture,
+                $"<x-item id=h{i}><template shadowrootmode=open><style>:host{{display:block;padding:2px}} :host(.c) b{{font-size:20px}} ::slotted(p){{margin:3px}}</style><b>item {i}</b><slot></slot></template><p id=p{i}>text {i}</p></x-item>");
+        }
+
+        html.Append("</body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender previous = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+        string[] targets = ["p7", "h8", "p30", "h8"];
+        for (int step = 0; step < targets.Length; step++)
+        {
+            NodeId target = tree.GetElementById(targets[step])!.Value;
+            string? old = tree.GetNode(target)!.GetAttribute("class");
+            string value = old == "c" ? "a" : "c";
+            tree.GetNode(target)!.SetAttribute("class", value);
+            previous = RenderPaint.PrepareDomWithRetainedStyles(
+                tree, Viewport, null, resources, [], cache, previous,
+                [RetainedStyleMutation.From(new AttributeStyleMutation(target, "class", old, value))])!;
+            if (step > 0)
+            {
+                Assert.True(previous.Layout.TopDownVisits < 40, $"step {step} visited {previous.Layout.TopDownVisits}");
+                Assert.True(previous.Layout.TransplantedBoxes > 50, $"step {step} carried {previous.Layout.TransplantedBoxes}");
+            }
+
+            Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, previous));
+        }
+    }
+
     private static PreparedRender Reference(DomTree tree)
     {
         using IDisposable full = RetainedTaffyLayout.ForceFullRelayout();
@@ -662,6 +962,30 @@ public class IncrementalLayoutDifferentialTests
                 if (applied is not null)
                 {
                     log.Append(CultureInfo.InvariantCulture, $"step {step}: {applied}\n");
+                }
+            }
+
+            // What the previous render answers about box existence and offsetParent while these
+            // mutations are pending (PreparedRender.TryRetainedOffsetParent); checked against
+            // the reference below.
+            List<(NodeId Node, bool HasBox, NodeId? Parent)> retainedAnswers = [];
+            // And the layout-independent computed style it answers for the elements the pending
+            // mutations cannot restyle (PreparedRender.TryRetainedComputedStyle).
+            List<(NodeId Node, Dictionary<string, string> Style, Dictionary<string, string>? Custom, string[] Omitted)> retainedStyles = [];
+            PreparedRender? retainedFrom = previous;
+            if (previous is not null && !needsFull)
+            {
+                foreach (NodeId element in Elements(tree))
+                {
+                    if (previous.TryRetainedOffsetParent(tree, mutations, element, out bool hasBox, out NodeId? parent))
+                    {
+                        retainedAnswers.Add((element, hasBox, parent));
+                    }
+
+                    if (previous.TryRetainedComputedStyle(tree, mutations, element, false, null, null, out string[] omitted) is { } style)
+                    {
+                        retainedStyles.Add((element, style, previous.ComputedCustomProperties(element), omitted));
+                    }
                 }
             }
 
@@ -717,14 +1041,43 @@ public class IncrementalLayoutDifferentialTests
             Assert.NotNull(next);
             string incremental = Snapshot(tree, next);
             string reference;
+            PreparedRender referenceRender;
             try
             {
-                reference = Snapshot(tree, Reference(tree));
+                referenceRender = Reference(tree);
+                reference = Snapshot(tree, referenceRender);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 throw new InvalidOperationException($"fixture {fixture} seed {seed} step {step}: the reference failed\nmutations:\n{log}", exception);
             }
+
+            foreach ((NodeId node, bool hasBox, NodeId? parent) in retainedAnswers)
+            {
+                OffsetMetrics? truth = referenceRender.OffsetMetrics(tree, node);
+                if (truth is null != !hasBox || (hasBox && truth!.Value.Parent != parent))
+                {
+                    Assert.Fail($"fixture {fixture} seed {seed} step {step}: #{node} answered from the retained render as "
+                        + $"box={hasBox} parent={parent?.ToString() ?? "null"}, a full layout has box={truth is not null} "
+                        + $"parent={truth?.Parent?.ToString() ?? "null"}\nchain: {DescribeChain(tree, retainedFrom!, referenceRender, node)}\nmutations:\n{log}");
+                }
+            }
+
+            foreach ((NodeId node, Dictionary<string, string> style, Dictionary<string, string>? custom, string[] omitted) in retainedStyles)
+            {
+                string? difference = ComputedStyleDifference(
+                    referenceRender.ComputedStyle(node),
+                    referenceRender.ComputedCustomProperties(node),
+                    style,
+                    custom,
+                    omitted);
+                if (difference is not null)
+                {
+                    Assert.Fail($"fixture {fixture} seed {seed} step {step}: #{node} {DescribeNode(tree, node)} computed style answered from "
+                        + $"the retained render differs from a full layout: {difference}\nmutations:\n{log}");
+                }
+            }
+
             if (!string.Equals(incremental, reference, StringComparison.Ordinal))
             {
                 if (Environment.GetEnvironmentVariable("POCKETCALCULATOR_DIFFERENTIAL_DUMP") is { } dumpRoot)
@@ -756,6 +1109,66 @@ public class IncrementalLayoutDifferentialTests
             previous = next;
         }
     }
+
+    /// <summary>
+    /// Where a layout-independent snapshot answered before a restyle disagrees with the full
+    /// snapshot after it, or null: every property it answers must have the full value, and the
+    /// properties it leaves out must be exactly the rest.
+    /// </summary>
+    private static string? ComputedStyleDifference(
+        Dictionary<string, string>? full,
+        Dictionary<string, string>? fullCustom,
+        Dictionary<string, string> retained,
+        Dictionary<string, string>? retainedCustom,
+        string[] omitted)
+    {
+        if (full is null)
+        {
+            return "a full layout gives it no style";
+        }
+
+        foreach ((string name, string value) in retained)
+        {
+            if (!full.TryGetValue(name, out string? expected))
+            {
+                return $"{name} is not in the full snapshot";
+            }
+
+            if (!string.Equals(value, expected, StringComparison.Ordinal))
+            {
+                return $"{name}: retained {value}, full {expected}";
+            }
+        }
+
+        foreach (string name in full.Keys)
+        {
+            if (!retained.ContainsKey(name) && Array.IndexOf(omitted, name) < 0)
+            {
+                return $"{name} is neither answered nor omitted";
+            }
+        }
+
+        foreach (string name in omitted)
+        {
+            if (retained.ContainsKey(name) || !full.ContainsKey(name))
+            {
+                return $"omitted {name} is answered or not in the full snapshot";
+            }
+        }
+
+        string Custom(Dictionary<string, string>? properties) =>
+            properties is null
+                ? ""
+                : string.Join(";", properties.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => pair.Key + "=" + pair.Value));
+        return Custom(fullCustom) == Custom(retainedCustom)
+            ? null
+            : $"custom properties: retained {Custom(retainedCustom)}, full {Custom(fullCustom)}";
+    }
+
+    private static string DescribeNode(DomTree tree, NodeId node) =>
+        tree.GetNode(node)?.AsElement() is { } element
+            ? element.Name.Local + (tree.GetNode(node)?.GetAttribute("id") is { } id ? "#" + id : "")
+            : "?";
 
     private static string FirstDifference(string expected, string actual)
     {
@@ -796,13 +1209,47 @@ public class IncrementalLayoutDifferentialTests
             return result;
         }
 
-        foreach (NodeId id in tree.Descendants(root))
+        foreach (NodeId id in ShadowIncludingDescendants(tree, root))
         {
             if (tree.GetNode(id)?.AsElement() is { } element
-                && element.Name.Local is not ("script" or "style" or "option"))
+                && element.Name.Local is not ("script" or "style" or "option" or "template"))
             {
                 result.Add(id);
             }
+        }
+
+        return result;
+    }
+
+    /// <summary>Descendants in tree order, each shadow host's shadow tree before its children.</summary>
+    private static List<NodeId> ShadowIncludingDescendants(DomTree tree, NodeId root)
+    {
+        List<NodeId> result = [];
+        Stack<NodeId> pending = new();
+        void PushChildren(NodeId node)
+        {
+            List<NodeId> children = tree.Children(node);
+            for (int i = children.Count - 1; i >= 0; i--)
+            {
+                pending.Push(children[i]);
+            }
+
+            if (tree.ShadowRootOf(node) is { } shadow)
+            {
+                List<NodeId> shadowChildren = tree.Children(shadow);
+                for (int i = shadowChildren.Count - 1; i >= 0; i--)
+                {
+                    pending.Push(shadowChildren[i]);
+                }
+            }
+        }
+
+        PushChildren(root);
+        while (pending.Count != 0)
+        {
+            NodeId node = pending.Pop();
+            result.Add(node);
+            PushChildren(node);
         }
 
         return result;
@@ -816,7 +1263,7 @@ public class IncrementalLayoutDifferentialTests
             return result;
         }
 
-        foreach (NodeId id in tree.Descendants(root))
+        foreach (NodeId id in ShadowIncludingDescendants(tree, root))
         {
             if (tree.GetNode(id)?.Data is TextData
                 && tree.GetNode(id)?.Parent is { } parent
@@ -872,7 +1319,8 @@ public class IncrementalLayoutDifferentialTests
             case 0:
             case 1:
             {
-                string cls = Classes[rng.Next(Classes.Length)];
+                string[] pool = tree.HasShadowRoots ? ShadowClasses : Classes;
+                string cls = pool[rng.Next(pool.Length)];
                 string current = tree.GetNode(target)!.GetAttribute("class") ?? "";
                 List<string> list = [.. current.Split(' ', StringSplitOptions.RemoveEmptyEntries)];
                 if (!list.Remove(cls))
@@ -947,7 +1395,7 @@ public class IncrementalLayoutDifferentialTests
                     tree.InsertBefore(children[rng.Next(children.Count)], created);
                 }
 
-                return $"insert <{tag}> #{created} into #{parent}";
+                return $"insert <{tag}> #{created} into #{parent}<{tree.GetNode(parent)?.AsElement()?.Name.Local}>{(tree.ContainingShadowRoot(parent) is null ? "" : " (shadow)")}";
             }
 
             case 6:
@@ -977,6 +1425,7 @@ public class IncrementalLayoutDifferentialTests
                 NodeId destination = elements[rng.Next(elements.Count)];
                 if (destination == target
                     || tree.Ancestors(destination).Contains(target)
+                    || tree.ContainingShadowRoot(destination) != tree.ContainingShadowRoot(target)
                     || tree.GetNode(destination)?.AsElement()?.Name.Local is "img" or "input" or "textarea" or "select" or "br"
                     || tree.GetNode(target)?.Parent is not { } oldParent)
                 {
@@ -1001,19 +1450,24 @@ public class IncrementalLayoutDifferentialTests
 
             default:
             {
-                string name = rng.Next(6) switch
+                string name = rng.Next(tree.HasShadowRoots ? 9 : 6) switch
                 {
                     0 => "hidden",
                     1 => "data-x",
                     2 => "title",
                     3 => "dir",
                     4 => "colspan",
-                    _ => "size",
+                    5 => "size",
+                    6 => "slot",
+                    7 => "part",
+                    _ => "name",
                 };
                 string? value = rng.Next(3) == 0 ? null : name switch
                 {
                     "dir" => rng.Next(2) == 0 ? "rtl" : "ltr",
                     "colspan" or "size" => (1 + rng.Next(3)).ToString(CultureInfo.InvariantCulture),
+                    "slot" or "name" => rng.Next(2) == 0 ? "head" : "other",
+                    "part" => "title",
                     _ => "v" + rng.Next(3).ToString(CultureInfo.InvariantCulture),
                 };
                 return SetAttribute(tree, target, name, value, mutations, ref needsFull);
@@ -1036,7 +1490,7 @@ public class IncrementalLayoutDifferentialTests
         DomLayout layout = prepared.Layout;
         StringBuilder text = new();
         text.Append(CultureInfo.InvariantCulture, $"content {F(prepared.ContentSize().Width)} {F(prepared.ContentSize().Height)}\n");
-        foreach (NodeId id in tree.Descendants(tree.Document))
+        foreach (NodeId id in ShadowIncludingDescendants(tree, tree.Document))
         {
             text.Append(CultureInfo.InvariantCulture, $"#{id}");
             if (layout.Rects.TryGetValue(id, out Rect rect))

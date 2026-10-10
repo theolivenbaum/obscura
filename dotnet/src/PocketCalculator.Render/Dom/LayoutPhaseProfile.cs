@@ -28,6 +28,10 @@ internal static class LayoutPhaseProfile
     [ThreadStatic]
     private static (int Gen0, int Gen1, int Gen2, TimeSpan Pause, long Allocated) t_gc;
 
+    // Process CPU time when the prepare began: on a loaded host, wall time measures the load.
+    [ThreadStatic]
+    private static TimeSpan t_cpu;
+
     internal static void Begin()
     {
         if (!Enabled)
@@ -39,6 +43,7 @@ internal static class LayoutPhaseProfile
         t_notes = [];
         t_gc = (GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2), GC.GetTotalPauseDuration(),
             GC.GetTotalAllocatedBytes());
+        t_cpu = Process.GetCurrentProcess().TotalProcessorTime;
         t_last = Stopwatch.GetTimestamp();
     }
 
@@ -75,6 +80,7 @@ internal static class LayoutPhaseProfile
         Note("gc1", GC.CollectionCount(1) - t_gc.Gen1);
         Note("gc2", GC.CollectionCount(2) - t_gc.Gen2);
         Note("gcPauseMs", (long)(GC.GetTotalPauseDuration() - t_gc.Pause).TotalMilliseconds);
+        Note("cpuMs", (long)(Process.GetCurrentProcess().TotalProcessorTime - t_cpu).TotalMilliseconds);
         Note("allocKB", (GC.GetTotalAllocatedBytes() - t_gc.Allocated) / 1024);
 
         // What the process allocated between the end of the previous prepare and the start of

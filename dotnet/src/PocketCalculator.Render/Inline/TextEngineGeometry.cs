@@ -98,7 +98,7 @@ public sealed partial class TextEngine
         // text indent (ShapeWithTextIndent).
         item.SourceBuffer ??= (item.PristineBuffer ?? item.Buffer).Clone();
         item.MarkerIndent = advance;
-        item.ShapedFor = null;
+        item.ForgetLayout();
     }
 
     /// <summary>The baseline of item <paramref name="index"/>'s first line, in document coordinates.</summary>

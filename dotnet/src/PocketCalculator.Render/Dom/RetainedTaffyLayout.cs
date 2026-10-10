@@ -155,6 +155,44 @@ internal sealed class RetainedTaffyLayout
             seeds.AddRange(freshStyles);
         }
 
+        // A light child changes slots, or a slot changes which children it takes, without
+        // either slot being above the change in the tree as it is now: the slot it left keeps
+        // its old box (an inline context holding the moved text) unless every slot the
+        // assignment can involve is seeded. Found by the differential suite (shadow fixture,
+        // seed 57: a `slot` attribute removed).
+        HashSet<NodeId>? slotRoots = null;
+        void SeedSlotsOf(NodeId? shadowRoot)
+        {
+            if (shadowRoot is not { } root || !(slotRoots ??= []).Add(root))
+            {
+                return;
+            }
+
+            foreach (NodeId descendant in tree.Descendants(root))
+            {
+                if (tree.IsHtmlSlotElement(descendant))
+                {
+                    seeds.Add(descendant);
+                }
+            }
+        }
+
+        void SeedSlotsAround(NodeId? node)
+        {
+            if (node is not { } id || !tree.HasShadowRoots)
+            {
+                return;
+            }
+
+            // A host's children are assigned to its shadow tree's slots; a slot's own tree
+            // reassigns when one of its slots changes.
+            SeedSlotsOf(tree.ShadowRootOf(id));
+            if (tree.IsHtmlSlotElement(id) || ContainsSlot(tree, id))
+            {
+                SeedSlotsOf(tree.ContainingShadowRoot(id));
+            }
+        }
+
         foreach (RetainedStyleMutation mutation in mutations)
         {
             switch (mutation)
@@ -163,19 +201,35 @@ internal sealed class RetainedTaffyLayout
                     // Box generation reads some attributes directly (rowspan, size, rows, cols,
                     // value, open, ...) whatever the style planner made of them.
                     seeds.Add(attribute.Mutation.Node);
+                    if (attribute.Mutation.Name is "slot" or "name"
+                        && tree.GetNode(attribute.Mutation.Node)?.Parent is { } slotted)
+                    {
+                        SeedSlotsAround(slotted);
+                        SeedSlotsAround(attribute.Mutation.Node);
+                    }
+
                     break;
                 case RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Insert insert }:
                     seeds.Add(insert.Node);
                     seeds.Add(insert.NewParent);
+                    SeedSlotsAround(insert.NewParent);
+                    SeedSlotsAround(insert.Node);
                     if (insert.OldParent is { } oldParent)
                     {
                         seeds.Add(oldParent);
+                        SeedSlotsAround(oldParent);
                     }
 
                     break;
                 case RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Remove remove }:
                     seeds.Add(remove.Node);
                     seeds.Add(remove.OldParent);
+                    SeedSlotsAround(remove.OldParent);
+                    if (ContainsSlot(tree, remove.Node))
+                    {
+                        SeedSlotsOf(tree.ContainingShadowRoot(remove.OldParent));
+                    }
+
                     break;
                 case RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Text text }:
                     seeds.Add(text.Node);
@@ -256,6 +310,29 @@ internal sealed class RetainedTaffyLayout
         }
 
         return closure;
+    }
+
+    private static bool ContainsSlot(DomTree tree, NodeId root)
+    {
+        if (!tree.HasShadowRoots)
+        {
+            return false;
+        }
+
+        if (tree.IsHtmlSlotElement(root))
+        {
+            return true;
+        }
+
+        foreach (NodeId descendant in tree.Descendants(root))
+        {
+            if (tree.IsHtmlSlotElement(descendant))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

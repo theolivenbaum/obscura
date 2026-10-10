@@ -2270,7 +2270,9 @@ Values measured in Chromium 141 (headless, Playwright); facts in
   commands: the Amplitude experiment script never ran and the forecast was never fetched
   (998 elements against Chromium's 2115; 1302 after). The pump now stands down for 1 s and
   resumes (`ServerTests.AutonomousPumpResumesAfterRepeatedOverrunningTasks`). The restyle
-  cost itself is the open problem: `op_computed_style` spent 7 s over 1,100 calls there.
+  cost itself was the open problem: `op_computed_style` spent 7 s over 1,100 calls there. Most
+  of those calls are now answered without a restyle (see "getComputedStyle answers what layout
+  cannot change before the pending mutations are restyled").
 
 ### A linked stylesheet leaves no element in the DOM
 
@@ -2470,6 +2472,46 @@ needs the comment is that a reader diffing `ops.rs` will find nothing resembling
 them there. Measured: 6 of 12 runs of
 `ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop` before, 13 of 14 and
 then 12 of 12 after.
+
+### A dynamic script load is restarted after a watchdog termination
+
+DEVIATION from `crates/obscura-js` and its `bootstrap.js`, which lose the load the same way and
+never recover it. When a watchdog terminates a turn that ran past its budget, V8 discards every
+queued microtask, and ClearScript delivers an async op's result inside whatever script is
+running (its call-with-lock queue is serviced from a V8 interrupt), so a termination can also
+cut the delivery itself short and leave the op's promise unsettled. A dynamic script whose next
+step was in the queue never ran again, and one that delays the load event held navigation until
+its deadline. nvidia.com: a page task of forced layout reads runs past the 5.5 s task budget
+while OneTrust's `otBannerSdk.js` arrives (fetched in 85 ms), and one goto in two to seven took
+the full 30 s cap; the loss showed up both as an op promise that never settled and as a settled
+one whose reactions were gone. Chromium never terminates a task. Now
+`PocketCalculatorJsRuntime.CancelTermination` marks the runtime, the next JavaScript task posts a
+task that calls `__obscura_redriveDynamicScripts` in each realm (posted, so the restarted
+continuations, load handlers among them, run in a turn under the task watchdog; run directly they
+re-ran the terminated page work with no deadline, and weather.com hung), and `POCKETCALCULATOR_NO_SCRIPT_REDRIVE=1`
+turns it off. bootstrap.js starts every unfinished dynamic
+script task again under a new generation: a stale runner stops at its next await without
+firing events or releasing counters, the fetch result is read again from the settled op, or
+raced against a fresh request when the op is not known to have settled, the in-order queue is
+restarted at its head, and the script still runs once (`task.executed`). nvidia.com: 18 of 18
+gotos 13.5-16.6 s (one extra `otBannerSdk.js` request when the op had not settled). Pinned by
+`ADynamicScriptLoadSurvivesATerminatedMicrotaskCheckpoint` (Browser; async and in-order, both
+stranded without the redrive). Page promise chains lost to the same termination are not
+recovered, and an op whose delivery was cut short stays counted in the async-op tracker, so a
+settle waits out its budget after one; what makes the page task run 5 s at all is the forced
+layout cost (`clientWidth` ~55 ms a read on nvidia.com), which is the open layout work.
+
+### A frame realm's script runs under the task watchdog
+
+DEVIATION from `crates/obscura-js/src/frame.rs`, which runs a frame's scripts (its document
+scripts, load handlers, host scripts and evaluations) with no deadline of their own. The microtask
+checkpoint that ends one is the isolate's, so it also drains whatever the page realm has queued,
+and nothing was armed: a page task that the watchdog stops everywhere else ran unbounded there
+(weather.com: CDP stopped answering for good with the isolate held inside a frame's
+`RunDocumentScripts`, one run in three with the dynamic script redrive and a 20 s stall without
+it). `FrameRealm.Run` now arms the page runtime's watchdog for the task budget
+(`SynchronousTaskFloorMs` plus the scheduling margin); the isolate is shared, so it ends the frame's
+script as well.
 
 ### An idle verdict during an explicit settle is confirmed against the page
 
@@ -3388,6 +3430,245 @@ Measured on a 2000-item page, interleaved: class write + `offsetWidth` read 255m
 write + `getBoundingClientRect` 187ms -> 139ms; peak RSS unchanged. Pinned by
 `LineLayoutMemoTests` (Render). `POCKETCALCULATOR_DISABLE_SHAPE_CACHE=1` turns this off with the
 shape cache.
+
+### The retained planner adds a subtree to a dirty set once
+
+DEVIATION from `crates/obscura-render/src/dom.rs`, which walks a subtree and its ancestors on every
+`AddStyleSubtree`. A `:has()` rule anchored high sends every child-list mutation to the same anchor,
+and each call walked the whole document again: steamcommunity.com's app hub (`/app/730`) planned 38
+mutations in 1.0-2.6s and 336MB. `RetainedStylePlanner.AddStyleSubtree` remembers, per dirty set,
+the roots it added whole, and a root inside one adds nothing. Same plans, now 40-53ms for that
+batch; `fetch --eval` element count 568 -> 985 (Chromium 1302). Correctness is the differential
+suite's (unchanged plans).
+
+Open: weather.com's passes are not planner-bound. Many retained passes fall back to a whole-
+document restyle on `restyleAnimationWide` (animation damage reaching half the style graph), and
+every retained pass re-cascades each element a container-query rule selects
+(`AddContainerQueryResetScopes`, about half the document there) and re-runs the container-query
+iterations without carrying layout over, 100-300ms of cascade and 50-300ms of taffy each.
+`getComputedStyle` of a layout-independent property no longer forces one (see the next section).
+
+### getComputedStyle answers what layout cannot change before the pending mutations are restyled
+
+DEVIATION from `crates/obscura-js` and `crates/obscura-render`, whose `getComputedStyle()` prepares
+the whole render (restyle and layout of every pending mutation) for its snapshot. A computed
+style is a function of the rules that match the element and of its parent's computed style, so
+when the retained planner's own invalidation (`RetainedStylePlanner.OwnStyleDamage`, without the
+context chains it re-cascades) reaches neither the element nor any ancestor, the next restyle
+gives the element the style the prepared render already has. `PreparedRender.TryRetainedComputedStyle`
+answers the snapshot from there, without the used values (`width`, `height`, the insets, margins,
+padding, `transform`, `transform-origin`, and a grid container's track lists), and the new
+`op_computed_style_static` hands bootstrap.js that partial snapshot with the names it left out;
+reading one of those (or `length`/`item()`) takes `op_computed_style` as before, and the names
+are remembered so a later read of one goes there directly. It fails closed for container-query
+rules matching on the chain, table parts (collapsed borders and cell growth come from
+neighbours), shadow hosts or shadow trees on the chain, and pending resource loads (font metrics
+resolve `ch`/`ex`). A document timeline that moved on since the render was sampled is answered
+only for an element whose chain has no running CSS animation or Web Animation; a current render
+needs no shortcut. The planner result is memoized per pending batch (`ActivityGeneration` and the
+pending count). Ad scripts poll `display`/`position` of their slots while the page mutates:
+weather.com made ~1,300 such reads during load, each a full restyle and layout before.
+`POCKETCALCULATOR_NO_RETAINED_READS=1` turns it off with the `offsetParent` shortcut.
+`IncrementalLayoutDifferentialTests` checks every answer the previous render gives, at every
+step, against the full snapshot after a full layout (every answered value equal, the omitted
+names exactly the rest), on the eight fixtures and a new container-query fixture (soaked at 40
+seeds); `AComputedStyleReadIsAnsweredWithoutARestyleWhenNothingOnItsChainChanges` (Render) and
+`LayoutReadCacheTests.ComputedStyleReadsAfterMutationsElsewhereAreAnsweredBeforeTheRestyle` (Js,
+values from Chromium 141) pin it.
+
+It also fails closed when a pending mutation inserts, removes, edits or re-attributes a
+`<style>` or `<link>`, or moves an element carrying fetched CSS (`TouchesStylesheets`). The
+planner never needs that test, because the restyle collects the sheets again and a changed
+source list misses the stylesheet cache, but a read answered before the restyle has no such
+backstop: removing a script-inserted `<link>` left its rules in the answer
+(`AScriptInsertedStylesheetLinkAppliesAndItsRemovalRevokesTheRules`, Browser).
+
+### The retained planner learns a batch's sibling lists once
+
+DEVIATION from `crates/obscura-render/src/dom.rs`, which, for every insertion in a batch, lists
+the parent's element children, finds the node among them, counts the batch's insertions into
+that parent, and filters the stylesheet's structural invalidations for each state and each
+candidate sibling; and which counts every child of a parent for `:empty` before looking whether
+any `:empty` rule can match it. Appending 200 items one by one to a 2,000-item list, each
+followed by a read, planned in O(batch x list) per plan: 30 ms an append. One `Plan` now lists
+each parent's children and their positions once (`StructuralPlanScratch`), the boundary states
+(`first-child` and the like) are scoped once per parent that gained more than one element, the
+structural invalidations are grouped by state once per stylesheet
+(`InvalidationMap.OwnStructuralInvalidations`), and `:empty` looks at the rules before the
+children. Same plans. Pinned by `PlanningAppendsToALongListDoesNotRevisitTheList`.
+
+### `:has()` anchors and structural subjects are keyed by their context
+
+DEVIATION from `crates/obscura-render` (`RelationalAnchorKey` of the compound alone, and every
+candidate tried for every `:has()` rule), which over-invalidated in three ways that together made
+every insertion on weather.com restyle the whole document:
+
+- A `:has()` or structural pseudo-class inside `:not()`, `:is()` or `:where()` lost the key of the
+  compound holding it: `.hide-empty:not(:has(> *))` was an unkeyed anchor with an unkeyed
+  subject, so any insertion anywhere restyled the subtree of each ancestor. The argument's
+  subject compound is the element the enclosing compound matches, so it carries that key too.
+- A `:has()` argument without `+` or `~` looks only below its anchor, so only ancestors of the
+  change are anchor candidates for it; the previous siblings along the way are kept for
+  arguments with a sibling combinator (`RelationalInvalidation.SiblingRelative`).
+- A structural pseudo-class in a compound that a child or descendant combinator joins to a keyed
+  compound (`.list > :last-child`) can only match below an element with that key
+  (`StructuralInvalidation.AncestorKey`); an `<iframe>` appended to `<html>` restyled `<body>`
+  and everything in it for tailwind's `[&>*:last-child]` rules.
+
+Pinned by `AnInsertionReachesOnlyTheStructuralAndHasRulesWhoseKeysItCanMeet`; correctness is the
+differential suite's.
+
+
+### A document with shadow roots keeps its retained styles
+
+DEVIATION from `crates/obscura-render/src/dom.rs`, which restyles the whole document on any
+mutation once a shadow root carries a stylesheet (and so carries no layout over either), as the
+port did. Web-component pages pay a whole-document cascade and layout for every forced read
+(reddit.com: ~170 shadow roots). `RetainedStylePlanner.AddShadowDamage` plans every shadow
+sheet against the mutations as the document's is planned, covers what the planner cannot key
+structurally (an attribute change on a host restyles its shadow tree, for `:host(...)` and
+`::part`; `part`, `exportparts` and `slot` restyle the element's subtree; a slot inserted,
+removed or renamed restyles its host and the host's light children; an insertion or removal of
+a host's light child restyles the host), fails closed on `:host-context()`, and closes the
+damage over the flat tree (a damaged host's shadow tree and a damaged slot's assigned nodes,
+plus flat-tree context chains). The sheets must be the very ones the retained styles were
+cascaded with, root for root (`RetainedStyleMaps.ShadowSheets`); any other shadow sheet set
+restyles the document as before. The retained pass's set of styled nodes is now every
+shadow-including descendant when there are shadow roots, as the full cascade styles them (a
+slot's fallback content and a host's unassigned children are not in the flat tree; the walk over
+the flat tree dropped their styles). Each shadow sheet is planned only against the mutations that
+touch its tree, its host or the host's light children, since its rules match nothing else. The
+JS ops now record a mutation inside a shadow tree as a retained mutation (crates/obscura-js
+drops the prepared render for it; `OpsTests.Connected_shadow_nodes_invalidate_without_entering_light_tree_retention`
+says so at the deviation): on reddit.com that turned 7 of 16 passes from full into retained.
+Interleaved on one binary
+(`POCKETCALCULATOR_NO_SHADOW_RETAINED=1` restores the old path), 400 web components each with a
+shadow stylesheet, 30 class toggles each followed by a read, three runs: allocation 1377MB ->
+340MB, layout CPU 7.0-7.4s -> 4.7-4.9s, same answers. Pinned by the shadow fixture of
+`IncrementalLayoutDifferentialTests` (shared shadow sheet, `:host`, `::slotted`, named slots,
+`::part`, inherited custom properties, a nested host; 60 seeds clean) and
+`AShadowRootPageRestylesOnlyWhatAMutationReaches`.
+
+### A shadow root's sheet is found by its sources' identity
+
+DEVIATION from `crates/obscura-render` (which parses every shadow root's sheet on every pass) and
+from the port's own content-keyed cache before it: every pass joined each root's sources into one
+key string and hashed it, so on reddit.com's ~170 roots a pass copied and hashed every component's
+whole stylesheet again, 13-37ms of each forced read (a third of a retained pass there).
+`StylesheetCache.GetOrParseShadow` now remembers, per root, the source strings it was given and
+their entry; a root whose sources are the very same strings (a `<style>` with one text child hands
+its text node's string out unchanged) gets its sheet without the join. Anything else takes the
+content key as before, so roots sharing sources still share a sheet, and the per-root records of
+roots a pass did not see are dropped with it. reddit.com (`fetch`, layout profile, two runs each):
+the `sheets` phase of a retained pass 12-47ms -> ~1ms; summed over the load, 1.75-2.05s
+(4eedc89) -> 1.21-1.31s, the rest being the cold parses of new sheets.
+
+### An inline context keeps the sizes it has measured
+
+DEVIATION from `crates/obscura-render/src/inline.rs`, which lays a paragraph out again for every
+measurement. Grid, flex and table sizing ask one inline context for its min-content, max-content
+and final sizes over and over, and an item kept only the last layout (`ShapedFor`), so alternating
+questions laid it out every time. `TextEngine.MeasureTextWithWrap` keeps the last six answers per
+item (`InlineItem.MeasuredSizes`, keyed by the width's bits and the wrap); `ForgetLayout` drops
+them wherever the item's content changes (an atomic inline's size, a list marker's indent), and a
+carried-over item keeps them into the next pass. Items with atomic inlines or anchored floats are
+measured every time, since their placement reads the buffer the last measurement left. Exact:
+`MeasureMemoTests` lays the line-carry pages and two intrinsic-sizing pages out with and without
+it, fresh and retained. `POCKETCALCULATOR_NO_MEASURE_MEMO=1` turns it off. 2,000 grid items, cold
+layout, interleaved on one binary, two runs: taffy 1017-1125ms -> 941-1021ms.
+
+Not done: the min-content size of a paragraph still comes from a line layout at width 0 (one word
+a line). A measurement returns the height as well, and taffy caches the pair, so the width cannot
+come from the shaped words alone unless the height of those lines does too; on the 2,000-item
+page that layout is 80% of the cold pass, most of it allocating the `LayoutGlyph`s of lines that
+are measured and dropped.
+
+### A container-query pass keeps the previous pass's styles and layout
+
+DEVIATION from `crates/obscura-render`, which cascades and lays the whole document out from
+scratch on every container-query pass after the first, retained prepare or not. Between two
+passes of one prepare only the answers of container-query rules can change, so pass k now takes
+pass k-1's style maps, restyles what a container-query rule selects inside a query container
+(`RetainedStylePlanner.AddContainerQueryResetScopes`, the scopes a retained pass resets) and
+carries pass k-1's layout over to the rest (`RetainedTaffyLayout`, with no mutations and those
+scopes as the dirty set). A pass that ends on equal adjacent signatures returns its own layout
+rather than the previous candidate's, whose styles it took: it applied the same decisions to the
+same tree. The rules of shadow trees are outside those scopes, so a page whose shadow sheets or
+`::part` rules have container queries passes from scratch as before.
+`POCKETCALCULATOR_NO_RETAINED_CONTAINER_PASSES=1` restores the old passes.
+
+Tried and dropped: starting a retained prepare from the container sizes the previous one
+converged on, which would skip the container-query-less first pass and the reset. When the sizes
+come out the same it is a fixed point of the iteration, but not always the one the iteration from
+no sizes reaches: the differential suite's container-query fixture found three seeds (of 60)
+where the two disagree, so the iteration still starts from no sizes.
+
+Found by the same soak and fixed: a light child that changed slots (its `slot` attribute, a
+slot's `name`, a slot or a host child inserted or removed) left the slot it was assigned to before
+out of the layout's dirty closure, since that slot is above nothing in the tree as it is now; the
+slot's box and its inline context, still holding the moved text, were carried over
+(`RandomMutationSequencesMatchAFullRelayout(7, 57)`, present at 2158322: the page 19px taller).
+`RetainedTaffyLayout.DirtyClosure` now seeds every slot of the shadow tree such a mutation can
+reassign.
+
+Found, not fixed (present at 2158322): `RandomMutationSequencesMatchAFullRelayout(5, 77)` diverges
+at step 4, an `<img>` inside a `<button>` getting a new `src`: the retained button keeps the width
+its control sizing took from the old image (102px against 192px). The source swap restyles the
+image's subtree only (see "An `<img>` source swap restyles the image"), and the button's
+control-sized width is written into its retained style.
+
+### A split paragraph's lines are taken from the line they were cut from
+
+DEVIATION from `crates/obscura-render/src/inline.rs` (`shape_with_text_indent`), which shapes and
+wraps every split-off tail afresh to find its first visual line, and shapes every line the
+paragraph ends up split into again. A paragraph of n lines was shaped n times, and a min-content
+measurement (width 0, one word a line) was quadratic in its word count: a 2,000-item grid spent
+1.9s of a 3.9s cold layout re-shaping remainders. Two exact shortcuts in
+`TextEngine.ShapeWithTextIndent`, for left-to-right lines without tabs short enough to be laid out
+whole (`ProbeWindowMinLine`):
+
+- `LineCarry`: a tail's first visual line is the whole line's next one when the tail starts
+  where that line starts, at a word boundary, and is asked for at the same available width
+  (wrapping is greedy and shaping is per word). Any retry for inline box edges, an emergency
+  break inside a word, or a different width lays the tail out as before.
+- `TextShaper.ShapeParagraphSlice`: a line cut at word boundaries out of a shaped paragraph is
+  shaped by copying those words, moved to the line's offsets (each word is shaped from its own
+  text and attributes and keeps its break opportunities as glyph indices). It still goes
+  through the shape cache.
+
+Interleaved on one binary (`POCKETCALCULATOR_NO_LINE_CARRY=1` restores the old path), 2,000
+grid items, cold layout, four runs: taffy 1.50-1.68s -> 1.18-1.25s, the pass 2.40-2.66s ->
+2.08-2.19s, allocation 385MB -> 271MB. Retained passes unchanged (19MB each either way).
+`POCKETCALCULATOR_VERIFY_LINE_CARRY=1` shapes every slice as well and reports any difference;
+none on the render repros, the snapshots or six live sites. Pinned by `LineCarryTests` (Render),
+which lays ten pages out both ways and compares the whole render.
+
+### `offsetParent`, and the offsets of a box-less element, are read before pending mutations are laid out
+
+DEVIATION from `crates/obscura-render` and `crates/obscura-js`, which lay the document out before
+answering any layout read (and have no `offsetParent`). Whether an element generates a box, and
+its `offsetParent`, are functions of the computed styles of the element and its ancestors and of
+the ancestor chain, never of geometry. `PreparedRender.TryRetainedOffsetParent` answers them from
+the prepared render while mutations are pending when the retained planner's own invalidation,
+without the context chains it re-cascades (`RetainedStylePlanner.OwnStyleDamage`), cannot reach
+the element or any ancestor and the chain is still connected: an element below a `display: none`
+ancestor that this render left out has no box whatever happens below that ancestor, and a
+block-level element that had one keeps it and its offset parent. Shadow trees, container queries
+and animation damage fail closed. The new `op_layout_offset_parent` answers `offsetParent` alone;
+`op_layout_offset` answers a box-less element's zeros the same way. AEM's lazy image component
+inserts an image and reads the component's `offsetParent` to skip hidden ones (nvidia.com: 75
+reads, each a whole relayout). Interleaved on one binary
+(`POCKETCALCULATOR_NO_RETAINED_READS=1` restores the old path), nvidia.com through CDP, three runs:
+the 75 `offsetParent` reads 3.8-7.3s -> 0.7-1.0s, all forced reads 16.0-20.1s -> 11.3-12.5s,
+goto 25.8-31.4s -> 19.2-25.2s (load average 10-13); 100 components on a local repro 2.7-5.9s ->
+1.4-1.7s (Chromium 2ms), same answers as Chromium. `IncrementalLayoutDifferentialTests` checks
+every answer the previous render gives against a full layout at every step, and
+`LayoutReadCacheTests.OffsetParentReadsAfterInsertionsAreAnsweredBeforeTheLayout` (Js) pins the
+values against Chromium 141.
+
+Found on the way, not fixed: a `display: none` table row is still laid out (offsetHeight 20,
+offsetParent the table) where Chromium gives it no box; the shortcut does not treat such a row as
+hidden.
 
 ### An `<img>` source swap restyles the image, not the document
 

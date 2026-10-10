@@ -878,6 +878,61 @@ internal static class CssSelectorText
         return false;
     }
 
+    /// <summary>
+    /// Whether a <c>+</c> or <c>~</c> occurs outside attribute selectors and strings: a
+    /// relative selector without one looks only at the anchor's descendants.
+    /// </summary>
+    public static bool SelectorContainsSiblingCombinator(string selector) =>
+        SelectorContainsAdjacentCombinator(selector) || SelectorContainsGeneralSiblingCharacter(selector);
+
+    private static bool SelectorContainsGeneralSiblingCharacter(string selector)
+    {
+        var chars = selector.AsSpan();
+        var index = 0;
+        char? quote = null;
+        var bracketDepth = 0;
+        while (index < chars.Length)
+        {
+            var current = chars[index];
+            if (current == '\\')
+            {
+                index = Math.Min(index + 2, chars.Length);
+                continue;
+            }
+
+            if (quote is { } active)
+            {
+                if (current == active)
+                {
+                    quote = null;
+                }
+
+                index++;
+                continue;
+            }
+
+            switch (current)
+            {
+                case '\'':
+                case '"':
+                    quote = current;
+                    break;
+                case '[':
+                    bracketDepth++;
+                    break;
+                case ']':
+                    bracketDepth = Math.Max(bracketDepth - 1, 0);
+                    break;
+                case '~' when bracketDepth == 0:
+                    return true;
+            }
+
+            index++;
+        }
+
+        return false;
+    }
+
     public static bool SelectorContainsAdjacentCombinator(string selector)
     {
         var chars = selector.AsSpan();

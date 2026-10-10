@@ -256,6 +256,193 @@ public sealed class TextShaper(FontDatabase database)
         return ShapeParagraphUncached(line, attrsList, tabWidth, baseRtl);
     }
 
+    /// <summary>
+    /// <see cref="ShapeParagraph"/> for a line known to be the whole words of
+    /// <paramref name="whole"/> from <paramref name="shift"/> on: those words are copied, moved
+    /// to the line's offsets, instead of shaped again.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs, which shapes every line a paragraph
+    /// is split into afresh. Shaping is per word (<see cref="BuildSpan"/>): each word is shaped
+    /// from its own text and attributes, and its break opportunities are kept as glyph indices
+    /// within it. So the words of a left-to-right paragraph without tabs (whose advances depend
+    /// on the position in the paragraph) are the words of any run of them cut at word
+    /// boundaries. A word crossing either end of the line, or anything but one left-to-right
+    /// span, falls back to shaping. <c>POCKETCALCULATOR_VERIFY_LINE_CARRY=1</c> shapes every
+    /// slice as well and reports any difference on stderr.
+    /// </remarks>
+    internal ShapeLine ShapeParagraphSlice(
+        string line, AttrsList attrsList, int tabWidth, bool? baseRtl, ShapeLine whole, int shift)
+    {
+        if (Cache is { } cache)
+        {
+            ShapeCacheKey key = new(line, attrsList, tabWidth, baseRtl);
+            if (cache.TryGet(key, out ShapeLine cached))
+            {
+                return cached;
+            }
+
+            ShapeLine fresh = Slice() ?? ShapeParagraphUncached(line, attrsList, tabWidth, baseRtl);
+            cache.Add(key, fresh);
+            return fresh;
+        }
+
+        return Slice() ?? ShapeParagraphUncached(line, attrsList, tabWidth, baseRtl);
+
+        ShapeLine? Slice()
+        {
+            ShapeLine? result = SliceWords(whole, shift, line.Length);
+            if (result is not null && VerifySlices)
+            {
+                ShapeLine shaped = ShapeParagraphUncached(line, attrsList, tabWidth, baseRtl);
+                if (!SameShape(shaped, result))
+                {
+                    Interlocked.Increment(ref s_sliceMismatches);
+                    Console.Error.WriteLine($"SHAPE SLICE MISMATCH '{line}'");
+                    return shaped;
+                }
+            }
+
+            if (result is not null)
+            {
+                Interlocked.Increment(ref s_slices);
+            }
+
+            return result;
+        }
+    }
+
+    private static long s_slices;
+    private static long s_sliceMismatches;
+
+    /// <summary>Lines shaped as slices, and slices that differed from shaping (verification on).</summary>
+    internal static (long Slices, long Mismatches) SliceCounts =>
+        (Interlocked.Read(ref s_slices), Interlocked.Read(ref s_sliceMismatches));
+
+    internal static bool VerifySlices { get; set; } =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_VERIFY_LINE_CARRY") == "1";
+
+    private static ShapeLine? SliceWords(ShapeLine source, int from, int length)
+    {
+        if (source.Rtl || source.Spans.Count != 1 || source.Spans[0].IsRtl)
+        {
+            return null;
+        }
+
+        int to = from + length;
+        var span = new ShapeSpan { Level = source.Spans[0].Level };
+        int covered = 0;
+        foreach (ShapeWord word in source.Spans[0].Words)
+        {
+            if (word.Glyphs.Count == 0)
+            {
+                return null;
+            }
+
+            int start = int.MaxValue;
+            int end = int.MinValue;
+            foreach (ShapeGlyph glyph in word.Glyphs)
+            {
+                start = Math.Min(start, glyph.Start);
+                end = Math.Max(end, glyph.End);
+            }
+
+            if (end <= from)
+            {
+                continue;
+            }
+
+            if (start >= to)
+            {
+                break;
+            }
+
+            if (start < from || end > to)
+            {
+                return null;
+            }
+
+            var copy = new ShapeWord
+            {
+                Blank = word.Blank,
+                Glyphs = new List<ShapeGlyph>(word.Glyphs.Count),
+                SoftBreaks = word.SoftBreaks,
+                EmergencyBreaks = word.EmergencyBreaks,
+                MinContentBreaks = word.MinContentBreaks,
+                CustomLineBreaks = word.CustomLineBreaks,
+            };
+            foreach (ShapeGlyph glyph in word.Glyphs)
+            {
+                ShapeGlyph moved = glyph;
+                moved.Start -= from;
+                moved.End -= from;
+                copy.Glyphs.Add(moved);
+            }
+
+            covered += end - start;
+            span.Words.Add(copy);
+        }
+
+        // Every character of the line belongs to exactly one copied word.
+        if (covered != length)
+        {
+            return null;
+        }
+
+        var result = new ShapeLine { Rtl = false, Metrics = source.Metrics };
+        result.Spans.Add(span);
+        return result;
+    }
+
+    private static bool SameShape(ShapeLine a, ShapeLine b)
+    {
+        if (a.Rtl != b.Rtl || a.Spans.Count != b.Spans.Count || !Equals(a.Metrics, b.Metrics))
+        {
+            return false;
+        }
+
+        for (int s = 0; s < a.Spans.Count; s++)
+        {
+            ShapeSpan x = a.Spans[s];
+            ShapeSpan y = b.Spans[s];
+            if (x.Level != y.Level || x.Words.Count != y.Words.Count)
+            {
+                return false;
+            }
+
+            for (int w = 0; w < x.Words.Count; w++)
+            {
+                ShapeWord p = x.Words[w];
+                ShapeWord q = y.Words[w];
+                if (p.Blank != q.Blank || p.CustomLineBreaks != q.CustomLineBreaks
+                    || !p.SoftBreaks.SequenceEqual(q.SoftBreaks)
+                    || !p.EmergencyBreaks.SequenceEqual(q.EmergencyBreaks)
+                    || !p.MinContentBreaks.SequenceEqual(q.MinContentBreaks)
+                    || p.Glyphs.Count != q.Glyphs.Count)
+                {
+                    return false;
+                }
+
+                for (int g = 0; g < p.Glyphs.Count; g++)
+                {
+                    ShapeGlyph m = p.Glyphs[g];
+                    ShapeGlyph n = q.Glyphs[g];
+                    if (m.Start != n.Start || m.End != n.End || m.XAdvance != n.XAdvance || m.YAdvance != n.YAdvance
+                        || m.XOffset != n.XOffset || m.YOffset != n.YOffset || m.FontId != n.FontId
+                        || m.GlyphId != n.GlyphId || m.FontIsVariable != n.FontIsVariable
+                        || m.FontWeightAxis != n.FontWeightAxis || m.FontOpticalSize != n.FontOpticalSize
+                        || m.FontItalicAxis != n.FontItalicAxis || m.Color != n.Color || m.Metadata != n.Metadata
+                        || m.FakeItalic != n.FakeItalic || m.FakeBold != n.FakeBold || !Equals(m.Metrics, n.Metrics))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
     private ShapeLine ShapeParagraphUncached(string line, AttrsList attrsList, int tabWidth, bool? baseRtl)
     {
         var result = new ShapeLine();

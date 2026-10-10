@@ -1741,6 +1741,52 @@ public sealed class PageTests
         Assert.False(page.Js!.HasPendingLoadDelayingScripts());
     }
 
+    /// <summary>
+    /// A watchdog that terminates a long microtask makes V8 discard every queued
+    /// microtask, and with them the next step of any script load waiting in the queue.
+    /// The load never finished and held the load event until the navigation deadline
+    /// (nvidia.com: a 30 s goto behind an 85 ms fetch). The next task restarts it, and
+    /// the script still runs exactly once.
+    /// </summary>
+    /// <remarks>
+    /// A <c>data:</c> script settles its fetch without a network round trip, so its
+    /// next steps are queued behind the spinning microtask deterministically. A network
+    /// script loses them the same way when ClearScript delivers its response inside
+    /// the long task, which a test cannot time reliably.
+    /// </remarks>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ADynamicScriptLoadSurvivesATerminatedMicrotaskCheckpoint(bool inOrder)
+    {
+        using Page page = PageFixtures.ImportMapTestPage(
+            "load-delayer-terminated",
+            "http://127.0.0.1:9",
+            "<html><head></head><body></body></html>");
+        page.Js!.SetDocumentReadyState("loading");
+        string source = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes("globalThis.__survivorRuns = (globalThis.__survivorRuns || 0) + 1;"));
+
+        Assert.Throws<JsRuntimeException>(() => page.Js!.EvaluateWithTimeout(
+            "(globalThis.__survivorLoads = 0, "
+            + "globalThis.__survivor = document.createElement('script'), "
+            + $"__survivor.src = 'data:text/javascript;base64,{source}', "
+            + "__survivor.onload = () => { globalThis.__survivorLoads++; }, "
+            + (inOrder ? "__survivor.async = false, " : "")
+            + "document.head.appendChild(__survivor), "
+            + "queueMicrotask(() => { for (;;) {} }), 1)",
+            TimeSpan.FromMilliseconds(300)));
+        Assert.True(page.Js!.HasPendingLoadDelayingScripts());
+
+        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+        bool completed = await Page.DriveLoadDelayingScriptsAsync(page.Js!, deadline);
+
+        Assert.True(completed, "the terminated checkpoint must not strand the script load");
+        PageFixtures.AssertJson(
+            "[1, 1]",
+            page.Js!.Evaluate("[globalThis.__survivorRuns, globalThis.__survivorLoads]"));
+    }
+
     [Fact]
     public async Task PostLoadDynamicScriptWaitsOnlyWhenCallerRequestsSettle()
     {

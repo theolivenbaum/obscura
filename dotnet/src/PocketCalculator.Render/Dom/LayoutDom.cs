@@ -456,10 +456,31 @@ public static partial class RenderDom
             4,
             ContainerLayoutSafetyLimit);
         bool needsFallback = false;
+        // DEVIATION from crates/obscura-render, which cascades and lays the whole document out
+        // from scratch on every container-query pass after the first. Between two passes only
+        // the decisions of container-query rules can change, so a pass keeps the previous pass's
+        // styles, restyles what a container-query rule selects inside a query container (the
+        // retained planner's container scopes), and carries the previous pass's layout over to
+        // everything else. The rules of shadow trees are not in those scopes, so a page whose
+        // shadow sheets (or `::part` rules) have container queries passes from scratch as before.
+        // weather.com cascaded its whole document again on every forced read.
+        bool retainContainerPasses = !ContainerPassesRetainedDisabled
+            && RetainedTaffyLayout.Enabled
+            && (!tree.HasShadowRoots || !ShadowContainerQueries(sheet, shadowSheets));
+        DomLayout latest = laid;
         for (int pass = 2; pass <= maxPasses; pass++)
         {
-            // A container-query pass re-lays the document from scratch, so the shaping this
-            // prepare has already paid for is handed forward as well.
+            (RetainedStyleMaps Maps, HashSet<NodeId> Fresh)? carried = null;
+            RetainedTaffyLayout? carriedBoxes = null;
+            if (retainContainerPasses)
+            {
+                RetainedStyleMaps maps = latest.TakeRetainedStyleMaps();
+                carried = (maps, ContainerQueryScopes(tree, sheet, maps.Styles));
+                carriedBoxes = latest.RetainedBoxes;
+            }
+
+            // A container-query pass re-lays the document, so the shaping this prepare has
+            // already paid for is handed forward as well.
             var next = LayoutDomOnce(
                 tree,
                 viewport,
@@ -468,11 +489,14 @@ public static partial class RenderDom
                 sheet,
                 shadowSheets,
                 snapshot,
-                null,
+                carried,
                 animationSample,
                 animationTimeline,
                 null,
-                laid);
+                latest,
+                carriedBoxes,
+                carried is not null ? [] : null);
+            latest = next.Layout;
             passes = pass;
             query = new ContainerQueryStats(
                 query.Evaluations + next.QueryStats.Evaluations,
@@ -490,8 +514,10 @@ public static partial class RenderDom
                 termination = resolved;
 
                 // Equal adjacent signatures prove that the *previous* candidate's applied
-                // decisions match an evaluation of its own final snapshot.
-                laid = resolved == ContainerLayoutTermination.SignatureStable
+                // decisions match an evaluation of its own final snapshot. A retained pass took
+                // the previous candidate's styles; it applied the same decisions to the same
+                // tree, so its own layout is that candidate's.
+                laid = resolved == ContainerLayoutTermination.SignatureStable && !retainContainerPasses
                     ? previousCandidate!.Value.Layout
                     : next.Layout;
                 break;
@@ -540,7 +566,7 @@ public static partial class RenderDom
                 animationSample,
                 animationTimeline,
                 null,
-                laid);
+                retainContainerPasses ? latest : laid);
             laid = fallback.Layout;
             passes++;
             query = new ContainerQueryStats(
@@ -666,6 +692,113 @@ public static partial class RenderDom
         || name.StartsWith("data-", StringComparison.OrdinalIgnoreCase)
         || name.StartsWith("aria-", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Kill switch for an A/B on one binary: <c>POCKETCALCULATOR_NO_SHADOW_RETAINED=1</c>.</summary>
+    private static readonly bool ShadowRetainedDisabled =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_NO_SHADOW_RETAINED") == "1";
+
+    /// <summary>Every node below <paramref name="root"/>, shadow trees included.</summary>
+    private static List<NodeId> ShadowIncludingDescendants(DomTree tree, NodeId root)
+    {
+        List<NodeId> result = [];
+        Stack<NodeId> pending = new();
+        pending.Push(root);
+        while (pending.Count != 0)
+        {
+            NodeId node = pending.Pop();
+            if (node != root)
+            {
+                result.Add(node);
+            }
+
+            if (result.Count > tree.SlotCount)
+            {
+                break;
+            }
+
+            if (tree.ShadowRootOf(node) is { } shadow)
+            {
+                pending.Push(shadow);
+            }
+
+            for (NodeId? child = tree.GetNode(node)?.LastChild; child is { } id; child = tree.GetNode(id)?.PrevSibling)
+            {
+                pending.Push(id);
+            }
+        }
+
+        return result;
+    }
+
+    private static bool SameShadowSheets(
+        IReadOnlyDictionary<NodeId, Stylesheet>? before,
+        IReadOnlyDictionary<NodeId, Stylesheet> now)
+    {
+        if (before is null || before.Count != now.Count)
+        {
+            return false;
+        }
+
+        foreach ((NodeId root, Stylesheet sheet) in now)
+        {
+            if (!before.TryGetValue(root, out Stylesheet? previous) || !ReferenceEquals(previous, sheet))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Kill switch for an A/B on one binary: <c>POCKETCALCULATOR_NO_RETAINED_CONTAINER_PASSES=1</c>.</summary>
+    internal static bool ContainerPassesRetainedDisabled { get; set; } =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_NO_RETAINED_CONTAINER_PASSES") == "1";
+
+    /// <summary>
+    /// Whether a container-query rule can match inside a shadow tree, where the container
+    /// scopes of <see cref="ContainerQueryScopes"/> do not look.
+    /// </summary>
+    private static bool ShadowContainerQueries(Stylesheet sheet, IReadOnlyDictionary<NodeId, Stylesheet> shadowSheets)
+    {
+        foreach (Stylesheet shadowSheet in shadowSheets.Values)
+        {
+            if (shadowSheet.HasContainerQueries())
+            {
+                return true;
+            }
+        }
+
+        return sheet.ContainerRulesMatchParts();
+    }
+
+    /// <summary>
+    /// The elements whose styles a container-query decision can change, with the context
+    /// chains a retained cascade revisits: every element a container-query rule selects inside
+    /// a query container of <paramref name="styles"/>, and its subtree.
+    /// </summary>
+    private static HashSet<NodeId> ContainerQueryScopes(
+        DomTree tree,
+        Stylesheet sheet,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    {
+        HashSet<NodeId> activeContainers = [];
+        foreach ((NodeId node, LayoutStyle style) in styles)
+        {
+            if (style.ContainerType != ContainerType.Normal)
+            {
+                activeContainers.Add(node);
+            }
+        }
+
+        HashSet<NodeId> scopes = [];
+        if (activeContainers.Count != 0)
+        {
+            RetainedStylePlanner.AddContainerQueryResetScopes(
+                tree, tree.Document, sheet, tree.CreateMatcher(), activeContainers, false, false, scopes);
+        }
+
+        return scopes;
+    }
+
     private static (RetainedStyleMaps Maps, HashSet<NodeId> Fresh)? PrepareRetainedStyles(
         DomTree tree,
         Stylesheet sheet,
@@ -687,7 +820,12 @@ public static partial class RenderDom
             }
         }
 
-        if (shadowSheets.Count != 0 && !resourceOnly)
+        // A document with shadow roots is planned with every shadow sheet as well
+        // (RetainedStylePlanner.AddShadowDamage), provided the sheets are the very ones the
+        // retained styles were cascaded with: a sheet's sources live in the shadow trees, and a
+        // changed sheet restyles the document.
+        bool shadowed = shadowSheets.Count != 0 && !resourceOnly;
+        if (shadowed && (ShadowRetainedDisabled || !SameShadowSheets(retained.ShadowSheets, shadowSheets)))
         {
             LayoutPhaseProfile.Note("restyleShadowSheets", shadowSheets.Count);
             return null;
@@ -724,7 +862,15 @@ public static partial class RenderDom
                 node.Index < tree.SlotCount && connected[node.Index] == node.Value + 1;
 
             connected[tree.Document.Index] = tree.Document.Value + 1;
-            foreach (NodeId node in DomTraversal.RenderedDescendants(tree, tree.Document))
+
+            // With shadow roots, what the cascade styles is every shadow-including descendant:
+            // a slot's fallback content and a host's unassigned children are not in the flat
+            // tree, but a full pass cascades them all the same, and a retained one must keep
+            // (or compute) the same styles.
+            List<NodeId> walk = tree.HasShadowRoots
+                ? ShadowIncludingDescendants(tree, tree.Document)
+                : DomTraversal.RenderedDescendants(tree, tree.Document);
+            foreach (NodeId node in walk)
             {
                 connected[node.Index] = node.Value + 1;
                 if (!retained.Styles.ContainsKey(node) && tree.GetNode(node)?.IsElement == true)
@@ -772,6 +918,12 @@ public static partial class RenderDom
         }
 
         HashSet<NodeId> dirty = plan.Dirty;
+        if (shadowed && !RetainedStylePlanner.AddShadowDamage(tree, sheet, shadowSheets, mutations, dirty))
+        {
+            LayoutPhaseProfile.Note("restyleShadowFull", mutations.Count);
+            return null;
+        }
+
         foreach (NodeId node in unstyled)
         {
             RetainedStylePlanner.AddStyleSubtree(tree, node, dirty);

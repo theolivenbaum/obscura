@@ -902,6 +902,13 @@ public static partial class RenderDom
 
                 taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
         LayoutPhaseProfile.Mark("taffy1");
+                if (LayoutPhaseProfile.Enabled)
+                {
+                    (int shapeEntries, int shapeHits, int shapeMisses) = engine.ShapeCacheStats;
+                    LayoutPhaseProfile.Note("shapeEntries", shapeEntries);
+                    LayoutPhaseProfile.Note("shapeHits", shapeHits);
+                    LayoutPhaseProfile.Note("shapeMisses", shapeMisses);
+                }
                 if (deferredCyclicInlineSizes.Count == 0
                     && DomPasses.ApplyIntrinsicInlineSizes(
                         taffyTree, idMap, styles, initialCbWidth, IntrinsicWidth))
@@ -1248,6 +1255,8 @@ public static partial class RenderDom
             TopDown = currentTopDown,
             TopDownVisits = topDownVisits,
             AdoptedInlineItems = engine.AdoptedItemCount,
+            DocumentSheet = sheet,
+            ShadowSheets = shadowSheets,
             RetainedBoxes = builtRoot is { } keptRoot
                 ? new RetainedTaffyLayout
                 {

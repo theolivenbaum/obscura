@@ -282,4 +282,119 @@ public sealed class LayoutReadCacheTests
             incrementalMs < fullMs,
             $"10 write+read pairs took {incrementalMs:F0}ms, 10 full layouts {fullMs:F0}ms");
     }
+
+    /// <summary>
+    /// A lazy loader inserts an image into a component and reads the component's offsetParent to
+    /// skip hidden ones. While those mutations are pending, offsetParent (and every offset read
+    /// of an element they cannot give a box) is answered from the prepared render; the first read
+    /// that needs geometry lays them out. Values are Chromium 141's for the same sequence.
+    /// </summary>
+    [Fact]
+    public void OffsetParentReadsAfterInsertionsAreAnsweredBeforeTheLayout()
+    {
+        using var fixture = RuntimeFixture.Blank();
+        var rt = fixture.Runtime;
+        rt.SetDom(HtmlParsing.ParseHtml("""
+            <!doctype html><html><head><style>
+            body{margin:0} .slide{display:none} .slide.on{display:block} #car{position:relative}
+            img{width:10px;height:10px}
+            </style></head><body><div id="car">
+            <div class="slide on"><div class="cmp" id="c0"><a id="l0"><noscript>x</noscript>card 0</a></div><div class="cmp" id="c1"><a id="l1">card 1</a></div></div>
+            <div class="slide"><div class="cmp" id="c2"><a id="l2"><noscript>x</noscript>card 2</a></div><div class="cmp" id="c3"><a id="l3">card 3</a></div></div>
+            </div><p id="tail">tail</p></body></html>
+            """));
+        rt.SetViewport(1280, 800);
+        rt.RunPageInit();
+        rt.Evaluate("document.getElementById('tail').offsetTop");
+        rt.Evaluate("document.getElementById('tail').offsetTop");
+        var prepared = rt.State.PreparedRender;
+        Assert.NotNull(prepared);
+
+        const string Swap = """
+            const $ = (id) => document.getElementById(id);
+            const name = (e) => e === null ? null : (e.id || e.tagName);
+            const swap = (i) => {
+              const c = $('c' + i);
+              c.setAttribute('data-cmp-is', 'image');
+              const img = document.createElement('img');
+              $('l' + i).appendChild(img);
+              const ns = $('l' + i).querySelector('noscript'); if (ns) ns.remove();
+              img.setAttribute('src', 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
+              return [c, img];
+            };
+            """;
+
+        // Hidden components: no box, before and after the insertion.
+        var hidden = rt.Evaluate($$"""
+            (() => {
+              {{Swap}}
+              return [2, 3].map((i) => { const [c, img] = swap(i); return [name(c.offsetParent), c.offsetWidth, c.offsetTop, name(img.offsetParent)]; });
+            })()
+            """);
+        AssertJson("""[[null,0,0,null],[null,0,0,null]]""", hidden);
+        Assert.Same(prepared, rt.State.PreparedRender);
+        Assert.NotEmpty(rt.State.PendingStyleMutations);
+
+        // A visible component's offsetParent does not wait for the layout; its size does.
+        var visible = rt.Evaluate($$"""
+            (() => { {{Swap}} const [c] = swap(0); return name(c.offsetParent); })()
+            """);
+        AssertJson("\"car\"", visible);
+        Assert.Same(prepared, rt.State.PreparedRender);
+
+        var laidOut = rt.Evaluate($$"""
+            (() => { {{Swap}} const [c, img] = swap(1); return [name(img.offsetParent), c.offsetWidth, $('tail').offsetTop]; })()
+            """);
+        AssertJson("""["car",1280,52]""", laidOut);
+        Assert.NotSame(prepared, rt.State.PreparedRender);
+        Assert.Empty(rt.State.PendingStyleMutations);
+    }
+    /// <summary>
+    /// getComputedStyle() after mutations that cannot restyle the element answers its
+    /// layout-independent properties from the prepared render, and lays the mutations out only
+    /// for a used value. Values measured in Chromium 141 on the same page.
+    /// </summary>
+    [Fact]
+    public void ComputedStyleReadsAfterMutationsElsewhereAreAnsweredBeforeTheRestyle()
+    {
+        using var fixture = RuntimeFixture.Blank();
+        var rt = fixture.Runtime;
+        rt.SetDom(HtmlParsing.ParseHtml("""
+            <!doctype html><html><head><style>body{margin:0} #slot{position:relative;display:flex;padding:5%}</style></head>
+            <body><div id="slot"><span id="in">ad</span></div><ul id="list"><li>a</li></ul><p id="tail">tail</p></body></html>
+            """));
+        rt.SetViewport(1280, 800);
+        rt.RunPageInit();
+        rt.Evaluate("document.getElementById('tail').offsetTop");
+        var prepared = rt.State.PreparedRender;
+        Assert.NotNull(prepared);
+
+        var styles = rt.Evaluate("""
+            (() => {
+              const $ = (id) => document.getElementById(id);
+              for (let i = 0; i < 5; i++) $('list').appendChild(document.createElement('li'));
+              globalThis.cs = getComputedStyle($('slot'));
+              return [cs.display, cs.position, cs.color, getComputedStyle($('in')).display];
+            })()
+            """);
+        AssertJson("""["flex","relative","rgb(0, 0, 0)","block"]""", styles);
+        Assert.Same(prepared, rt.State.PreparedRender);
+        Assert.NotEmpty(rt.State.PendingStyleMutations);
+
+        // A used value lays the mutations out.
+        AssertJson("""["64px","1152px"]""", rt.Evaluate("[cs.paddingLeft, cs.width]"));
+        Assert.NotSame(prepared, rt.State.PreparedRender);
+        Assert.Empty(rt.State.PendingStyleMutations);
+
+        // A mutation of the element itself is restyled before it is answered.
+        var restyled = rt.Evaluate("""
+            (() => {
+              const $ = (id) => document.getElementById(id);
+              $('slot').style.display = 'block';
+              return [cs.display, getComputedStyle($('slot')).display, getComputedStyle($('in')).display, cs.width];
+            })()
+            """);
+        AssertJson("""["block","block","inline","1152px"]""", restyled);
+        AssertJson("true", rt.Evaluate("cs.length > 100 && cs.item(0) === 'display'"));
+    }
 }

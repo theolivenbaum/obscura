@@ -220,6 +220,11 @@ public static class RenderOps
         {
             ArgumentNullException.ThrowIfNull(state);
             var nid = ParseNode(nidStr);
+            if (RenderState.PrepTrace)
+            {
+                RenderState.TraceQuery = nid;
+            }
+
             RenderState.SampleLiveDocumentAnimations(state);
             if (!RenderState.EnsureResolvedScrollForGeometry(state))
             {
@@ -454,6 +459,17 @@ public static class RenderOps
             ArgumentNullException.ThrowIfNull(state);
             var nid = ParseNode(nidStr);
             RenderState.SampleLiveDocumentAnimations(state);
+
+            // An element the pending mutations cannot give a box has offset metrics of zero
+            // whatever else they change; see PreparedRender.TryRetainedOffsetParent.
+            if (state.Dom is { } pendingDom
+                && RenderState.PreparedWithPendingMutations(state) is { } retained
+                && retained.TryRetainedOffsetParent(pendingDom, state.PendingStyleMutations, nid, out var hasBox, out _)
+                && !hasBox)
+            {
+                return string.Empty;
+            }
+
             // A geometry consumer, like op_layout_geometry and op_layout_metrics: offset* read
             // only box rects, so a newer animation sample whose effects are paint-only (opacity,
             // color) leaves them exact. Through EnsurePreparedRender every offsetWidth read in a
@@ -482,6 +498,55 @@ public static class RenderOps
             sb.Append(",\"height\":").Append(SerdeJson.NumberF32(offset.Height));
             sb.Append('}');
             return sb.ToString();
+        },
+        string.Empty);
+
+    /// <summary>
+    /// <c>op_layout_offset_parent</c>. CSSOM View's <c>offsetParent</c> alone:
+    /// <c>{"parent":nid|null}</c>, or the empty string when the node has no box.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-js (see <see cref="OpLayoutOffset"/>). Split from
+    /// <c>op_layout_offset</c> because it depends on computed styles only, so it can be answered
+    /// from the prepared render while mutations that provably leave the element's styles and
+    /// ancestors alone are still pending (<see cref="PreparedRender.TryRetainedOffsetParent"/>),
+    /// where the offsets need the layout those mutations produce.
+    /// </remarks>
+    public static string OpLayoutOffsetParent(PocketCalculatorState state, string nidStr) => OpGuard.Run(
+        "op_layout_offset_parent",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            var nid = ParseNode(nidStr);
+            RenderState.SampleLiveDocumentAnimations(state);
+            if (state.Dom is not { } dom)
+            {
+                return string.Empty;
+            }
+
+            bool hasBox;
+            NodeId? parent;
+            if (RenderState.PreparedWithPendingMutations(state) is { } retained
+                && retained.TryRetainedOffsetParent(dom, state.PendingStyleMutations, nid, out hasBox, out parent))
+            {
+                // Answered without a layout.
+            }
+            else if (RenderState.EnsurePreparedGeometry(state)?.OffsetMetrics(dom, nid) is { } offset)
+            {
+                hasBox = true;
+                parent = offset.Parent;
+            }
+            else
+            {
+                return string.Empty;
+            }
+
+            if (!hasBox)
+            {
+                return string.Empty;
+            }
+
+            return parent is { } found ? "{\"parent\":" + found.Value + "}" : "{\"parent\":null}";
         },
         string.Empty);
 
@@ -529,6 +594,95 @@ public static class RenderOps
     /// </summary>
     public static string OpComputedStylePseudo(PocketCalculatorState state, string nidStr, string pseudo) =>
         ComputedStyleSnapshot(state, nidStr, pseudo, "op_computed_style_pseudo");
+
+    /// <summary>
+    /// <c>op_computed_style_static</c>. The layout-independent part of the
+    /// <c>op_computed_style</c> snapshot, answered without restyling or laying out the pending
+    /// mutations when they cannot change it: <c>[{...}, [omitted names]]</c>, or the empty string
+    /// when getComputedStyle() has to take <c>op_computed_style</c>.
+    /// </summary>
+    /// <remarks>
+    /// Additive, like <c>op_computed_style_pseudo</c>: crates/obscura-js has no such op, and its
+    /// getComputedStyle() prepares the whole render for every snapshot. The omitted names are the
+    /// used values (size, insets, margins, padding, transform, grid tracks); bootstrap.js asks
+    /// <c>op_computed_style</c> when page script reads one of them. See
+    /// <see cref="PreparedRender.TryRetainedComputedStyle"/>.
+    /// </remarks>
+    public static string OpComputedStyleStatic(PocketCalculatorState state, string nidStr) => OpGuard.Run(
+        "op_computed_style_static",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            var nid = ParseNode(nidStr);
+            RenderState.SampleLiveDocumentAnimations(state);
+            if (state.Dom is not { } dom
+                || RenderState.PreparedForStaticStyle(state, out var sampleAdvanced) is not { } prepared)
+            {
+                return string.Empty;
+            }
+
+            HashSet<NodeId>? waapi = null;
+            var timeline = state.AnimationTimeline;
+            if (prepared.TryRetainedComputedStyle(
+                    dom,
+                    state.PendingStyleMutations,
+                    nid,
+                    sampleAdvanced,
+                    node => (waapi ??= timeline.WaapiNodes()).Contains(node),
+                    state.ActivityGeneration,
+                    out var omitted) is not { } snapshot)
+            {
+                return string.Empty;
+            }
+
+            var custom = prepared.ComputedCustomProperties(nid);
+            var sb = new StringBuilder(4096);
+            sb.Append("[{");
+            var first = true;
+            foreach (var (name, value) in snapshot)
+            {
+                if (!first)
+                {
+                    sb.Append(',');
+                }
+
+                first = false;
+                SerdeJson.AppendString(sb, name);
+                sb.Append(':');
+                SerdeJson.AppendString(sb, value);
+            }
+
+            if (custom is not null)
+            {
+                foreach (var (name, value) in custom)
+                {
+                    if (!first)
+                    {
+                        sb.Append(',');
+                    }
+
+                    first = false;
+                    SerdeJson.AppendString(sb, name);
+                    sb.Append(':');
+                    SerdeJson.AppendString(sb, value);
+                }
+            }
+
+            sb.Append("},[");
+            for (var i = 0; i < omitted.Length; i++)
+            {
+                if (i != 0)
+                {
+                    sb.Append(',');
+                }
+
+                SerdeJson.AppendString(sb, omitted[i]);
+            }
+
+            sb.Append("]]");
+            return sb.ToString();
+        },
+        string.Empty);
 
     /// <summary>
     /// <c>op_inner_text</c>. The <c>innerText</c> of a rendered element as a JSON string, or the
