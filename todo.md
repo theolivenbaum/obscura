@@ -2474,6 +2474,11 @@ them there. Measured: 6 of 12 runs of
 `ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop` before, 13 of 14 and
 then 12 of 12 after.
 
+Since "Op promises settle on the page's event loop" (below), the tail itself runs on the page's
+loop (`IsolateLock.RunOnPageAsync`), as the reference's reaction does, and so do
+`op_load_stylesheet`'s and `op_fetch_url`'s. The gate and the cache lock stay (the renderer
+cache is still seeded from transport threads by host loads), now uncontended by the op tails.
+
 ### A dynamic script load is restarted after a watchdog termination
 
 DEVIATION from `crates/obscura-js` and its `bootstrap.js`, which lose the load the same way and
@@ -2501,6 +2506,11 @@ stranded without the redrive). Page promise chains lost to the same termination 
 recovered, and an op whose delivery was cut short stays counted in the async-op tracker, so a
 settle waits out its budget after one; what makes the page task run 5 s at all is the forced
 layout cost (`clientWidth` ~55 ms a read on nvidia.com), which is the open layout work.
+
+Op results are no longer delivered inside whatever script is running: they are queued for the
+event loop and run as tasks of their own, and not while a termination is pending (see "Op
+promises settle on the page's event loop"). A delivery can still be cut short by a watchdog that
+fires during it, so the redrive stays.
 
 ### A frame realm's script runs under the task watchdog
 
@@ -6738,6 +6748,85 @@ image reactions append nodes failed 5 of 327 back-to-back captures, 0 of 1,356 a
 host-side readers (CDP DOM/geometry handlers outside a capture) do not take it yet. Pinned by
 `IsolateLockTests`.
 
+Since op promises settle on the page's event loop (next entry), nothing of the engine's own
+enters the isolate from a pool thread any more: the reactions and the op tails above run on the
+page's loop, between tasks, so the lock is uncontended in the engine's own use. It is kept where
+it is (captures, parser steps, the render-resource service step) because it costs a reentrant
+`Locker` on the thread that already owns the isolate, and an embedder can still call into the
+runtime from a thread of its own while a capture runs.
+
+### Op promises settle on the page's event loop
+
+DEVIATION from nothing in `crates/obscura-js` (deno_core resolves every op inside
+`poll_event_loop`, on the isolate's thread); this is the port reaching that shape. ClearScript
+turns a `Task`-returning op into a promise with `task.ContinueWith(resolve,
+ExecuteSynchronously, scheduler)`, and without a synchronization context the scheduler is the
+default one, so the promise was resolved on whichever pool thread completed the op. Resolving it
+enters V8 and needs the isolate lock, so while page script ran every completing op parked a pool
+thread on that lock; and the page thread itself waited on the network inside script (a module
+graph's static imports, fetched synchronously by ClearScript's loader), whose continuations then
+found no pool thread: GitHub's home page took 12 s for one module instead of 0.3 s. The previous
+answer was `ThreadPool.SetMinThreads(64)` for the whole process, from library code.
+
+Now (`Ops.OpCompletionContext`, `AsyncOpBinding`, `PocketCalculatorJsRuntime.PumpTick`):
+
+- every realm engine is created with `V8ScriptEngineFlags.UseSynchronizationContexts`, and the
+  async-op shim makes the runtime's `OpCompletionContext` current while the op is called, which
+  is where ClearScript captures `TaskScheduler.FromCurrentSynchronizationContext()`. The
+  resolution is posted to that queue; nothing runs inline and nothing is posted back from it;
+- each event-loop turn runs the completions queued when it started, one checkpoint after each,
+  ahead of posted tasks and timers (deno_core resolves ready ops before its macrotasks), yields to
+  a waiting CDP command between them, and skips them while a watchdog termination is pending (a
+  resolution run then would be swallowed inside ClearScript's continuation and the promise lost);
+- a completion wakes a parked loop (`ParkAsync`, the parser's `WaitAsync`), so op results no
+  longer wait out the 10-50 ms poll; queued completions count as pending work;
+- the op tails that write page state after their `await` (`op_fetch_url`'s stored bodies and
+  network events, `op_load_image_metadata`, `op_load_stylesheet`) run on the same queue
+  (`IsolateLock.RunOnPageAsync`). `op_fetch_url`'s tail used to run on pool threads in parallel:
+  64 fetches finishing together corrupted the stored-body queue ("Operations that change
+  non-concurrent collections must have exclusive access"). The fetch's concurrency slot is
+  released before the tail, so the next request does not wait for the loop;
+- a disposed runtime drops its queue (host tails queued there are cancelled, so their `finally`
+  blocks run);
+- the `SetMinThreads(64)` floor is gone.
+
+Module graphs are fetched before they are evaluated (`PocketCalculatorModuleLoader.PrefetchGraphAsync`,
+`ScriptDeclarations.ModuleRequests`), as Chromium does: `PrepareModuleAsync` and
+`PrepareInlineModuleAsync` fetch the whole static graph concurrently (six module fetches at a
+time, Chromium's per-host cap) within the prepare budget, resolving through the import map, so
+the evaluation's synchronous loads read the loader's cache. A dynamic module script prefetches
+through `op_prefetch_module_graph` (bootstrap.js, port addition) before its `import()`. Every
+module that loads starts its own static dependencies loading, so a page's own `import()`, the one
+load still made synchronously inside script with the isolate held, fetches its graph
+concurrently instead of one module at a time; that wait observes the script deadline
+(`BlockingLoadCancellation`) and runs with no synchronization context. A failed prefetch fails
+the evaluation with its own error, once, without a second request. Rust's deno_core
+(`RecursiveModuleLoad`) does the same before instantiating; ClearScript offers no hook for it.
+
+The other blocking waits: `importScripts` still blocks (spec-blocking; the worker is emulated on
+the page thread, so the page isolate is held for its fetch; no own worker isolate is ported), now
+with no synchronization context; `Page.TakePrewarmedRuntime` takes the prewarm through a `Lazy`
+and creates the runtime inline when no pool thread has started it, instead of blocking on the
+pool; the CDP TLS replay stream reads synchronously instead of blocking on `ReadAsync`;
+`ImageAgent.Get` (sync, with retry sleeps) is off the page path, since any page with a transport
+makes its renderer cache-only. A search for `.Result`, `.Wait()`, `GetAwaiter().GetResult()` and
+`Thread.Sleep` in `dotnet/src` finds nothing else on a page path: the rest are guarded by
+`IsCompleted`, or run on the watchdog, hang-escalation, accept and hard-deadline threads.
+
+Measured (4 cores, pool at its default minimum): `OpCompletionStarvationTests` (64 fetches and
+64 op_sleeps settling while an 8-deep module chain loads at 60 ms a module) evaluate the static
+graph in 0.58 s and the in-script dynamic import in 0.49 s; with the context and the
+prefetch switched off, 30 s (the budget) and 25 s. Live, interleaved with the base build through
+`serve --proxy` and Playwright: github.com loads in 3.9-4.0 s with 24-28 threads (base 5.7-7.2 s,
+48-56 threads); reddit.com 5.8-9.0 s (12.3-14.9 s), nvidia.com 14.3-14.9 s (16.6-18.5 s),
+youtube.com 7.6-8.3 s (8.5-8.6 s), msn.com 16.9-19.2 s (16.6 s, 58-68 threads; 26-28 now),
+grammarly.com 14.0-14.1 s (13.4-15.3 s), cloudflare.com 14.1-20.3 s (21.6-25.6 s); element
+counts and page errors unchanged. A local 15,000-element page with 30 scripts, four 21-module
+graphs and 60 fetches behind 40 ms latency: 2.3-2.6 s (base 4.9-5.1 s); with no latency
+1.46-1.60 s (base 1.33-1.66 s). Pinned by `OpCompletionContextTests`,
+`OpCompletionStarvationTests`, `ModuleGraphLoadTests.APrefetched...`/`APrefetchFailure...`/
+`AnInlineModuleGraph...` and `ModuleRequestsAreTheStaticImportAndExportFromSpecifiers` (Js).
+
 ### An autonomous CDP turn yields to a waiting command between tasks
 
 `RunAutonomousEventLoopTurn` in Rust runs every posted task and due timer before the
@@ -6803,10 +6892,11 @@ The navigation now follows the HTML parser's script handling as Chromium 141 doe
   that fetch.
 - **The page's runtime is created while its response is fetched** (`Page.PrewarmRuntime`; a V8
   isolate and bootstrap.js take ~90 ms, which otherwise delayed the first script by as much;
-  `POCKETCALCULATOR_NO_RUNTIME_PREWARM=1` turns it off), and the thread pool keeps 64 workers:
-  op settlements wait on the isolate lock on pool threads, and with GitHub's preload links in
-  flight they parked every pool thread while a module graph fetched its dependencies
-  synchronously, one module taking 12 s instead of 0.3 s.
+  `POCKETCALCULATOR_NO_RUNTIME_PREWARM=1` turns it off). The thread pool used to keep 64
+  workers here, because op settlements waited on the isolate lock on pool threads and with
+  GitHub's preload links in flight they parked every pool thread while a module graph fetched
+  its dependencies synchronously (one module 12 s instead of 0.3 s); that floor is gone, see
+  "Op promises settle on the page's event loop".
 - **No render-resource warm-up before scripts.** The old engine waited up to 1 s for images and
   fonts before running any script; they now start loading when parsing ends and scripts do not
   wait for them, as in Chromium.
