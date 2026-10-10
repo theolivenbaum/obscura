@@ -3516,6 +3516,26 @@ roots a pass did not see are dropped with it. reddit.com (`fetch`, layout profil
 the `sheets` phase of a retained pass 12-47ms -> ~1ms; summed over the load, 1.75-2.05s
 (4eedc89) -> 1.21-1.31s, the rest being the cold parses of new sheets.
 
+### An inline context keeps the sizes it has measured
+
+DEVIATION from `crates/obscura-render/src/inline.rs`, which lays a paragraph out again for every
+measurement. Grid, flex and table sizing ask one inline context for its min-content, max-content
+and final sizes over and over, and an item kept only the last layout (`ShapedFor`), so alternating
+questions laid it out every time. `TextEngine.MeasureTextWithWrap` keeps the last six answers per
+item (`InlineItem.MeasuredSizes`, keyed by the width's bits and the wrap); `ForgetLayout` drops
+them wherever the item's content changes (an atomic inline's size, a list marker's indent), and a
+carried-over item keeps them into the next pass. Items with atomic inlines or anchored floats are
+measured every time, since their placement reads the buffer the last measurement left. Exact:
+`MeasureMemoTests` lays the line-carry pages and two intrinsic-sizing pages out with and without
+it, fresh and retained. `POCKETCALCULATOR_NO_MEASURE_MEMO=1` turns it off. 2,000 grid items, cold
+layout, interleaved on one binary, two runs: taffy 1017-1125ms -> 941-1021ms.
+
+Not done: the min-content size of a paragraph still comes from a line layout at width 0 (one word
+a line). A measurement returns the height as well, and taffy caches the pair, so the width cannot
+come from the shaped words alone unless the height of those lines does too; on the 2,000-item
+page that layout is 80% of the cold pass, most of it allocating the `LayoutGlyph`s of lines that
+are measured and dropped.
+
 ### A split paragraph's lines are taken from the line they were cut from
 
 DEVIATION from `crates/obscura-render/src/inline.rs` (`shape_with_text_indent`), which shapes and

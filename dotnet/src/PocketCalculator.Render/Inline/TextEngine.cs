@@ -1140,10 +1140,50 @@ public sealed partial class TextEngine : IDisposable
     private (float Width, float Height) MeasureTextWithWrap(int index, float? width, Wrap wrap)
     {
         InlineItem item = _items[index];
+
+        // DEVIATION from crates/obscura-render/src/inline.rs, which lays the paragraph out again
+        // for every measurement. The size is a function of the item, the width and the wrap
+        // (ShapeWithTextIndent), and taffy asks one item for its min-content, max-content and
+        // final sizes over and over as flex, grid and table sizing go round: each answer the
+        // item has given is kept, so a question asked again lays nothing out. The buffer stays
+        // as the last layout left it, which only float anchors and atomic inlines read after a
+        // measurement (their items are measured afresh every time), and Finalize lays the item
+        // out at its final width itself. A layout carried over to the next pass keeps them.
+        long bits = width is { } asked ? BitConverter.SingleToInt32Bits(asked) : -1L;
+        bool memoizable = MeasureMemoEnabled && item.Atomics is null && item.FloatAnchors is null;
+        if (memoizable && item.MeasuredSizes is { } known)
+        {
+            foreach ((long knownBits, Wrap knownWrap, float knownWidth, float knownHeight) in known)
+            {
+                if (knownBits == bits && knownWrap == wrap)
+                {
+                    return (knownWidth, knownHeight);
+                }
+            }
+        }
+
         ShapeWithTextIndent(item, width, wrap);
         (float shapedWidth, float height, bool clamped) = InlineGeometry.BufferSize(item);
-        return (shapedWidth, clamped ? height : F32.Max(height, item.ForcedMinHeight));
+        (float Width, float Height) size = (shapedWidth, clamped ? height : F32.Max(height, item.ForcedMinHeight));
+        if (memoizable)
+        {
+            (long, Wrap, float, float)[] previous = item.MeasuredSizes ?? [];
+            int kept = Math.Min(previous.Length, MeasureMemoSlots - 1);
+            var next = new (long, Wrap, float, float)[kept + 1];
+            next[0] = (bits, wrap, size.Width, size.Height);
+            Array.Copy(previous, 0, next, 1, kept);
+            item.MeasuredSizes = next;
+        }
+
+        return size;
     }
+
+    /// <summary>How many sizes an item keeps (<see cref="InlineItem.MeasuredSizes"/>).</summary>
+    private const int MeasureMemoSlots = 6;
+
+    /// <summary>Kill switch for an A/B on one binary: <c>POCKETCALCULATOR_NO_MEASURE_MEMO=1</c>.</summary>
+    internal static bool MeasureMemoEnabled { get; set; } =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_NO_MEASURE_MEMO") != "1";
 
     /// <summary>
     /// Exact max-content size for one fallback word item.

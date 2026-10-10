@@ -60,7 +60,7 @@ public sealed partial class TextEngine
 
         if (changed)
         {
-            item.ShapedFor = null;
+            item.ForgetLayout();
         }
     }
 

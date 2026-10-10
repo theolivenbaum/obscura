@@ -180,6 +180,21 @@ public sealed class InlineItem
     internal (long WidthBits, Wrap Wrap)? ShapedFor { get; set; }
 
     /// <summary>
+    /// The sizes this item last measured to, by width (its bits, or <c>-1</c> for none) and
+    /// wrap, most recent first; see <c>TextEngine.MeasureTextWithWrap</c>. Not in
+    /// crates/obscura-render. Cleared by <see cref="ForgetLayout"/> whenever what the item lays
+    /// out changes.
+    /// </summary>
+    internal (long WidthBits, Wrap Wrap, float Width, float Height)[]? MeasuredSizes { get; set; }
+
+    /// <summary>Drop what was laid out or measured from the item as it was.</summary>
+    internal void ForgetLayout()
+    {
+        ShapedFor = null;
+        MeasuredSizes = null;
+    }
+
+    /// <summary>
     /// The float exclusions of the last final layout of this IFC, relative to its content box,
     /// which <see cref="TextEngine.Finalize"/> lays the lines out around again. Null when no
     /// float shortens its line boxes.
