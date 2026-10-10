@@ -11582,6 +11582,9 @@ globalThis.matchMedia = _markNative(function matchMedia(q) {
 // getComputedStyle() repeatedly on the same few roots; rebuilding and parsing
 // several hundred properties for every wrapper dominated real-page startup.
 const _computedStyleSnapshotCache = _private(new WeakMap());
+// The names op_computed_style_static has left out so far (used values). A read of one of them
+// goes straight to the full snapshot rather than asking for the static one first.
+const _computedStyleLayoutNames = Object.create(null);
 globalThis.getComputedStyle = (el, pseudoElt) => {
   if (!el) el = document.body || {};
   const style = el?.style || el?._style || new CSSStyleDeclaration();
@@ -11608,16 +11611,43 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
   const snapshotKey = pseudo || '';
   let snapshot = perPseudo.get(snapshotKey);
   if (!snapshot) {
-    snapshot = { rendered: null, epoch: -1, names: [] };
+    snapshot = { rendered: null, epoch: -1, names: [], omitted: null };
     perPseudo.set(snapshotKey, snapshot);
   }
-  const refreshRendered = () => {
+  // DEVIATION from crates/obscura-js, whose snapshot always comes from op_computed_style, which
+  // restyles and lays out every pending mutation first. A read of a property whose value does
+  // not depend on layout first asks op_computed_style_static, which answers from the prepared
+  // render when the pending mutations cannot change the element's style; `omitted` then names
+  // the used values (size, insets, margins, padding, transform, grid tracks) that still need
+  // the full snapshot. Ad scripts poll display/position this way while the page mutates.
+  const refreshRendered = (needsLayout) => {
     const hasRunningAnimation = typeof _animationsForTarget === 'function'
       && _animationsForTarget(el).some(animation => animation.playState === 'running');
-    if (snapshot.epoch === _domMutationEpoch && !hasRunningAnimation) return;
+    if (snapshot.epoch === _domMutationEpoch && !hasRunningAnimation
+        && (!needsLayout || !snapshot.omitted)) return;
     snapshot.epoch = _domMutationEpoch;
     snapshot.rendered = null;
-    if (el?._nid != null) {
+    snapshot.omitted = null;
+    if (el?._nid != null && !pseudo && !needsLayout && !hasRunningAnimation) {
+      const staticOp = __obscuraCore.ops.op_computed_style_static;
+      if (typeof staticOp === 'function') {
+        try {
+          const raw = staticOp(String(el._nid | 0));
+          if (raw) {
+            const parsed = _JSONparse(raw);
+            const names = parsed[1];
+            const omitted = Object.create(null);
+            for (let i = 0; i < names.length; i++) {
+              omitted[names[i]] = true;
+              _computedStyleLayoutNames[names[i]] = true;
+            }
+            snapshot.rendered = parsed[0];
+            snapshot.omitted = omitted;
+          }
+        } catch (e) {}
+      }
+    }
+    if (!snapshot.rendered && el?._nid != null) {
       // op_computed_style keeps its one-argument shape; the pseudo-element snapshot is a
       // separate op so that op's payload stays byte-identical.
       const op = pseudo
@@ -11690,13 +11720,14 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
 
   const lookup = (rawProp) => {
     if (typeof rawProp !== 'string') return '';
-    refreshRendered();
     let kebab = rawProp.replace(/([A-Z])/g, '-$1').toLowerCase();
     // CSSOM camelCase vendor properties omit the punctuation from their JS
     // spelling (`webkitLineClamp`) but computed-property names retain it
     // (`-webkit-line-clamp`). Normalize the prefix once for every WebKit
     // property instead of adding per-property aliases to the native snapshot.
     if (kebab.startsWith('webkit-')) kebab = '-' + kebab;
+    refreshRendered(_computedStyleLayoutNames[kebab] === true);
+    if (snapshot.omitted && snapshot.omitted[kebab] === true) refreshRendered(true);
     if (snapshot.rendered && _objectHasOwn(snapshot.rendered, kebab))
       return snapshot.rendered[kebab];
     // A pseudo-element has neither an inline style nor a box of the element's to fall back on,
@@ -11727,11 +11758,11 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
       if (prop === 'getPropertyValue') return (name) => lookup(name);
       if (prop === 'getPropertyPriority') return () => '';
       if (prop === 'item') return (i) => {
-        refreshRendered();
+        refreshRendered(true);
         return snapshot.names[i | 0] || '';
       };
       if (prop === 'length') {
-        refreshRendered();
+        refreshRendered(true);
         return snapshot.names.length;
       }
       if (prop === 'cssText') return '';

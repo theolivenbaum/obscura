@@ -2270,7 +2270,9 @@ Values measured in Chromium 141 (headless, Playwright); facts in
   commands: the Amplitude experiment script never ran and the forecast was never fetched
   (998 elements against Chromium's 2115; 1302 after). The pump now stands down for 1 s and
   resumes (`ServerTests.AutonomousPumpResumesAfterRepeatedOverrunningTasks`). The restyle
-  cost itself is the open problem: `op_computed_style` spent 7 s over 1,100 calls there.
+  cost itself was the open problem: `op_computed_style` spent 7 s over 1,100 calls there. Most
+  of those calls are now answered without a restyle (see "getComputedStyle answers what layout
+  cannot change before the pending mutations are restyled").
 
 ### A linked stylesheet leaves no element in the DOM
 
@@ -3399,11 +3401,76 @@ the roots it added whole, and a root inside one adds nothing. Same plans, now 40
 batch; `fetch --eval` element count 568 -> 985 (Chromium 1302). Correctness is the differential
 suite's (unchanged plans).
 
-Open: weather.com's ~28 passes are not planner-bound. Most retained passes fall back to a whole-
-document restyle on `restyleAnimationWide` (animation damage reaching half the style graph) and
-re-run container-query iterations, 100-440ms of cascade and ~250ms of taffy each, many forced by
-`getComputedStyle` (`op_computed_style` always prepares the whole render). A style-only prepare for
-`getComputedStyle` of non-layout properties is not done.
+Open: weather.com's passes are not planner-bound. Many retained passes fall back to a whole-
+document restyle on `restyleAnimationWide` (animation damage reaching half the style graph), and
+every retained pass re-cascades each element a container-query rule selects
+(`AddContainerQueryResetScopes`, about half the document there) and re-runs the container-query
+iterations without carrying layout over, 100-300ms of cascade and 50-300ms of taffy each.
+`getComputedStyle` of a layout-independent property no longer forces one (see the next section).
+
+### getComputedStyle answers what layout cannot change before the pending mutations are restyled
+
+DEVIATION from `crates/obscura-js` and `crates/obscura-render`, whose `getComputedStyle()` prepares
+the whole render (restyle and layout of every pending mutation) for its snapshot. A computed
+style is a function of the rules that match the element and of its parent's computed style, so
+when the retained planner's own invalidation (`RetainedStylePlanner.OwnStyleDamage`, without the
+context chains it re-cascades) reaches neither the element nor any ancestor, the next restyle
+gives the element the style the prepared render already has. `PreparedRender.TryRetainedComputedStyle`
+answers the snapshot from there, without the used values (`width`, `height`, the insets, margins,
+padding, `transform`, `transform-origin`, and a grid container's track lists), and the new
+`op_computed_style_static` hands bootstrap.js that partial snapshot with the names it left out;
+reading one of those (or `length`/`item()`) takes `op_computed_style` as before, and the names
+are remembered so a later read of one goes there directly. It fails closed for container-query
+rules matching on the chain, table parts (collapsed borders and cell growth come from
+neighbours), shadow hosts or shadow trees on the chain, and pending resource loads (font metrics
+resolve `ch`/`ex`). A document timeline that moved on since the render was sampled is answered
+only for an element whose chain has no running CSS animation or Web Animation; a current render
+needs no shortcut. The planner result is memoized per pending batch (`ActivityGeneration` and the
+pending count). Ad scripts poll `display`/`position` of their slots while the page mutates:
+weather.com made ~1,300 such reads during load, each a full restyle and layout before.
+`POCKETCALCULATOR_NO_RETAINED_READS=1` turns it off with the `offsetParent` shortcut.
+`IncrementalLayoutDifferentialTests` checks every answer the previous render gives, at every
+step, against the full snapshot after a full layout (every answered value equal, the omitted
+names exactly the rest), on the eight fixtures and a new container-query fixture (soaked at 40
+seeds); `AComputedStyleReadIsAnsweredWithoutARestyleWhenNothingOnItsChainChanges` (Render) and
+`LayoutReadCacheTests.ComputedStyleReadsAfterMutationsElsewhereAreAnsweredBeforeTheRestyle` (Js,
+values from Chromium 141) pin it.
+
+### The retained planner learns a batch's sibling lists once
+
+DEVIATION from `crates/obscura-render/src/dom.rs`, which, for every insertion in a batch, lists
+the parent's element children, finds the node among them, counts the batch's insertions into
+that parent, and filters the stylesheet's structural invalidations for each state and each
+candidate sibling; and which counts every child of a parent for `:empty` before looking whether
+any `:empty` rule can match it. Appending 200 items one by one to a 2,000-item list, each
+followed by a read, planned in O(batch x list) per plan: 30 ms an append. One `Plan` now lists
+each parent's children and their positions once (`StructuralPlanScratch`), the boundary states
+(`first-child` and the like) are scoped once per parent that gained more than one element, the
+structural invalidations are grouped by state once per stylesheet
+(`InvalidationMap.OwnStructuralInvalidations`), and `:empty` looks at the rules before the
+children. Same plans. Pinned by `PlanningAppendsToALongListDoesNotRevisitTheList`.
+
+### `:has()` anchors and structural subjects are keyed by their context
+
+DEVIATION from `crates/obscura-render` (`RelationalAnchorKey` of the compound alone, and every
+candidate tried for every `:has()` rule), which over-invalidated in three ways that together made
+every insertion on weather.com restyle the whole document:
+
+- A `:has()` or structural pseudo-class inside `:not()`, `:is()` or `:where()` lost the key of the
+  compound holding it: `.hide-empty:not(:has(> *))` was an unkeyed anchor with an unkeyed
+  subject, so any insertion anywhere restyled the subtree of each ancestor. The argument's
+  subject compound is the element the enclosing compound matches, so it carries that key too.
+- A `:has()` argument without `+` or `~` looks only below its anchor, so only ancestors of the
+  change are anchor candidates for it; the previous siblings along the way are kept for
+  arguments with a sibling combinator (`RelationalInvalidation.SiblingRelative`).
+- A structural pseudo-class in a compound that a child or descendant combinator joins to a keyed
+  compound (`.list > :last-child`) can only match below an element with that key
+  (`StructuralInvalidation.AncestorKey`); an `<iframe>` appended to `<html>` restyled `<body>`
+  and everything in it for tailwind's `[&>*:last-child]` rules.
+
+Pinned by `AnInsertionReachesOnlyTheStructuralAndHasRulesWhoseKeysItCanMeet`; correctness is the
+differential suite's.
+
 
 ### A document with shadow roots keeps its retained styles
 

@@ -596,6 +596,95 @@ public static class RenderOps
         ComputedStyleSnapshot(state, nidStr, pseudo, "op_computed_style_pseudo");
 
     /// <summary>
+    /// <c>op_computed_style_static</c>. The layout-independent part of the
+    /// <c>op_computed_style</c> snapshot, answered without restyling or laying out the pending
+    /// mutations when they cannot change it: <c>[{...}, [omitted names]]</c>, or the empty string
+    /// when getComputedStyle() has to take <c>op_computed_style</c>.
+    /// </summary>
+    /// <remarks>
+    /// Additive, like <c>op_computed_style_pseudo</c>: crates/obscura-js has no such op, and its
+    /// getComputedStyle() prepares the whole render for every snapshot. The omitted names are the
+    /// used values (size, insets, margins, padding, transform, grid tracks); bootstrap.js asks
+    /// <c>op_computed_style</c> when page script reads one of them. See
+    /// <see cref="PreparedRender.TryRetainedComputedStyle"/>.
+    /// </remarks>
+    public static string OpComputedStyleStatic(PocketCalculatorState state, string nidStr) => OpGuard.Run(
+        "op_computed_style_static",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            var nid = ParseNode(nidStr);
+            RenderState.SampleLiveDocumentAnimations(state);
+            if (state.Dom is not { } dom
+                || RenderState.PreparedForStaticStyle(state, out var sampleAdvanced) is not { } prepared)
+            {
+                return string.Empty;
+            }
+
+            HashSet<NodeId>? waapi = null;
+            var timeline = state.AnimationTimeline;
+            if (prepared.TryRetainedComputedStyle(
+                    dom,
+                    state.PendingStyleMutations,
+                    nid,
+                    sampleAdvanced,
+                    node => (waapi ??= timeline.WaapiNodes()).Contains(node),
+                    state.ActivityGeneration,
+                    out var omitted) is not { } snapshot)
+            {
+                return string.Empty;
+            }
+
+            var custom = prepared.ComputedCustomProperties(nid);
+            var sb = new StringBuilder(4096);
+            sb.Append("[{");
+            var first = true;
+            foreach (var (name, value) in snapshot)
+            {
+                if (!first)
+                {
+                    sb.Append(',');
+                }
+
+                first = false;
+                SerdeJson.AppendString(sb, name);
+                sb.Append(':');
+                SerdeJson.AppendString(sb, value);
+            }
+
+            if (custom is not null)
+            {
+                foreach (var (name, value) in custom)
+                {
+                    if (!first)
+                    {
+                        sb.Append(',');
+                    }
+
+                    first = false;
+                    SerdeJson.AppendString(sb, name);
+                    sb.Append(':');
+                    SerdeJson.AppendString(sb, value);
+                }
+            }
+
+            sb.Append("},[");
+            for (var i = 0; i < omitted.Length; i++)
+            {
+                if (i != 0)
+                {
+                    sb.Append(',');
+                }
+
+                SerdeJson.AppendString(sb, omitted[i]);
+            }
+
+            sb.Append("]]");
+            return sb.ToString();
+        },
+        string.Empty);
+
+    /// <summary>
     /// <c>op_inner_text</c>. The <c>innerText</c> of a rendered element as a JSON string, or the
     /// empty string when the script path has to answer (no render, an unstyled element, a root
     /// that is not rendered).

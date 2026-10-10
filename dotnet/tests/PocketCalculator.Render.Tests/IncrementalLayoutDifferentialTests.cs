@@ -207,6 +207,19 @@ public class IncrementalLayoutDifferentialTests
         </div>
         </body></html>
         """,
+
+        // Container queries: styles that depend on a container's size, beside ones that do not.
+        """
+        <!doctype html><html><head><style>{CSS}
+        .cq{container-type:inline-size}
+        @container (min-width:250px){.cqi{color:#a00;padding-left:6px}.cqi b{font-size:19px}}
+        @container (max-width:249px){.cqi{display:flex;gap:2px}}
+        </style></head><body>
+        <div id=cq1 class=cq><p id=q1 class=cqi>Inside <b id=qb>bold</b> container text</p><p id=q2>plain <i>words</i></p></div>
+        <div id=cq2 class="cq b" style="width:200px"><p id=q3 class=cqi>narrow <b>x</b></p><div id=q4 class=a>box</div></div>
+        <p id=q5>outside the containers</p>
+        </body></html>
+        """,
     ];
 
     private static readonly string[] Classes =
@@ -495,6 +508,88 @@ public class IncrementalLayoutDifferentialTests
     /// every forced read, and each removal re-cascaded the document).
     /// </summary>
     [Fact]
+    public void AnInsertionReachesOnlyTheStructuralAndHasRulesWhoseKeysItCanMeet()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss
+            + " .hide-empty:not(:has(> *)){display:none} .list > :last-child{margin:0}"
+            + " .list :not(:first-child){color:red}</style></head><body><div id=wrap>"
+            + "<div id=he class=hide-empty></div><ul id=list class=list><li id=li1>a</li></ul><div id=big>");
+        for (int i = 0; i < 30; i++)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"<p id=p{i}>paragraph {i}</p>");
+        }
+
+        html.Append("</div></div></body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender previous = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+        Css.Stylesheet sheet = previous.Layout.DocumentSheet!;
+        NodeId wrap = tree.GetElementById("wrap")!.Value;
+        NodeId body = tree.GetNode(wrap)!.Parent!.Value;
+
+        HashSet<NodeId> Insert(string parentId, string tag, out NodeId node)
+        {
+            NodeId parent = tree.GetElementById(parentId)!.Value;
+            node = tree.NewNode(NodeData.Element(QualName.Html(tag)));
+            tree.AppendChild(parent, node);
+            List<RetainedStyleMutation> mutations = [RetainedStyleMutation.From(new TreeStyleMutation.Insert(node, null, parent))];
+            HashSet<NodeId> damage = RetainedStylePlanner.OwnStyleDamage(tree, sheet, mutations)!;
+            previous = RenderPaint.PrepareDomWithRetainedStyles(tree, Viewport, null, resources, [], cache, previous, mutations)!;
+            Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, previous));
+            return damage;
+        }
+
+        // A paragraph appended to an unkeyed container meets neither rule: the :has() anchor
+        // must be `.hide-empty` and the last child's parent `.list`.
+        HashSet<NodeId> paragraph = Insert("big", "p", out NodeId added);
+        Assert.Equal([added], paragraph);
+
+        // An item appended to the list makes the old last item lose `:last-child`.
+        HashSet<NodeId> item = Insert("list", "li", out NodeId li2);
+        Assert.Contains(tree.GetElementById("li1")!.Value, item);
+        Assert.Contains(li2, item);
+        Assert.DoesNotContain(body, item);
+        Assert.DoesNotContain(wrap, item);
+
+        // A child of the empty container changes its :has() state.
+        HashSet<NodeId> child = Insert("he", "span", out _);
+        Assert.Contains(tree.GetElementById("he")!.Value, child);
+        Assert.DoesNotContain(wrap, child);
+    }
+
+    [Fact]
+    public void PlanningAppendsToALongListDoesNotRevisitTheList()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss
+            + " li:last-child{margin:0} li:nth-child(odd){color:red}</style></head><body><ul id=list>");
+        for (int i = 0; i < 3000; i++)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"<li>item {i}</li>");
+        }
+
+        html.Append("</ul></body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        PreparedRender previous = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, new RenderResourceCache(), [], new StylesheetCache())!;
+        NodeId list = tree.GetElementById("list")!.Value;
+        List<RetainedStyleMutation> mutations = [];
+        for (int i = 0; i < 400; i++)
+        {
+            NodeId node = tree.NewNode(NodeData.Element(QualName.Html("li")));
+            tree.AppendChild(list, node);
+            mutations.Add(RetainedStyleMutation.From(new TreeStyleMutation.Insert(node, null, list)));
+        }
+
+        // Every insertion's candidates are the list's children, which the plan lists once; with
+        // two insertions or more every child is a boundary candidate, once.
+        System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
+        HashSet<NodeId> damage = RetainedStylePlanner.OwnStyleDamage(tree, previous.Layout.DocumentSheet!, mutations)!;
+        watch.Stop();
+        Assert.True(damage.Count >= 400);
+        Assert.True(watch.ElapsedMilliseconds < 2000, $"planned in {watch.ElapsedMilliseconds}ms");
+    }
+
+    [Fact]
     public void ARemovalReachesOnlyTheHasRulesItsSubtreeCanMatch()
     {
         StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss
@@ -672,6 +767,55 @@ public class IncrementalLayoutDifferentialTests
     /// box) and in a visible one (its positioned ancestor), and not for the inserted image.
     /// </summary>
     [Fact]
+    public void AComputedStyleReadIsAnsweredWithoutARestyleWhenNothingOnItsChainChanges()
+    {
+        string html = "<!doctype html><html><head><style>" + SharedCss
+            + " .cq{container-type:inline-size} @container (min-width:100px){.inq{color:red}}"
+            + " .slot{position:relative;display:flex;padding:5%}</style></head><body>"
+            + "<div id=ad class=slot><span id=adi>ad</span></div><ul id=list><li>one</li><li>two</li></ul>"
+            + "<div id=box class=cq><p id=inq class=inq>in</p><p id=plain>plain</p></div></body></html>";
+        DomTree tree = HtmlParsing.ParseHtml(html);
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender previous = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+        NodeId ad = tree.GetElementById("ad")!.Value;
+        NodeId list = tree.GetElementById("list")!.Value;
+
+        // Items appended to a list elsewhere cannot restyle the slot: its layout-independent
+        // style is answered from the render the appends have not reached, and agrees with the
+        // render that does reach them.
+        List<RetainedStyleMutation> mutations = [];
+        for (int i = 0; i < 40; i++)
+        {
+            NodeId item = tree.NewNode(NodeData.Element(QualName.Html("li")));
+            tree.AppendChild(list, item);
+            mutations.Add(RetainedStyleMutation.From(new TreeStyleMutation.Insert(item, null, list)));
+            Dictionary<string, string>? answered = previous.TryRetainedComputedStyle(
+                tree, mutations, ad, false, null, (ulong)i, out string[] omitted);
+            Assert.NotNull(answered);
+            Assert.Equal("flex", answered["display"]);
+            Assert.Equal("relative", answered["position"]);
+            Assert.False(answered.ContainsKey("padding-left"));
+            Assert.Contains("padding-left", omitted);
+            Assert.Contains("width", omitted);
+        }
+
+        // An element inside a query container whose rules a container query selects, and any
+        // element whose chain a pending mutation restyles, is left to the full snapshot.
+        Assert.Null(previous.TryRetainedComputedStyle(tree, mutations, tree.GetElementById("inq")!.Value, false, null, 100, out _));
+        Assert.NotNull(previous.TryRetainedComputedStyle(tree, mutations, tree.GetElementById("plain")!.Value, false, null, 100, out _));
+        tree.GetNode(ad)!.SetAttribute("class", "slot c");
+        mutations.Add(RetainedStyleMutation.From(new AttributeStyleMutation(ad, "class", "slot", "slot c")));
+        Assert.Null(previous.TryRetainedComputedStyle(tree, mutations, tree.GetElementById("adi")!.Value, false, null, 101, out _));
+
+        // A running animation on the chain keeps a later timeline sample from being answered.
+        previous = RenderPaint.PrepareDomWithRetainedStyles(tree, Viewport, null, resources, [], cache, previous, mutations)!;
+        Assert.Equal("18px", previous.ComputedStyle(tree.GetElementById("adi")!.Value)!["font-size"]);
+        Assert.NotNull(previous.TryRetainedComputedStyle(tree, [], ad, true, null, 102, out _));
+        Assert.Null(previous.TryRetainedComputedStyle(tree, [], ad, true, node => node == ad, 102, out _));
+    }
+
+    [Fact]
     public void AnOffsetParentReadIsAnsweredWithoutALayoutWhenNothingOnItsChainChanges()
     {
         StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss
@@ -825,6 +969,9 @@ public class IncrementalLayoutDifferentialTests
             // mutations are pending (PreparedRender.TryRetainedOffsetParent); checked against
             // the reference below.
             List<(NodeId Node, bool HasBox, NodeId? Parent)> retainedAnswers = [];
+            // And the layout-independent computed style it answers for the elements the pending
+            // mutations cannot restyle (PreparedRender.TryRetainedComputedStyle).
+            List<(NodeId Node, Dictionary<string, string> Style, Dictionary<string, string>? Custom, string[] Omitted)> retainedStyles = [];
             PreparedRender? retainedFrom = previous;
             if (previous is not null && !needsFull)
             {
@@ -833,6 +980,11 @@ public class IncrementalLayoutDifferentialTests
                     if (previous.TryRetainedOffsetParent(tree, mutations, element, out bool hasBox, out NodeId? parent))
                     {
                         retainedAnswers.Add((element, hasBox, parent));
+                    }
+
+                    if (previous.TryRetainedComputedStyle(tree, mutations, element, false, null, null, out string[] omitted) is { } style)
+                    {
+                        retainedStyles.Add((element, style, previous.ComputedCustomProperties(element), omitted));
                     }
                 }
             }
@@ -911,6 +1063,21 @@ public class IncrementalLayoutDifferentialTests
                 }
             }
 
+            foreach ((NodeId node, Dictionary<string, string> style, Dictionary<string, string>? custom, string[] omitted) in retainedStyles)
+            {
+                string? difference = ComputedStyleDifference(
+                    referenceRender.ComputedStyle(node),
+                    referenceRender.ComputedCustomProperties(node),
+                    style,
+                    custom,
+                    omitted);
+                if (difference is not null)
+                {
+                    Assert.Fail($"fixture {fixture} seed {seed} step {step}: #{node} {DescribeNode(tree, node)} computed style answered from "
+                        + $"the retained render differs from a full layout: {difference}\nmutations:\n{log}");
+                }
+            }
+
             if (!string.Equals(incremental, reference, StringComparison.Ordinal))
             {
                 if (Environment.GetEnvironmentVariable("POCKETCALCULATOR_DIFFERENTIAL_DUMP") is { } dumpRoot)
@@ -942,6 +1109,66 @@ public class IncrementalLayoutDifferentialTests
             previous = next;
         }
     }
+
+    /// <summary>
+    /// Where a layout-independent snapshot answered before a restyle disagrees with the full
+    /// snapshot after it, or null: every property it answers must have the full value, and the
+    /// properties it leaves out must be exactly the rest.
+    /// </summary>
+    private static string? ComputedStyleDifference(
+        Dictionary<string, string>? full,
+        Dictionary<string, string>? fullCustom,
+        Dictionary<string, string> retained,
+        Dictionary<string, string>? retainedCustom,
+        string[] omitted)
+    {
+        if (full is null)
+        {
+            return "a full layout gives it no style";
+        }
+
+        foreach ((string name, string value) in retained)
+        {
+            if (!full.TryGetValue(name, out string? expected))
+            {
+                return $"{name} is not in the full snapshot";
+            }
+
+            if (!string.Equals(value, expected, StringComparison.Ordinal))
+            {
+                return $"{name}: retained {value}, full {expected}";
+            }
+        }
+
+        foreach (string name in full.Keys)
+        {
+            if (!retained.ContainsKey(name) && Array.IndexOf(omitted, name) < 0)
+            {
+                return $"{name} is neither answered nor omitted";
+            }
+        }
+
+        foreach (string name in omitted)
+        {
+            if (retained.ContainsKey(name) || !full.ContainsKey(name))
+            {
+                return $"omitted {name} is answered or not in the full snapshot";
+            }
+        }
+
+        string Custom(Dictionary<string, string>? properties) =>
+            properties is null
+                ? ""
+                : string.Join(";", properties.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => pair.Key + "=" + pair.Value));
+        return Custom(fullCustom) == Custom(retainedCustom)
+            ? null
+            : $"custom properties: retained {Custom(retainedCustom)}, full {Custom(fullCustom)}";
+    }
+
+    private static string DescribeNode(DomTree tree, NodeId node) =>
+        tree.GetNode(node)?.AsElement() is { } element
+            ? element.Name.Local + (tree.GetNode(node)?.GetAttribute("id") is { } id ? "#" + id : "")
+            : "?";
 
     private static string FirstDifference(string expected, string actual)
     {

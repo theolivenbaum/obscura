@@ -103,6 +103,12 @@ public sealed record RelationalInvalidation
 
     public required bool SiblingSideEffect { get; init; }
 
+    /// <summary>
+    /// Whether an argument has a sibling combinator (<c>+</c> or <c>~</c>), so the anchor of a
+    /// change need not be its ancestor.
+    /// </summary>
+    internal bool SiblingRelative { get; init; } = true;
+
     public required bool StructuralSideEffect { get; init; }
 
     public required bool TextSideEffect { get; init; }
@@ -198,6 +204,12 @@ public sealed record StructuralInvalidation
 
     public required bool InsideRelational { get; init; }
 
+    /// <summary>
+    /// A key some ancestor of every subject must carry: the compound left of the subject's,
+    /// when a child or descendant combinator joins them (<c>.list > :last-child</c>), or null.
+    /// </summary>
+    internal RelationalSelectorKey? AncestorKey { get; init; }
+
     public bool SubjectMayMatch(ICssElementView node) => CssInvalidationKeys.KeyMayMatch(SubjectKey, node);
 }
 
@@ -292,6 +304,47 @@ public sealed class InvalidationMap
         _structuralInvalidations
             .Where(invalidation => string.Equals(invalidation.State, state, StringComparison.Ordinal))
             .ToList();
+
+    /// <summary>
+    /// The structural invalidations for <paramref name="state"/> that are not inside a
+    /// <c>:has()</c> argument, memoized: the retained planner asks for them once per candidate
+    /// sibling of every insertion and removal, and filtering the whole list each time made
+    /// planning a batch of appends to a long list quadratic.
+    /// </summary>
+    internal IReadOnlyList<StructuralInvalidation> OwnStructuralInvalidations(string state)
+    {
+        Dictionary<string, StructuralInvalidation[]> byState = _ownStructural ??= BuildOwnStructural();
+        return byState.TryGetValue(state, out StructuralInvalidation[]? found) ? found : [];
+    }
+
+    private Dictionary<string, StructuralInvalidation[]> BuildOwnStructural()
+    {
+        Dictionary<string, List<StructuralInvalidation>> grouped = new(StringComparer.Ordinal);
+        foreach (StructuralInvalidation invalidation in _structuralInvalidations)
+        {
+            if (invalidation.InsideRelational)
+            {
+                continue;
+            }
+
+            if (!grouped.TryGetValue(invalidation.State, out List<StructuralInvalidation>? list))
+            {
+                grouped[invalidation.State] = list = [];
+            }
+
+            list.Add(invalidation);
+        }
+
+        Dictionary<string, StructuralInvalidation[]> result = new(StringComparer.Ordinal);
+        foreach ((string state, List<StructuralInvalidation> list) in grouped)
+        {
+            result[state] = [.. list];
+        }
+
+        return result;
+    }
+
+    private Dictionary<string, StructuralInvalidation[]>? _ownStructural;
 
     public bool HasAdjacentSiblingSelectors => AdjacentSiblingSelectors;
 
@@ -429,6 +482,7 @@ public sealed class InvalidationMap
         if (!_structuralInvalidations.Contains(invalidation))
         {
             _structuralInvalidations.Add(invalidation);
+            _ownStructural = null;
         }
     }
 }
@@ -466,8 +520,18 @@ public static class CssInvalidationBuilder
         string compound,
         InvalidationReaches reaches,
         int ruleOrder,
-        bool insideRelational)
+        bool insideRelational,
+        RelationalSelectorKey? enclosingKey = null,
+        RelationalSelectorKey? ancestorKey = null)
     {
+        // The key every element this compound matches must carry. Inside :is(), :where() or
+        // :not(), the argument's subject compound is the same element as the compound that holds
+        // the pseudo-class, so it carries that compound's key too.
+        // DEVIATION from crates/obscura-render, which keys an anchor or a structural subject by
+        // its own compound only: `.hide-empty:not(:has(> *))` left the :has() anchor unkeyed, so
+        // every insertion anywhere restyled each of its ancestors' subtrees (weather.com: the
+        // whole document for one ad slot's child).
+        RelationalSelectorKey? subjectKey = CssSelectorText.RelationalAnchorKey(compound) ?? enclosingKey;
         if (CssSelectorText.CompoundLocalName(compound) is { } localName)
         {
             map.PushLocalName(localName, ruleOrder, reaches);
@@ -583,9 +647,10 @@ public static class CssInvalidationBuilder
                             {
                                 RuleOrder = ruleOrder,
                                 State = name,
-                                SubjectKey = CssSelectorText.RelationalAnchorKey(compound),
+                                SubjectKey = subjectKey,
                                 Reaches = reaches,
                                 InsideRelational = insideRelational,
+                                AncestorKey = insideRelational ? null : ancestorKey,
                             });
                         }
 
@@ -622,7 +687,8 @@ public static class CssInvalidationBuilder
                                     alternative.Trim(),
                                     reaches,
                                     ruleOrder,
-                                    !insideRelational);
+                                    !insideRelational,
+                                    subjectKey);
                             }
 
                             break;
@@ -666,11 +732,13 @@ public static class CssInvalidationBuilder
                             map.PushRelationalInvalidation(new RelationalInvalidation
                             {
                                 RuleOrder = ruleOrder,
-                                AnchorKey = CssSelectorText.RelationalAnchorKey(compound),
+                                AnchorKey = subjectKey,
                                 RelativeKeys = relativeKeys,
                                 AnchorReaches = reaches,
                                 UnkeyedSubject = unkeyed,
                                 SiblingSideEffect = siblingSideEffect,
+                                SiblingRelative = alternatives.Any(alternative =>
+                                    CssSelectorText.SelectorContainsSiblingCombinator(alternative.Trim())),
                                 StructuralSideEffect = structuralSideEffect,
                                 TextSideEffect = textSideEffect,
                                 UnrepresentableOuterPath = reaches.Contains(InvalidationReaches.Conservative),
@@ -699,9 +767,10 @@ public static class CssInvalidationBuilder
                             {
                                 RuleOrder = ruleOrder,
                                 State = name,
-                                SubjectKey = CssSelectorText.RelationalAnchorKey(compound),
+                                SubjectKey = subjectKey,
                                 Reaches = reaches,
                                 InsideRelational = insideRelational,
+                                AncestorKey = insideRelational ? null : ancestorKey,
                             });
 
                             // Structural index changes and `of <complex-selector>`
@@ -762,7 +831,8 @@ public static class CssInvalidationBuilder
         string selector,
         InvalidationReaches outerReaches,
         int ruleOrder,
-        bool recordTreeSiblings)
+        bool recordTreeSiblings,
+        RelationalSelectorKey? subjectKey = null)
     {
         if (recordTreeSiblings)
         {
@@ -777,8 +847,9 @@ public static class CssInvalidationBuilder
             map.MarkConservative(ruleOrder);
         }
 
-        foreach (var (compound, localReaches) in compounds)
+        for (var position = 0; position < compounds.Count; position++)
         {
+            var (compound, localReaches) = compounds[position];
             if (recordTreeSiblings
                 && localReaches.Contains(InvalidationReaches.Siblings)
                 && !CssSelectorText.RelativeSelectorSubjectHasKey(compound))
@@ -792,7 +863,23 @@ public static class CssInvalidationBuilder
             }
 
             var reaches = ComposeReach(map, localReaches, outerReaches, ruleOrder);
-            NoteCompoundDependencies(map, compound, reaches, ruleOrder, !recordTreeSiblings);
+            // DEVIATION from crates/obscura-render: a structural pseudo-class in a compound that a
+            // child or descendant combinator joins to a keyed compound on its left can only match
+            // below an element with that key, so the planner need not restyle every last child in
+            // the document when `.list > :last-child` is the rule (weather.com: one iframe
+            // appended to <html> restyled <body> and everything in it).
+            RelationalSelectorKey? ancestorKey = position > 0
+                && compounds[position - 1].Reaches == InvalidationReaches.Descendants
+                    ? CssSelectorText.RelationalAnchorKey(compounds[position - 1].Compound)
+                    : null;
+            NoteCompoundDependencies(
+                map,
+                compound,
+                reaches,
+                ruleOrder,
+                !recordTreeSiblings,
+                position == compounds.Count - 1 ? subjectKey : null,
+                ancestorKey);
         }
     }
 

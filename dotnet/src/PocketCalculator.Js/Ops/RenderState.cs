@@ -272,6 +272,46 @@ public static class RenderState
             : null;
     }
 
+    /// <summary>
+    /// The prepared render a layout-independent computed-style read may consult instead of
+    /// preparing (see <see cref="PreparedRender.TryRetainedComputedStyle"/>), or null. It must
+    /// be stale only by pending mutations, or by a document timeline that moved forward
+    /// (<paramref name="sampleAdvanced"/>), which only an element without running animations on
+    /// its chain may ignore. A render that is current needs no shortcut.
+    /// </summary>
+    internal static PreparedRender? PreparedForStaticStyle(PocketCalculatorState state, out bool sampleAdvanced)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        sampleAdvanced = false;
+        if (state.PreparedRender is not { } prepared
+            || prepared.Viewport() != state.Viewport
+            || state.RenderMedia != CssMediaType.Screen)
+        {
+            return null;
+        }
+
+        var current = prepared.AnimationSample();
+        var sample = state.AnimationSample;
+        if (current != sample)
+        {
+            if (current.Mode != AnimationSampleMode.DocumentTime
+                || sample.Mode != AnimationSampleMode.DocumentTime
+                || sample.Time.Milliseconds < current.Time.Milliseconds)
+            {
+                return null;
+            }
+
+            sampleAdvanced = true;
+        }
+        else if (state.PendingStyleMutations.Count == 0)
+        {
+            return null;
+        }
+
+        var baseUrl = StateHelpers.DocumentBaseUrlMemoized(state);
+        return string.Equals(prepared.BaseUrl(), baseUrl, StringComparison.Ordinal) ? prepared : null;
+    }
+
     /// <summary>Samples the live document timeline once per host/HTML task.</summary>
     public static void SampleLiveDocumentAnimations(PocketCalculatorState state)
     {

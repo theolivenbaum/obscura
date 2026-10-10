@@ -349,4 +349,52 @@ public sealed class LayoutReadCacheTests
         Assert.NotSame(prepared, rt.State.PreparedRender);
         Assert.Empty(rt.State.PendingStyleMutations);
     }
+    /// <summary>
+    /// getComputedStyle() after mutations that cannot restyle the element answers its
+    /// layout-independent properties from the prepared render, and lays the mutations out only
+    /// for a used value. Values measured in Chromium 141 on the same page.
+    /// </summary>
+    [Fact]
+    public void ComputedStyleReadsAfterMutationsElsewhereAreAnsweredBeforeTheRestyle()
+    {
+        using var fixture = RuntimeFixture.Blank();
+        var rt = fixture.Runtime;
+        rt.SetDom(HtmlParsing.ParseHtml("""
+            <!doctype html><html><head><style>body{margin:0} #slot{position:relative;display:flex;padding:5%}</style></head>
+            <body><div id="slot"><span id="in">ad</span></div><ul id="list"><li>a</li></ul><p id="tail">tail</p></body></html>
+            """));
+        rt.SetViewport(1280, 800);
+        rt.RunPageInit();
+        rt.Evaluate("document.getElementById('tail').offsetTop");
+        var prepared = rt.State.PreparedRender;
+        Assert.NotNull(prepared);
+
+        var styles = rt.Evaluate("""
+            (() => {
+              const $ = (id) => document.getElementById(id);
+              for (let i = 0; i < 5; i++) $('list').appendChild(document.createElement('li'));
+              globalThis.cs = getComputedStyle($('slot'));
+              return [cs.display, cs.position, cs.color, getComputedStyle($('in')).display];
+            })()
+            """);
+        AssertJson("""["flex","relative","rgb(0, 0, 0)","block"]""", styles);
+        Assert.Same(prepared, rt.State.PreparedRender);
+        Assert.NotEmpty(rt.State.PendingStyleMutations);
+
+        // A used value lays the mutations out.
+        AssertJson("""["64px","1152px"]""", rt.Evaluate("[cs.paddingLeft, cs.width]"));
+        Assert.NotSame(prepared, rt.State.PreparedRender);
+        Assert.Empty(rt.State.PendingStyleMutations);
+
+        // A mutation of the element itself is restyled before it is answered.
+        var restyled = rt.Evaluate("""
+            (() => {
+              const $ = (id) => document.getElementById(id);
+              $('slot').style.display = 'block';
+              return [cs.display, getComputedStyle($('slot')).display, getComputedStyle($('in')).display, cs.width];
+            })()
+            """);
+        AssertJson("""["block","block","inline","1152px"]""", restyled);
+        AssertJson("true", rt.Evaluate("cs.length > 100 && cs.item(0) === 'display'"));
+    }
 }
